@@ -1242,6 +1242,10 @@ wxWindow* PreferencesDialog::create_general_page()
         p_ogl_manager->set_toolbar_rendering_style(idx);
     });
 
+    std::vector<wxString> thumbnail_view_angles = { _L("Isometric"), _L("Top-Front"), _L("Left"), _L("Right"), _L("Top"), _L("Bottom"), _L("Front"), _L("Rear") };
+    std::vector<std::string> thumbnail_view_angle_values = { "0", "1", "2", "3", "4", "5", "6", "7" };
+    auto item_thumbnail_view_angle = create_item_combobox(_L("Thumbnail View Angle"), page, _L("Select the camera angle for plate thumbnails"), "thumbnail_view_angle", thumbnail_view_angles, thumbnail_view_angle_values);
+
 #ifdef BBL_ENABLE_ADVANCED_GCODE_VIEWER
     auto  enable_advanced_gcode_viewer = create_item_checkbox(_L("Enable advanced gcode viewer"), page,
         _L("Enable advanced gcode viewer."), 50,
@@ -1361,6 +1365,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(enable_advanced_gcode_viewer, 0, wxTOP, FromDIP(3));
 #endif
     sizer_page->Add(item_toolbar_style, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_thumbnail_view_angle, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_grabber_size_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
