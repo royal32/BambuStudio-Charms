@@ -13202,19 +13202,30 @@ void Plater::update_all_plate_thumbnails(bool force_update)
     if (p_ogl_manager) {
         b_fxaa_enabled = p_ogl_manager->is_fxaa_enabled();
     }
+    
+    // Get configured thumbnail view angle
+    Camera::ViewAngleType view_angle = Camera::ViewAngleType::Iso;
+    auto view_angle_str = wxGetApp().app_config->get("thumbnail_view_angle");
+    if (!view_angle_str.empty()) {
+        int view_angle_int = std::stoi(view_angle_str);
+        if (view_angle_int >= 0 && view_angle_int < static_cast<int>(Camera::ViewAngleType::Count_ViewAngleType)) {
+            view_angle = static_cast<Camera::ViewAngleType>(view_angle_int);
+        }
+    }
+    
     for (int i = 0; i < get_partplate_list().get_plate_count(); i++) {
         PartPlate* plate = get_partplate_list().get_plate(i);
         ThumbnailsParams thumbnail_params = { {}, false, true, true, true, i};
         if (force_update || !plate->thumbnail_data.is_valid()) {
             thumbnail_params.background_color = Vec4f(0.0f, 0.0f, 0.0f, 0.0f);
             thumbnail_params.post_processing_enabled = b_fxaa_enabled;
-            get_view3D_canvas3D()->render_thumbnail(plate->thumbnail_data, plate->plate_thumbnail_width, plate->plate_thumbnail_height, thumbnail_params, Camera::EType::Ortho);
+            get_view3D_canvas3D()->render_thumbnail(plate->thumbnail_data, plate->plate_thumbnail_width, plate->plate_thumbnail_height, thumbnail_params, Camera::EType::Ortho, view_angle);
         }
         if (force_update || !plate->no_light_thumbnail_data.is_valid()) {
             thumbnail_params.background_color = Vec4f(0.0f, 0.0f, 0.0f, 0.0f);
             thumbnail_params.post_processing_enabled = b_fxaa_enabled;
             get_view3D_canvas3D()->render_thumbnail(plate->no_light_thumbnail_data, plate->plate_thumbnail_width, plate->plate_thumbnail_height, thumbnail_params,
-                                                    Camera::EType::Ortho, Camera::ViewAngleType::Iso, false, true);
+                                                    Camera::EType::Ortho, view_angle, false, true);
         }
     }
 }
@@ -15257,8 +15268,17 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             else {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = { {}, false, true, true, true, i };
+                // Get configured thumbnail view angle
+                Camera::ViewAngleType view_angle = Camera::ViewAngleType::Iso;
+                auto view_angle_str = wxGetApp().app_config->get("thumbnail_view_angle");
+                if (!view_angle_str.empty()) {
+                    int view_angle_int = std::stoi(view_angle_str);
+                    if (view_angle_int >= 0 && view_angle_int < static_cast<int>(Camera::ViewAngleType::Count_ViewAngleType)) {
+                        view_angle = static_cast<Camera::ViewAngleType>(view_angle_int);
+                    }
+                }
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second,
-                                    thumbnail_params, Camera::EType::Ortho);
+                                    thumbnail_params, Camera::EType::Ortho, view_angle);
             }
             thumbnails.push_back(thumbnail_data);
 
@@ -15269,8 +15289,17 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             } else {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = {{}, false, true, true, true, i};
+                // Get configured thumbnail view angle
+                Camera::ViewAngleType view_angle = Camera::ViewAngleType::Iso;
+                auto view_angle_str = wxGetApp().app_config->get("thumbnail_view_angle");
+                if (!view_angle_str.empty()) {
+                    int view_angle_int = std::stoi(view_angle_str);
+                    if (view_angle_int >= 0 && view_angle_int < static_cast<int>(Camera::ViewAngleType::Count_ViewAngleType)) {
+                        view_angle = static_cast<Camera::ViewAngleType>(view_angle_int);
+                    }
+                }
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->no_light_thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second, thumbnail_params,
-                                      Camera::EType::Ortho,  Camera::ViewAngleType::Iso, false, true);
+                                      Camera::EType::Ortho,  view_angle, false, true);
             }
             no_light_thumbnails.push_back(no_light_thumbnail_data);
             //ThumbnailData* calibration_data = &p->partplate_list.get_plate(i)->cali_thumbnail_data;
