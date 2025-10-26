@@ -93,11 +93,13 @@ Account authentication tokens are stored in **plaintext** in the `bambu_accounts
 2. **Account Compromise**: If your computer is compromised, attackers could extract tokens and access your Bambu accounts
 3. **No Encryption**: Tokens are stored as plain text without any encryption or obfuscation
 4. **Shared Computers**: This feature should be used with caution on shared or public computers
+5. **Token Expiration**: Stored tokens may expire over time, requiring re-login. The application does not currently notify users when stored tokens become invalid.
 
 **Recommendations**:
 - Only use this feature on computers you trust and control
 - Use strong passwords to protect your user account
 - Regularly change your Bambu account passwords
+- If you notice authentication errors, try logging out and back in to refresh the token
 - Monitor your account for unauthorized access
 - Consider the risks before enabling this feature on laptops that may be lost or stolen
 - Be aware that malware on your system could potentially steal these tokens
