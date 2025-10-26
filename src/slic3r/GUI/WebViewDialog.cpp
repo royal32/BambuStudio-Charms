@@ -817,6 +817,35 @@ void WebViewPanel::SendLoginInfo()
     }
 }
 
+void WebViewPanel::SendAccountList()
+{
+    AccountManager* account_mgr = wxGetApp().getAccountManager();
+    if (!account_mgr) {
+        return;
+    }
+    
+    const auto& accounts = account_mgr->get_all_accounts();
+    
+    json account_list = json::object();
+    account_list["command"] = "account_list";
+    account_list["sequence_id"] = "10002";
+    account_list["accounts"] = json::array();
+    
+    for (const auto& account : accounts) {
+        json acc_json = json::object();
+        acc_json["user_id"] = account.user_id;
+        acc_json["user_name"] = account.user_name;
+        acc_json["nickname"] = account.nickname;
+        acc_json["avatar_url"] = account.avatar_url;
+        acc_json["is_active"] = account.is_active;
+        account_list["accounts"].push_back(acc_json);
+    }
+    
+    wxString strJS = wxString::Format("window.postMessage(%s)", 
+        account_list.dump(-1, ' ', false, json::error_handler_t::ignore));
+    RunScript(strJS);
+}
+
 void WebViewPanel::ShowNetpluginTip()
 {
     // Install Network Plugin

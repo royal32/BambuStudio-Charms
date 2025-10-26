@@ -98,6 +98,7 @@ public:
 
     // Login
     void SendLoginInfo();
+    void SendAccountList();
     void ShowNetpluginTip();
 
     //MW

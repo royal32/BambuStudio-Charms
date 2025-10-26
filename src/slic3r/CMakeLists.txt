@@ -286,6 +286,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CameraPopup.hpp
     GUI/Monitor.cpp
     GUI/Monitor.hpp
+    GUI/AccountManager.cpp
+    GUI/AccountManager.hpp
     GUI/WebViewDialog.cpp
     GUI/WebViewDialog.hpp
     GUI/PrinterWebView.cpp

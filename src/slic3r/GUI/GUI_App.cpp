@@ -2684,6 +2684,11 @@ int GUI_App::OnExit()
         m_user_manager = nullptr;
     }
 
+    if (m_account_manager) {
+        delete m_account_manager;
+        m_account_manager = nullptr;
+    }
+
     if (m_agent) {
         // BBS avoid a crash on mac platform
 #ifdef __WINDOWS__
@@ -3383,6 +3388,12 @@ __retry:
         std::string data_directory = data_dir();
 
         m_agent = new Slic3r::NetworkAgent(data_directory);
+
+        // Initialize account manager
+        if (!m_account_manager) {
+            m_account_manager = new AccountManager();
+            m_account_manager->load_accounts();
+        }
 
         if (!m_device_manager)
             m_device_manager = new Slic3r::DeviceManager(m_agent);
@@ -4354,6 +4365,43 @@ void GUI_App::request_user_logout()
     }
 }
 
+void GUI_App::switch_to_account(const std::string& user_id)
+{
+    if (!m_account_manager || !m_agent) {
+        BOOST_LOG_TRIVIAL(error) << "switch_to_account: account_manager or agent not initialized";
+        return;
+    }
+    
+    BambuAccount* account = m_account_manager->get_account(user_id);
+    if (!account) {
+        BOOST_LOG_TRIVIAL(error) << "switch_to_account: account not found: " << user_id;
+        return;
+    }
+    
+    // Don't switch if already active
+    BambuAccount* active_account = m_account_manager->get_active_account();
+    if (active_account && active_account->user_id == user_id) {
+        BOOST_LOG_TRIVIAL(info) << "switch_to_account: account already active: " << user_id;
+        return;
+    }
+    
+    BOOST_LOG_TRIVIAL(info) << "switch_to_account: switching to account: " << user_id;
+    
+    // Note: The actual account switching would require NetworkAgent support
+    // For now, we'll mark the account as active in the manager
+    // and notify the UI. Full implementation would require NetworkAgent
+    // to support switching authentication tokens.
+    
+    m_account_manager->switch_account(user_id);
+    
+    // Refresh the WebView to show new account info
+    if (mainframe && mainframe->m_webview) {
+        mainframe->m_webview->SendLoginInfo();
+    }
+    
+    BOOST_LOG_TRIVIAL(info) << "switch_to_account: switched to account: " << user_id;
+}
+
 int GUI_App::request_user_unbind(std::string dev_id)
 {
     int result = -1;
@@ -4441,6 +4489,39 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 CallAfter([this] {
                     wxGetApp().request_user_logout();
                 });
+            }
+            else if (command_str.compare("get_account_list") == 0) {
+                CallAfter([this] {
+                    if (mainframe && mainframe->m_webview) {
+                        mainframe->m_webview->SendAccountList();
+                    }
+                });
+            }
+            else if (command_str.compare("switch_account") == 0) {
+                if (root.get_child_optional("data") != boost::none) {
+                    pt::ptree data_node = root.get_child("data");
+                    boost::optional<std::string> user_id = data_node.get_optional<std::string>("user_id");
+                    if (user_id.has_value()) {
+                        CallAfter([this, user_id] {
+                            wxGetApp().switch_to_account(user_id.value());
+                        });
+                    }
+                }
+            }
+            else if (command_str.compare("remove_account") == 0) {
+                if (root.get_child_optional("data") != boost::none) {
+                    pt::ptree data_node = root.get_child("data");
+                    boost::optional<std::string> user_id = data_node.get_optional<std::string>("user_id");
+                    if (user_id.has_value() && m_account_manager) {
+                        CallAfter([this, user_id] {
+                            if (m_account_manager->remove_account(user_id.value())) {
+                                if (mainframe && mainframe->m_webview) {
+                                    mainframe->m_webview->SendAccountList();
+                                }
+                            }
+                        });
+                    }
+                }
             }
             else if (command_str.compare("homepage_modeldepot") == 0) {
                 CallAfter([this] {
@@ -4965,6 +5046,19 @@ void GUI_App::on_user_login_handle(wxCommandEvent &evt)
 
     int online_login = evt.GetInt();
     m_agent->connect_server();
+    
+    // Save account info to AccountManager
+    if (m_account_manager && m_agent->is_user_login()) {
+        BambuAccount account;
+        account.user_id = m_agent->get_user_id();
+        account.user_name = m_agent->get_user_name();
+        account.nickname = m_agent->get_user_nickanme();
+        account.avatar_url = m_agent->get_user_avatar();
+        account.auth_token = m_agent->build_login_info(); // Store login info for switching
+        account.is_active = true;
+        m_account_manager->add_account(account);
+    }
+    
     // get machine list
     DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return;
