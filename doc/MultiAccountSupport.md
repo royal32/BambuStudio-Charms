@@ -2,7 +2,33 @@
 
 This feature allows users to sign into multiple Bambu accounts and easily switch between them without logging out and back in.
 
+## ⚠️ Security Notice
+
+**Important**: Account authentication tokens are currently stored in **plaintext** in the `bambu_accounts.json` file. This means:
+- Anyone with access to your computer can potentially read your authentication tokens
+- Your account tokens are not encrypted at rest
+- Protect your computer and user account with strong passwords
+- Do not share your `bambu_accounts.json` file with others
+- Be aware of this risk when using this feature on shared or public computers
+
+Future versions may include encrypted storage for enhanced security.
+
 ## User Guide
+
+### What Works in Current Version
+
+✅ **Available Now**:
+- Save multiple Bambu accounts (credentials stored locally)
+- View all saved accounts in a dropdown menu
+- Mark which account is "active" for display purposes
+- Remove accounts from the saved list
+- Account data persists across app restarts
+
+⚠️ **Current Limitations**:
+- Switching accounts updates the UI but **does not** change the active login session with Bambu's servers
+- Cloud operations (printing, presets sync, etc.) still use the originally logged-in account
+- Full account switching requires logging out and logging back in with the desired account
+- This feature is primarily useful for quickly viewing which accounts you have and managing saved credentials
 
 ### Adding Accounts
 
@@ -21,6 +47,8 @@ This feature allows users to sign into multiple Bambu accounts and easily switch
 4. The active account is marked with "✓ Active" in green
 5. Click "Switch" on any inactive account to switch to it
 6. Click anywhere else to close the dropdown
+
+**Note**: Switching accounts in the current version primarily changes which account is marked as active in the UI. For full functionality with a different account, you'll need to log out and log back in.
 
 ### Removing Accounts
 
@@ -57,10 +85,24 @@ The file contains an array of account objects with the following structure:
 
 ### Security Considerations
 
-- Account authentication tokens are stored locally in the `bambu_accounts.json` file
-- The file should be protected with appropriate file system permissions
-- Users should be aware that anyone with access to this file could potentially access their accounts
-- For enhanced security, consider encrypting the auth_token field in future versions
+**⚠️ CRITICAL SECURITY WARNING**
+
+Account authentication tokens are stored in **plaintext** in the `bambu_accounts.json` file. This presents the following risks:
+
+1. **Token Exposure**: Anyone with file system access to your user directory can read your authentication tokens
+2. **Account Compromise**: If your computer is compromised, attackers could extract tokens and access your Bambu accounts
+3. **No Encryption**: Tokens are stored as plain text without any encryption or obfuscation
+4. **Shared Computers**: This feature should be used with caution on shared or public computers
+
+**Recommendations**:
+- Only use this feature on computers you trust and control
+- Use strong passwords to protect your user account
+- Regularly change your Bambu account passwords
+- Monitor your account for unauthorized access
+- Consider the risks before enabling this feature on laptops that may be lost or stolen
+- Be aware that malware on your system could potentially steal these tokens
+
+**Future Improvements**: A future version may implement encrypted storage for authentication tokens to mitigate these risks.
 
 ### Architecture
 
@@ -88,22 +130,44 @@ The multi-account feature consists of several components:
    - Provides UI for switching and removing accounts
    - Communicates with C++ via window.postMessage
 
-### Limitations
+### Current Implementation Limitations
 
-- The current implementation marks accounts as active but full account switching requires NetworkAgent support for changing authentication tokens
-- Account switching will refresh the login info displayed on the home page
-- Some operations may still require the user to be fully logged in with the active account
+**What This Version Does**:
+- Saves multiple account credentials locally
+- Displays all saved accounts in a dropdown UI
+- Allows marking which account is "active" for UI display
+- Persists account data across application restarts
+- Provides a convenient way to manage saved account credentials
+
+**What This Version Does NOT Do**:
+- Does **not** switch the actual authenticated session with Bambu's servers
+- Does **not** change which account is used for cloud operations (printing, presets, etc.)
+- Does **not** support true "hot-swapping" between accounts without logging out/in
+
+**Technical Reason**: 
+The NetworkAgent component (which handles communication with Bambu's servers) currently supports only a single authenticated session at a time. Full account switching would require:
+1. NetworkAgent to support switching authentication tokens dynamically
+2. Proper session management for multiple concurrent or sequential logins
+3. State management for per-account data (presets, machines, etc.)
+
+**Workaround for Users**:
+To truly switch accounts, users should:
+1. Log out of the current account
+2. Log in with the desired account from the saved list
+3. The new account will be marked as active
+
+The account switcher serves as a convenient credential manager and reminder of which account is currently active, but does not replace the login/logout flow.
 
 ### Future Enhancements
 
 Potential improvements for future versions:
 
-1. **Full NetworkAgent Integration**: Implement proper authentication token switching in NetworkAgent
-2. **Encrypted Storage**: Encrypt authentication tokens for better security
+1. **Full NetworkAgent Integration**: Implement proper authentication token switching in NetworkAgent to enable true multi-account sessions
+2. **Encrypted Storage**: Encrypt authentication tokens for better security (HIGH PRIORITY)
 3. **Account Sync**: Sync account preferences across devices
 4. **Profile Pictures**: Display actual user avatars in the account switcher
-5. **Session Management**: Better handling of expired sessions
-6. **Keyboard Shortcuts**: Add hotkeys for quick account switching
+5. **Session Management**: Better handling of expired sessions and automatic re-authentication
+6. **Keyboard Shortcuts**: Add hotkeys for quick account switching (e.g., Ctrl+Shift+1/2/3)
 7. **Account Groups**: Organize accounts into work/personal groups
 
 ## Development
