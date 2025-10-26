@@ -98,6 +98,8 @@ public:
 
     // Login
     void SendLoginInfo();
+    void SendAccountList();
+    void InjectAccountSwitcherScript();
     void ShowNetpluginTip();
 
     //MW

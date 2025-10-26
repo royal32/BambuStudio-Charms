@@ -5,15 +5,18 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
 #include "libslic3r_version.h"
+#include "libslic3r/Utils.hpp"
 #include "../Utils/Http.hpp"
 
 #include <regex>
+#include <fstream>
 
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/chrono.hpp>
 #include <boost/beast/core/detail/base64.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
 
 #include <wx/sizer.h>
 #include <wx/toolbar.h>
@@ -817,6 +820,65 @@ void WebViewPanel::SendLoginInfo()
     }
 }
 
+void WebViewPanel::SendAccountList()
+{
+    AccountManager* account_mgr = wxGetApp().getAccountManager();
+    if (!account_mgr) {
+        return;
+    }
+    
+    const auto& accounts = account_mgr->get_all_accounts();
+    
+    json account_list = json::object();
+    account_list["command"] = "account_list";
+    account_list["sequence_id"] = "10002";
+    account_list["accounts"] = json::array();
+    
+    for (const auto& account : accounts) {
+        json acc_json = json::object();
+        acc_json["user_id"] = account.user_id;
+        acc_json["user_name"] = account.user_name;
+        acc_json["nickname"] = account.nickname;
+        acc_json["avatar_url"] = account.avatar_url;
+        acc_json["is_active"] = account.is_active;
+        account_list["accounts"].push_back(acc_json);
+    }
+    
+    wxString strJS = wxString::Format("window.postMessage(%s)", 
+        account_list.dump(-1, ' ', false, json::error_handler_t::ignore));
+    RunScript(strJS);
+}
+
+void WebViewPanel::InjectAccountSwitcherScript()
+{
+    // Load account switcher JavaScript file
+    boost::filesystem::path resources_dir = boost::filesystem::path(resources_dir());
+    boost::filesystem::path script_path = resources_dir / "web" / "account_switcher.js";
+    
+    if (!boost::filesystem::exists(script_path)) {
+        BOOST_LOG_TRIVIAL(warning) << "Account switcher script not found: " << script_path.string();
+        return;
+    }
+    
+    try {
+        std::ifstream script_file(script_path.string());
+        if (script_file.is_open()) {
+            std::string script_content((std::istreambuf_iterator<char>(script_file)),
+                                      std::istreambuf_iterator<char>());
+            script_file.close();
+            
+            // Execute the script
+            RunScript(wxString::FromUTF8(script_content));
+            
+            BOOST_LOG_TRIVIAL(info) << "Account switcher script injected successfully";
+        } else {
+            BOOST_LOG_TRIVIAL(error) << "Failed to open account switcher script: " << script_path.string();
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "Error injecting account switcher script: " << e.what();
+    }
+}
+
 void WebViewPanel::ShowNetpluginTip()
 {
     // Install Network Plugin
@@ -1381,6 +1443,9 @@ void WebViewPanel::OnDocumentLoaded(wxWebViewEvent& evt)
     // Only notify if the document is the main frame, not a subframe
     if (m_browser!=nullptr && evt.GetId() == m_browser->GetId()) {
         if (wxGetApp().get_mode() == comDevelop) wxLogMessage("%s", "Document loaded; url='" + evt.GetURL() + "'");
+        
+        // Inject account switcher UI script
+        InjectAccountSwitcherScript();
     }
     else if (m_browserLeft!=nullptr && evt.GetId() == m_browserLeft->GetId())
     {
