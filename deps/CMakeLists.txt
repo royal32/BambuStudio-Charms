@@ -20,8 +20,8 @@
 # therefore, unfortunatelly, the installation cannot be copied/moved elsewhere without re-installing wxWidgets.
 #
 
+cmake_minimum_required(VERSION 3.5)
 project(BambuStudio-deps)
-cmake_minimum_required(VERSION 3.2)
 
 include(ExternalProject)
 include(ProcessorCount)
@@ -134,6 +134,7 @@ function(bambustudio_add_cmake_project projectname)
             -DCMAKE_CXX_COMPILER:STRING=${CMAKE_CXX_COMPILER}
             -DCMAKE_TOOLCHAIN_FILE:STRING=${CMAKE_TOOLCHAIN_FILE}
             -DBUILD_SHARED_LIBS:BOOL=OFF
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
             ${_cmake_osx_arch}
             "${_configs_line}"
             ${DEP_CMAKE_OPTS}
