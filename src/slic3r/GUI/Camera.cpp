@@ -101,6 +101,8 @@ void Camera::select_view(const std::string& direction)
         look_at(m_target + m_distance * Vec3d::UnitZ(), m_target, Vec3d::UnitY());
     else if (direction == "bottom")
         look_at(m_target - m_distance * Vec3d::UnitZ(), m_target, -Vec3d::UnitY());
+    else if (direction == "bottomfront")
+        look_at(m_target - m_distance * Vec3d::UnitZ(), m_target, Vec3d::UnitY());
     else if (direction == "front")
         look_at(m_target - m_distance * Vec3d::UnitY(), m_target, Vec3d::UnitZ());
     else if (direction == "rear")
@@ -146,6 +148,10 @@ void Camera::select_view(ViewAngleType type)
     }
     case Slic3r::GUI::Camera::ViewAngleType::Bottom: {
         select_view("bottom");
+        break;
+    }
+    case Slic3r::GUI::Camera::ViewAngleType::Bottom_Front: {
+        select_view("bottomfront");
         break;
     }
     case Slic3r::GUI::Camera::ViewAngleType::Front: {

@@ -1242,8 +1242,8 @@ wxWindow* PreferencesDialog::create_general_page()
         p_ogl_manager->set_toolbar_rendering_style(idx);
     });
 
-    std::vector<wxString> thumbnail_view_angles = { _L("Isometric"), _L("Top-Front"), _L("Left"), _L("Right"), _L("Top"), _L("Bottom"), _L("Front"), _L("Rear") };
-    std::vector<std::string> thumbnail_view_angle_values = { "0", "1", "2", "3", "4", "5", "6", "7" };
+    std::vector<wxString> thumbnail_view_angles = { _L("Isometric"), _L("Top-Front"), _L("Left"), _L("Right"), _L("Top"), _L("Bottom"), _L("Bottom-Front"), _L("Front"), _L("Rear") };
+    std::vector<std::string> thumbnail_view_angle_values = { "0", "1", "2", "3", "4", "5", "6", "7", "8" };
     auto item_thumbnail_view_angle = create_item_combobox(_L("Thumbnail View Angle"), page, _L("Select the camera angle for plate thumbnails"), "thumbnail_view_angle", thumbnail_view_angles, thumbnail_view_angle_values);
 
 #ifdef BBL_ENABLE_ADVANCED_GCODE_VIEWER

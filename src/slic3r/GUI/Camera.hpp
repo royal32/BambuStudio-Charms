@@ -39,6 +39,7 @@ struct Camera
         Right,
         Top,
         Bottom,
+        Bottom_Front,
         Front,
         Rear,
         Count_ViewAngleType,
