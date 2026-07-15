@@ -236,26 +236,44 @@ void PrinterFileSystem::ListAllFiles()
     });
 }
 
-void PrinterFileSystem::DeleteFiles(size_t index)
+PrinterFileSystem::FileIdentity PrinterFileSystem::GetFileIdentity(size_t index)
 {
-    if (index == size_t(-1)) {
-        size_t n = 0;
-        for (size_t i = 0; i < m_file_list.size(); ++i) {
-            auto &file = m_file_list[i];
-            if ((file.flags & FF_SELECT) != 0 && (file.flags & FF_DELETED) == 0) {
-                file.flags |= FF_DELETED;
-                ++n;
-            }
+    auto const &file = GetFile(index);
+    return {m_file_type, m_file_storage, file.name, file.path};
+}
+
+void PrinterFileSystem::DeleteFile(FileIdentity const &identity)
+{
+    // A delete requested by the UI is only valid for the list from which its
+    // identity was captured. Never reinterpret a stale row index in a new list.
+    if (std::make_pair(identity.type, identity.storage) != std::make_pair(m_file_type, m_file_storage))
+        return;
+
+    auto file_index = FindFile(identity, size_t(-1));
+    if (file_index.second == size_t(-1))
+        return;
+    auto &file = file_index.first[file_index.second];
+    if (file.IsDeleting())
+        return;
+    file.flags |= FF_DELETED;
+    SendChangedEvent(EVT_FILE_CHANGED, 0);
+
+    if ((m_task_flags & FF_DELETED) == 0)
+        DeleteFilesContinue();
+}
+
+void PrinterFileSystem::DeleteSelectedFiles()
+{
+    size_t n = 0;
+    for (auto &file : m_file_list) {
+        if (file.IsSelect() && !file.IsDeleting()) {
+            file.flags |= FF_DELETED;
+            ++n;
         }
-        if (n == 0) return;
-    } else {
-        if (index >= m_file_list.size())
-            return;
-        auto &file = m_file_list[index];
-        if ((file.flags & FF_DELETED) != 0)
-            return;
-        file.flags |= FF_DELETED;
     }
+    if (n == 0)
+        return;
+    SendChangedEvent(EVT_FILE_CHANGED, 0);
     if ((m_task_flags & FF_DELETED) == 0)
         DeleteFilesContinue();
 }
@@ -762,41 +780,51 @@ void PrinterFileSystem::UpdateGroupSelect()
 
 void PrinterFileSystem::DeleteFilesContinue()
 {
-    std::vector<size_t> indexes;
-    std::vector<std::string> names;
-    std::vector<std::string> paths;
-    for (size_t i = 0; i < m_file_list.size(); ++i)
-        if ((m_file_list[i].flags & FF_DELETED) && !m_file_list[i].name.empty()) {
-            indexes.push_back(i);
-            auto &file = m_file_list[i];
-            if (file.path.empty())
-                names.push_back(file.name);
-            else
-                paths.push_back(file.path);
-            if (names.size() >= 64 || paths.size() >= 64)
-                break;
-        }
+    std::vector<std::pair<size_t, FileIdentity>> targets;
+    bool by_path = false;
+    for (size_t i = 0; i < m_file_list.size(); ++i) {
+        auto const &file = m_file_list[i];
+        if (!file.IsDeleting() || file.name.empty())
+            continue;
+
+        FileIdentity identity{m_file_type, m_file_storage, file.name, file.path};
+        if (targets.empty())
+            by_path = identity.UsesPath();
+        else if (identity.UsesPath() != by_path)
+            continue;
+
+        targets.emplace_back(i, std::move(identity));
+        if (targets.size() >= 64)
+            break;
+    }
     m_task_flags &= ~FF_DELETED;
-    if (names.empty() && paths.empty())
+    if (targets.empty())
         return;
+
     json req;
     json arr;
-    if (paths.empty()) {
-        for (auto &name : names) arr.push_back(name);
-        req["delete"] = arr;
-    } else {
-        for (auto &path : paths) arr.push_back(path);
-        req["paths"] = arr;
-    }
+    for (auto const &target : targets)
+        arr.push_back(by_path ? target.second.path : target.second.name);
+    req[by_path ? "paths" : "delete"] = arr;
+
     m_task_flags |= FF_DELETED;
-    auto type = std::make_pair(m_file_type, m_file_storage);
     SendRequest<Void>(
         FILE_DEL, req, nullptr,
-        [indexes, type, names = paths.empty() ? names : paths, bypath = !paths.empty(), this](int, Void const &) {
-            // TODO:
-            for (size_t i = indexes.size() - 1; i != size_t(-1); --i)
-                FileRemoved(type, indexes[i], names[i], bypath);
-            SendChangedEvent(EVT_FILE_CHANGED, indexes.size());
+        [targets = std::move(targets), this](int result, Void const &) {
+            if (result == SUCCESS || result == FILE_NO_EXIST) {
+                for (size_t i = targets.size(); i > 0; --i)
+                    FileRemoved(targets[i - 1].second, targets[i - 1].first);
+                SendChangedEvent(EVT_FILE_CHANGED, targets.size());
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "PrinterFileSystem::DeleteFilesContinue failed: " << result;
+                m_last_error = result;
+                for (auto const &target : targets) {
+                    auto file_index = FindFile(target.second, target.first);
+                    if (file_index.second != size_t(-1))
+                        file_index.first[file_index.second].flags &= ~FF_DELETED;
+                }
+                SendChangedEvent(EVT_FILE_CHANGED, 0, "", result);
+            }
             DeleteFilesContinue();
         });
 }
@@ -889,7 +917,8 @@ void PrinterFileSystem::DownloadNextFile()
             }
             download->progress = progress;
             if (download->index != size_t(-1)) {
-                auto file_index = FindFile(type, download->index, download->path.empty() ? download->name : download->path, !download->path.empty());
+                FileIdentity identity{type.first, type.second, download->name, download->path};
+                auto file_index = FindFile(identity, download->index);
                 download->index = file_index.second;
                 if (download->index != size_t(-1)) {
                     auto &file = file_index.first[download->index];
@@ -1135,25 +1164,30 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         });
 }
 
-std::pair<PrinterFileSystem::FileList &, size_t> PrinterFileSystem::FindFile(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path)
+std::pair<PrinterFileSystem::FileList &, size_t> PrinterFileSystem::FindFile(FileIdentity const &identity, size_t index_hint)
 {
+    auto type = std::make_pair(identity.type, identity.storage);
     FileList & file_list = type == std::make_pair(m_file_type, m_file_storage) ?
                                m_file_list :
                                m_file_list_cache[type];
-    if (index >= file_list.size() || (by_path ? file_list[index].path : file_list[index].name) != name) {
-        auto iter = std::find_if(m_file_list.begin(), file_list.end(),
-                [name, by_path](File &f) { return (by_path ? f.path : f.name) == name; });
-        if (iter == m_file_list.end()) return {file_list, -1};
-        index = std::distance(m_file_list.begin(), iter);
+    auto matches = [&identity](File const &file) {
+        return identity.UsesPath() ? file.path == identity.path : file.name == identity.name;
+    };
+    if (index_hint >= file_list.size() || !matches(file_list[index_hint])) {
+        auto iter = std::find_if(file_list.begin(), file_list.end(), matches);
+        if (iter == file_list.end())
+            return {file_list, size_t(-1)};
+        index_hint = std::distance(file_list.begin(), iter);
     }
-    return {file_list, index};
+    return {file_list, index_hint};
 }
 
-void PrinterFileSystem::FileRemoved(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path)
+void PrinterFileSystem::FileRemoved(FileIdentity const &identity, size_t index_hint)
 {
-    auto file_index = FindFile(type, index, name, by_path);
+    auto file_index = FindFile(identity, index_hint);
     if (file_index.second == size_t(-1))
         return;
+    size_t index = file_index.second;
     if (&file_index.first == &m_file_list) {
         auto removeFromGroup = [](std::vector<size_t> &group, size_t index, size_t total) {
             for (auto iter = group.begin(); iter != group.end(); ++iter) {

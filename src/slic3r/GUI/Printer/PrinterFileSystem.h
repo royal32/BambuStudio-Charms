@@ -152,6 +152,7 @@ public:
 
         bool IsSelect() const { return flags & FF_SELECT; }
         bool IsDownload() const { return flags & FF_DOWNLOAD; }
+        bool IsDeleting() const { return flags & FF_DELETED; }
         int DownloadProgress() const;
         std::string Title() const;
         std::string Metadata(std::string const &key, std::string const &dflt) const;
@@ -178,9 +179,23 @@ public:
     typedef std::vector<File> FileList;
     typedef std::vector<std::string> MediaAbilityList;
 
+    struct FileIdentity
+    {
+        FileType    type = F_INVALID_TYPE;
+        std::string storage;
+        std::string name;
+        std::string path;
+
+        bool UsesPath() const { return !path.empty(); }
+    };
+
     void ListAllFiles();
 
-    void DeleteFiles(size_t index);
+    FileIdentity GetFileIdentity(size_t index);
+
+    void DeleteFile(FileIdentity const &identity);
+
+    void DeleteSelectedFiles();
 
     void DownloadFiles(size_t index, std::string const &path);
 
@@ -274,9 +289,9 @@ private:
 
     void UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type);
 
-    void FileRemoved(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path);
+    void FileRemoved(FileIdentity const &identity, size_t index_hint);
 
-    std::pair<FileList &, size_t> FindFile(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path);
+    std::pair<FileList &, size_t> FindFile(FileIdentity const &identity, size_t index_hint);
 
     void SendChangedEvent(wxEventType type, size_t index = (size_t)-1, std::string const &str = {}, long extra = 0);
 

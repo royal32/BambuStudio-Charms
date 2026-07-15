@@ -297,7 +297,10 @@ std::pair<int, size_t> Slic3r::GUI::ImageGrid::HitTest(wxPoint const &pt)
             hover_rect.y -= m_content_rect.GetHeight() * 64 / 264;
         }
         if (hover_rect.Contains(off.x, off.y)) {
-            return {HIT_ACTION, index * 4 + off.x * btn / hover_rect.GetWidth()};
+            size_t action = off.x * btn / hover_rect.GetWidth();
+            if (action == 0 && file.IsDeleting())
+                return {HIT_NONE, size_t(-1)};
+            return {HIT_ACTION, index * 4 + action};
         } // Two buttons
     }
     return {HIT_ITEM, index};
@@ -698,6 +701,8 @@ void Slic3r::GUI::ImageGrid::renderContent1(wxDC &dc, wxPoint const &pt, int ind
                 thirdAction  = wxString::Format(L"%d%%...", progress);
             }
         }
+        if (file.IsDeleting())
+            nonHoverText = _L("Deleting...");
         if (m_file_sys->GetFileType() == PrinterFileSystem::F_MODEL) {
             if (secondAction != _L("Play"))
                 thirdAction = secondAction;
@@ -706,7 +711,8 @@ void Slic3r::GUI::ImageGrid::renderContent1(wxDC &dc, wxPoint const &pt, int ind
         // Draw buttons on hovered item
         wxRect rect{pt.x, pt.y + m_content_rect.GetBottom() - m_buttons_background.GetHeight(), m_content_rect.GetWidth(), m_buttons_background.GetHeight()};
         if (hit) {
-            renderButtons(dc, {_L("Delete"), (wxChar const *) secondAction, thirdAction.IsEmpty() ? nullptr : (wxChar const *) thirdAction, nullptr}, rect,
+            wxString firstAction = file.IsDeleting() ? _L("Deleting...") : _L("Delete");
+            renderButtons(dc, {(wxChar const *) firstAction, (wxChar const *) secondAction, thirdAction.IsEmpty() ? nullptr : (wxChar const *) thirdAction, nullptr}, rect,
                           m_hit_type == HIT_ACTION ? m_hit_item & 3 : -1, states);
         } else if (!nonHoverText.IsEmpty()) {
             renderButtons(dc, {(wxChar const *) nonHoverText, nullptr}, rect, -1, states);

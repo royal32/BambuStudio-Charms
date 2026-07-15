@@ -651,7 +651,7 @@ void MediaFilePanel::doAction(size_t index, int action)
 {
     auto fs = m_image_grid->GetFileSystem();
     if (action == 0) {
-        if (index == -1) {
+        if (index == size_t(-1)) {
             MessageDialog dlg(this,
                 wxString::Format(_L_PLURAL("You are going to delete %u file from printer. Are you sure to continue?",
                                                          "You are going to delete %u files from printer. Are you sure to continue?", fs->GetSelectCount()),
@@ -659,14 +659,19 @@ void MediaFilePanel::doAction(size_t index, int action)
                 _L("Delete files"), wxYES_NO | wxICON_WARNING);
             if (dlg.ShowModal() != wxID_YES)
                 return;
+            fs->DeleteSelectedFiles();
         } else {
+            auto const &file = fs->GetFile(index);
+            if (file.IsDeleting())
+                return;
+            auto identity = fs->GetFileIdentity(index);
             MessageDialog dlg(this,
-                wxString::Format(_L("Do you want to delete the file '%s' from printer?"), from_u8(fs->GetFile(index).name)),
+                wxString::Format(_L("Do you want to delete the file '%s' from printer?"), from_u8(identity.name)),
                 _L("Delete file"), wxYES_NO | wxICON_WARNING);
             if (dlg.ShowModal() != wxID_YES)
                 return;
+            fs->DeleteFile(identity);
         }
-        fs->DeleteFiles(index);
     } else if (action == 1) {
         if (fs->GetFileType() == PrinterFileSystem::F_MODEL) {
             if (index != -1) {
