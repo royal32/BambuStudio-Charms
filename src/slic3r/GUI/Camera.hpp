@@ -46,6 +46,7 @@ struct Camera
         Iso_1,//clockwise rotate 90 degrees on the basis of Iso
         Iso_2,//clockwise rotate 180 degrees on the basis of Iso
         Iso_3,//clockwise rotate 270 degrees on the basis of Iso
+        Bottom_180,//bottom view rotated 180 degrees in the image plane
     };
     bool requires_zoom_to_bed{ false };
     //BBS
@@ -188,4 +189,3 @@ private:
 } // Slic3r
 
 #endif // slic3r_Camera_hpp_
-

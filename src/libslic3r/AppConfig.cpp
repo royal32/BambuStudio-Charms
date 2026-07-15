@@ -185,6 +185,8 @@ void AppConfig::set_defaults()
 
     if (get("zoom_to_mouse").empty())
         set_bool("zoom_to_mouse", false);
+    if (get("thumbnail_view_angle").empty())
+        set("thumbnail_view_angle", "isometric");
     if (get("show_shells_in_preview").empty())
         set_bool("show_shells_in_preview", true);
     if (get("enable_text_styles").empty())

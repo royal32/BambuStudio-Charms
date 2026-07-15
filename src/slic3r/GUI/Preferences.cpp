@@ -1509,6 +1509,26 @@ wxWindow *PreferencesDialog::create_3d_tab()
     auto item_zoom_to_mouse = create_item_checkbox(_L("Zoom to mouse position"), scrolled,
                                                    _L("Zoom in towards the mouse pointer's position in the 3D view, rather than the 2D window center."), 50, "zoom_to_mouse");
 
+    std::vector<wxString> thumbnail_view_angle_labels = {
+        _CTX(L_CONTEXT("Isometric", "Camera"), "Camera"),
+        _CTX(L_CONTEXT("Top", "Camera"), "Camera"),
+        _CTX(L_CONTEXT("Front", "Camera"), "Camera"),
+        _CTX(L_CONTEXT("Back", "Camera"), "Camera"),
+        _CTX(L_CONTEXT("Left", "Camera"), "Camera"),
+        _CTX(L_CONTEXT("Right", "Camera"), "Camera"),
+        _L("Bottom"),
+        _L("Bottom (180°)")
+    };
+    auto item_thumbnail_view_angle = create_item_combobox(
+        _L("Plate thumbnail angle"), scrolled,
+        _L("Choose the camera angle used for sliced plate thumbnails in Studio, exported files, and printer interfaces."),
+        "thumbnail_view_angle", thumbnail_view_angle_labels,
+        {"isometric", "top", "front", "rear", "left", "right", "bottom", "bottom_180"},
+        [](int) {
+            if (wxGetApp().plater() != nullptr)
+                wxGetApp().plater()->force_update_all_plate_thumbnails();
+        });
+
     std::vector<wxString> assemble_view_preview_options = {_L("Auto"), _L("Open"), _L("Close")};
     auto                  enable_assemble_view_preview  = create_item_combobox(
         _L("Display overview"), scrolled, _L("Display overview"), "enable_assemble_view_preview", assemble_view_preview_options, {"Auto", "Open", "Close"},
@@ -1575,6 +1595,7 @@ wxWindow *PreferencesDialog::create_3d_tab()
     sizer->Add(item_tooltip_offset, flags);
     sizer->Add(item_toolbar_style, flags);
     sizer->Add(item_zoom_to_mouse, flags);
+    sizer->Add(item_thumbnail_view_angle, flags);
     sizer->Add(item_show_shells, flags);
 #if !BBL_RELEASE_TO_PUBLIC
     auto item_show_bvh_bounds = create_item_checkbox(_L("Show assembly BVH primary bounds"), scrolled, _L("Display the BVH primary bounding box wireframe in assembly view."), 50,
@@ -2004,6 +2025,7 @@ void PreferencesDialog::on_reset_preferences()
         "sync_system_preset",
         "disable_fins_extrude_safe_temp",
         "zoom_to_mouse",
+        "thumbnail_view_angle",
         "enable_assemble_view_preview",
         "grabber_size_factor",
         "3d_middle_tooltip_offset_x",

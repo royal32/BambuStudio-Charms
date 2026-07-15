@@ -1,5 +1,6 @@
 #include <catch_main.hpp>
 
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
 
 namespace {
@@ -36,6 +37,16 @@ TEST_CASE("string_printf", "[utils]") {
         std::string outs = Slic3r::string_printf("%s", input.c_str());
         REQUIRE(outs.compare(input) == 0);
     }
+}
+
+TEST_CASE("plate thumbnails default to the existing isometric view", "[AppConfig][thumbnail]")
+{
+    Slic3r::AppConfig config;
+    REQUIRE(config.get("thumbnail_view_angle") == "isometric");
+
+    config.set("thumbnail_view_angle", "bottom_180");
+    config.set_defaults();
+    REQUIRE(config.get("thumbnail_view_angle") == "bottom_180");
 }
 
 }
