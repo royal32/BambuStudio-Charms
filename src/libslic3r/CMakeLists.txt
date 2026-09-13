@@ -300,6 +300,8 @@ set(lisbslic3r_sources
     PresetBundle.hpp
     ProjectTask.cpp
     ProjectTask.hpp
+    AccountProfileStore.cpp
+    AccountProfileStore.hpp
     PrincipalComponents2D.hpp
     PrincipalComponents2D.cpp
     AppConfig.cpp

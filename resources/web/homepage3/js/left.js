@@ -5,6 +5,8 @@ var m_HasNetworkPlugin=true;
 var m_GetPrintHistoryStatus=false;
 var m_IsUserLogin=false;
 var m_ServerConnectFailed=false;
+var m_AccountProfiles=[];
+var m_ActiveProfileId='';
 
 function OnInit()
 {
@@ -13,6 +15,7 @@ function OnInit()
 
 	UpdateServerConnectFailTipVisible();
 	SendMsg_GetLoginInfo();
+	SendMsg_GetAccountProfiles();
 	GotoMenu( 'home' );
 	$("#Login2").click(function() {
 		$("#DropdownWrapper").css("visibility", "visible");
@@ -54,6 +57,14 @@ function HandleStudio( pVal )
 	{
 		m_ServerConnectFailed=(pVal['failed']*1)==1;
 		UpdateServerConnectFailTipVisible();
+	}
+	else if(strCmd=='studio_account_profiles')
+	{
+		SetAccountProfiles(pVal['data'] || {});
+	}
+	else if(strCmd=='studio_account_switching')
+	{
+		$("#AccountSwitchingOverlay").css("display", pVal['active']===false ? "none" : "flex");
 	}
 	else if( strCmd=="network_plugin_installtip" )
 	{
@@ -188,10 +199,11 @@ function SetLoginInfo( strAvatar, strName )
 	$("#UserName").text(strName);
 	$("#DropdownUserName").text(strName);
 
-  let OriginAvatar=$("#UserAvatarIcon").prop("src");
-	if(strAvatar!=OriginAvatar) {
-		$("#UserAvatarIcon").prop("src",strAvatar);
-		$("#DropdownAvatar").css("background-image", "url('"+strAvatar+"')");
+	let safeAvatar=SafeAvatarUrl(strAvatar);
+	let OriginAvatar=$("#UserAvatarIcon").prop("src");
+	if(safeAvatar!=OriginAvatar) {
+		$("#UserAvatarIcon").prop("src",safeAvatar || "img/left_home_account.svg");
+		$("#DropdownAvatar").css("background-image", safeAvatar ? "url('"+safeAvatar+"')" : "url('../img/left_home_account.svg')");
 	}else
 	{
 		//alert('Avatar is Same');
@@ -199,18 +211,93 @@ function SetLoginInfo( strAvatar, strName )
 
 	$("#Login2").show();
 	$("#Login2").css("display","flex");
+	$("#SignInFooter").hide();
+	$("#LogoutFooter").show();
 }
 
 function SetUserOffline()
 {
+	m_IsUserLogin=false;
 	$("#UserAvatarIcon").prop("src","img/left_home_account.svg");
-	$("#DropdownAvatar").css("background-image","../img/left_home_account.svg");
+	$("#DropdownAvatar").css("background-image","url('../img/left_home_account.svg')");
 	$("#UserName").text('');
 	$("#DropdownUserName").text('');
-	$("#Login2").hide();
+	UpdateAccountEntryVisibility();
+}
 
-	$("#Login1").show();
-	$("#Login1").css("display","flex");
+function SetAccountProfiles(data)
+{
+	m_AccountProfiles=Array.isArray(data['accounts']) ? data['accounts'] : [];
+	m_ActiveProfileId=data['active_id'] || '';
+	m_IsUserLogin=!!data['logged_in'];
+	$("#AccountList").toggle(m_AccountProfiles.length>0);
+	$("#AddAccountFooter").toggle(m_AccountProfiles.length>0);
+	RenderAccountProfiles();
+	UpdateAccountEntryVisibility();
+}
+
+function GetActiveAccountProfile()
+{
+	for(let i=0;i<m_AccountProfiles.length;i++) {
+		if(m_AccountProfiles[i]['id']===m_ActiveProfileId)
+			return m_AccountProfiles[i];
+	}
+	return null;
+}
+
+function SafeAvatarUrl(url)
+{
+	return (typeof url==='string' && /^https?:\/\//i.test(url) && !/['"()\\\r\n]/.test(url)) ? url : '';
+}
+
+function UpdateAccountEntryVisibility()
+{
+	let active=GetActiveAccountProfile();
+	let hasSavedAccount=active && ((active['user_name'] || '').length>0 || m_AccountProfiles.length>1);
+	if(m_IsUserLogin || hasSavedAccount) {
+		if(active) {
+			$("#UserName").text(active['name'] || active['user_name'] || 'Bambu account');
+			$("#DropdownUserName").text(active['name'] || active['user_name'] || 'Bambu account');
+			let avatar=SafeAvatarUrl(active['avatar']);
+			$("#UserAvatarIcon").prop("src", avatar || "img/left_home_account.svg");
+			$("#DropdownAvatar").css("background-image", avatar ? "url('"+avatar+"')" : "url('../img/left_home_account.svg')");
+		}
+		$("#Login1").hide();
+		$("#Login2").css("display","flex");
+	} else {
+		$("#Login2").hide();
+		$("#Login1").css("display","flex");
+	}
+	$("#SignInFooter").toggle(!m_IsUserLogin);
+	$("#LogoutFooter").toggle(m_IsUserLogin);
+}
+
+function RenderAccountProfiles()
+{
+	let list=$("#AccountList");
+	list.empty();
+	for(let i=0;i<m_AccountProfiles.length;i++) {
+		let account=m_AccountProfiles[i];
+		let row=$("<div>").addClass("AccountRow");
+		if(account['id']===m_ActiveProfileId)
+			row.addClass("AccountRowActive");
+		let avatar=$("<div>").addClass("AccountRowAvatar");
+		let avatarUrl=SafeAvatarUrl(account['avatar']);
+		if(avatarUrl)
+			avatar.css("background-image", "url('"+avatarUrl+"')");
+		let name=$("<div>").addClass("AccountRowName").text(account['name'] || account['user_name'] || 'Bambu account');
+		let check=$("<div>").addClass("AccountRowCheck").text(account['id']===m_ActiveProfileId ? "✓" : "");
+		row.append(avatar, name, check);
+		row.on('click', function(event) {
+			event.stopPropagation();
+			if(account['id']===m_ActiveProfileId) {
+				if(!m_IsUserLogin) OnLoginOrRegister();
+				return;
+			}
+			OnSwitchAccount(account['id']);
+		});
+		list.append(row);
+	}
 }
 
 function SetMallUrl( strUrl )
@@ -226,6 +313,38 @@ function SendMsg_GetLoginInfo()
 	tSend['command']="get_login_info";
 
 	SendWXMessage( JSON.stringify(tSend) );
+}
+
+function SendMsg_GetAccountProfiles()
+{
+	var tSend={};
+	tSend['sequence_id']=Math.round(new Date() / 1000);
+	tSend['command']='get_account_profiles';
+	SendWXMessage(JSON.stringify(tSend));
+}
+
+function OnSwitchAccount(profileId)
+{
+	var tSend={};
+	tSend['sequence_id']=Math.round(new Date() / 1000);
+	tSend['command']='homepage_switch_account';
+	tSend['profile_id']=profileId;
+	SendWXMessage(JSON.stringify(tSend));
+}
+
+function OnAddAccount(event)
+{
+	if(event) event.stopPropagation();
+	var tSend={};
+	tSend['sequence_id']=Math.round(new Date() / 1000);
+	tSend['command']='homepage_add_account';
+	SendWXMessage(JSON.stringify(tSend));
+}
+
+function OnLoginFromMenu(event)
+{
+	if(event) event.stopPropagation();
+	OnLoginOrRegister();
 }
 
 function OnLoginOrRegister()

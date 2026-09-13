@@ -9,6 +9,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/AccountProfileStore.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
@@ -789,6 +790,10 @@ private:
     bool            on_init_network(bool try_backup = false);
     void            init_networking_callbacks();
     void            init_app_config();
+    void            send_account_profiles();
+    void            refresh_active_account_profile();
+    void            request_account_switch(const std::string &profile_id);
+    void            request_add_account();
     void            remove_old_networking_plugins();
     //BBS set extra header for http request
     std::map<std::string, std::string> get_extra_header();
@@ -807,6 +812,9 @@ private:
 
     bool                    m_init_app_config_from_older { false };
     bool                    m_datadir_redefined { false };
+    std::unique_ptr<Slic3r::AccountProfileStore> m_account_profile_store;
+    bool                    m_account_switch_relaunch { false };
+    bool                    m_account_prompt_login { false };
     std::string             m_older_data_dir_path;
     boost::optional<Semver> m_last_config_version;
     std::string             m_open_method;

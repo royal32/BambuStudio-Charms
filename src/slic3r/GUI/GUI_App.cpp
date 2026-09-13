@@ -59,6 +59,7 @@
 
 #include <wx/dialog.h>
 #include <wx/textctrl.h>
+#include <wx/textdlg.h>
 #include <wx/splash.h>
 #include <wx/fontutil.h>
 #include <wx/glcanvas.h>
@@ -1383,6 +1384,14 @@ void GUI_App::post_init()
             mainframe->refresh_plugin_tips();
         });
 
+    if (m_account_prompt_login) {
+        m_account_prompt_login = false;
+        CallAfter([this] {
+            if (mainframe && m_agent && !m_agent->is_user_login())
+                request_login(true);
+        });
+    }
+
     // remove old log files over LOG_FILES_MAX_NUM
     std::string log_addr = data_dir();
     if (!log_addr.empty()) {
@@ -2541,34 +2550,46 @@ void GUI_App::init_app_config()
 
     if (data_dir().empty()) {
         #ifndef __linux__
-            std::string data_dir = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
+            std::string default_data_dir = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
         #else
             // Since version 2.3, config dir on Linux is in ${XDG_CONFIG_HOME}.
             // https://github.com/prusa3d/PrusaSlicer/issues/2911
             wxString dir;
             if (! wxGetEnv(wxS("XDG_CONFIG_HOME"), &dir) || dir.empty() )
                 dir = wxFileName::GetHomeDir() + wxS("/.config");
-            std::string data_dir = (dir + "/" + GetAppName()).ToUTF8().data();
+            std::string default_data_dir = (dir + "/" + GetAppName()).ToUTF8().data();
         #endif
 #if BBL_INTERNAL_TESTING
-            data_dir += BBL_INTERNAL_TESTING == 1 ? "Internal" : "Beta";
+            default_data_dir += BBL_INTERNAL_TESTING == 1 ? "Internal" : "Beta";
 #endif
+            std::string selected_data_dir = default_data_dir;
+            std::string account_error;
+            m_account_profile_store = std::make_unique<Slic3r::AccountProfileStore>(default_data_dir);
+            if (m_account_profile_store->initialize(&account_error)) {
+                selected_data_dir = m_account_profile_store
+                    ->activate_startup_profile(&m_account_prompt_login, &account_error).string();
+            } else {
+                m_account_profile_store.reset();
+            }
+            if (!account_error.empty())
+                std::fprintf(stderr, "Account profile initialization warning: %s\n", account_error.c_str());
+
             //BBS create folder if not exists
-            boost::filesystem::path data_dir_path(data_dir);
+            boost::filesystem::path data_dir_path(selected_data_dir);
             boost::filesystem::path log_dir_path = data_dir_path / "log";
             if (!boost::filesystem::exists(data_dir_path))
                 boost::filesystem::create_directories(data_dir_path);
             if (!boost::filesystem::exists(log_dir_path))
                 boost::filesystem::create_directories(log_dir_path);
-            set_data_dir(data_dir);
+            set_data_dir(selected_data_dir);
 #if defined(__WINDOWS__)
             // Change current dirtory of application
-            if (_chdir(encode_path((data_dir + "/log").c_str()).c_str()) != 0) {
-                printf("%s, warning: chdir to log folder failed: %s\n", __FUNCTION__, (data_dir + "/log").c_str());
+            if (_chdir(encode_path((selected_data_dir + "/log").c_str()).c_str()) != 0) {
+                printf("%s, warning: chdir to log folder failed: %s\n", __FUNCTION__, (selected_data_dir + "/log").c_str());
             }
 #else
-            if (chdir(encode_path((data_dir + "/log").c_str()).c_str()) != 0) {
-                printf("%s, warning: chdir to log folder failed: %s\n", __FUNCTION__, (data_dir + "/log").c_str());
+            if (chdir(encode_path((selected_data_dir + "/log").c_str()).c_str()) != 0) {
+                printf("%s, warning: chdir to log folder failed: %s\n", __FUNCTION__, (selected_data_dir + "/log").c_str());
             }
 #endif
     } else {
@@ -2878,6 +2899,9 @@ int GUI_App::OnExit()
     // Flush any config changes that were deferred by the idle-handler debounce.
     if (app_config && app_config->dirty())
         app_config->save();
+
+    if (m_account_switch_relaunch)
+        start_new_slicer();
 
     return wxApp::OnExit();
 }
@@ -4631,6 +4655,8 @@ void GUI_App::get_login_info()
             GUI::wxGetApp().run_script_left(strJS);
         }
     }
+    refresh_active_account_profile();
+    send_account_profiles();
     sync_left_server_connect_status();
 }
 
@@ -4651,6 +4677,116 @@ bool GUI_App::is_user_login()
         return m_agent->is_user_login();
     }
     return false;
+}
+
+void GUI_App::refresh_active_account_profile()
+{
+    if (!m_account_profile_store || !m_agent)
+        return;
+
+    std::string error;
+    if (m_agent->is_user_login()) {
+        m_account_profile_store->update_active_identity(
+            m_agent->get_user_id(), m_agent->get_user_name(), m_agent->get_user_avatar(), true, &error);
+    } else {
+        m_account_profile_store->mark_active_signed_out(&error);
+    }
+    if (!error.empty())
+        BOOST_LOG_TRIVIAL(warning) << "Account profile update failed: " << error;
+}
+
+void GUI_App::send_account_profiles()
+{
+    if (!m_account_profile_store)
+        return;
+
+    json message;
+    message["command"] = "studio_account_profiles";
+    message["data"]["accounts"] = json::array();
+    const AccountProfile *active = m_account_profile_store->active_profile();
+    message["data"]["active_id"] = active ? active->id : "";
+    message["data"]["logged_in"] = m_agent && m_agent->is_user_login();
+    for (const AccountProfile &profile : m_account_profile_store->profiles()) {
+        message["data"]["accounts"].push_back({
+            {"id", profile.id},
+            {"name", profile.display_name},
+            {"user_name", profile.user_name},
+            {"avatar", profile.avatar_url},
+            {"active", active && active->id == profile.id},
+            {"last_known_logged_in", profile.last_known_logged_in}
+        });
+    }
+
+    wxString script = wxString::Format("window.postMessage(%s)",
+        message.dump(-1, ' ', false, json::error_handler_t::replace));
+    run_script_left(script);
+}
+
+void GUI_App::request_account_switch(const std::string &profile_id)
+{
+    if (!m_account_profile_store || profile_id.empty())
+        return;
+
+    const AccountProfile *active = m_account_profile_store->active_profile();
+    if (active && active->id == profile_id) {
+        if (!is_user_login())
+            request_login(true);
+        return;
+    }
+
+    std::string error;
+    // Existing profiles may briefly report offline while their persisted
+    // session is restored. Only the immediate Add Account flow requests an
+    // automatic login; regular switches expose Home's Sign in action if needed.
+    if (!m_account_profile_store->request_switch(profile_id, false, &error)) {
+        MessageDialog dlg(mainframe, from_u8(error), _L("Account switch failed"), wxOK | wxICON_ERROR);
+        dlg.ShowModal();
+        return;
+    }
+
+    json message = {{"command", "studio_account_switching"}, {"active", true}};
+    run_script_left(wxString::Format("window.postMessage(%s)", message.dump()));
+    m_account_switch_relaunch = true;
+    if (!mainframe || !mainframe->Close(false)) {
+        m_account_switch_relaunch = false;
+        m_account_profile_store->cancel_pending_switch(&error);
+        message["active"] = false;
+        run_script_left(wxString::Format("window.postMessage(%s)", message.dump()));
+        send_account_profiles();
+    }
+}
+
+void GUI_App::request_add_account()
+{
+    if (!m_account_profile_store)
+        return;
+
+    const wxString suggested = wxString::Format(_L("Account %d"),
+        static_cast<int>(m_account_profile_store->profiles().size() + 1));
+    wxTextEntryDialog dialog(mainframe, _L("Enter a name for this Bambu account."),
+                             _L("Add Bambu account"), suggested);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+
+    std::string error;
+    auto profile_id = m_account_profile_store->add_profile(
+        into_u8(dialog.GetValue()), boost::filesystem::path(data_dir()), &error);
+    if (!profile_id || !m_account_profile_store->request_switch(*profile_id, true, &error)) {
+        MessageDialog dlg(mainframe, from_u8(error), _L("Unable to add account"), wxOK | wxICON_ERROR);
+        dlg.ShowModal();
+        return;
+    }
+
+    json message = {{"command", "studio_account_switching"}, {"active", true}};
+    run_script_left(wxString::Format("window.postMessage(%s)", message.dump()));
+    m_account_switch_relaunch = true;
+    if (!mainframe || !mainframe->Close(false)) {
+        m_account_switch_relaunch = false;
+        m_account_profile_store->cancel_pending_switch(&error);
+        message["active"] = false;
+        run_script_left(wxString::Format("window.postMessage(%s)", message.dump()));
+        send_account_profiles();
+    }
 }
 
 
@@ -4724,6 +4860,13 @@ void GUI_App::request_user_logout()
         if (!m_disable_fila_manager && mainframe && mainframe->web_device()) {
             mainframe->web_device()->NotifyFilamentSessionState();
         }
+        if (m_account_profile_store) {
+            std::string error;
+            m_account_profile_store->mark_active_signed_out(&error);
+            if (!error.empty())
+                BOOST_LOG_TRIVIAL(warning) << "Account profile logout update failed: " << error;
+        }
+        send_account_profiles();
     }
 }
 
@@ -4814,6 +4957,20 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 CallAfter([this] {
                     wxGetApp().request_user_logout();
                 });
+            }
+            else if (command_str.compare("get_account_profiles") == 0) {
+                CallAfter([this] {
+                    refresh_active_account_profile();
+                    send_account_profiles();
+                });
+            }
+            else if (command_str.compare("homepage_switch_account") == 0) {
+                boost::optional<std::string> profile_id = root.get_optional<std::string>("profile_id");
+                if (profile_id)
+                    CallAfter([this, id = *profile_id] { request_account_switch(id); });
+            }
+            else if (command_str.compare("homepage_add_account") == 0) {
+                CallAfter([this] { request_add_account(); });
             }
             else if (command_str.compare("homepage_modeldepot") == 0) {
                 CallAfter([this] {
@@ -5419,6 +5576,8 @@ void GUI_App::on_user_login(wxCommandEvent &evt)
 {
     if (!m_agent) { return; }
     int online_login = evt.GetInt();
+    refresh_active_account_profile();
+    send_account_profiles();
     // check privacy before handle
     check_privacy_version(online_login);
     check_track_enable();

@@ -393,6 +393,86 @@ body
 	transition: background 0.2s;
 }
 
+.AccountList {
+	max-height: 190px;
+	overflow-y: auto;
+	border-top: 1px solid rgba(128, 128, 128, 0.18);
+	border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+}
+
+.AccountRow {
+	display: flex;
+	align-items: center;
+	padding: 8px 10px;
+	cursor: pointer;
+	transition: background 0.15s;
+}
+
+.AccountRow:hover, .AccountRowActive {
+	background: rgba(0, 174, 66, 0.10);
+}
+
+.AccountRowAvatar {
+	width: 26px;
+	height: 26px;
+	min-width: 26px;
+	margin-right: 9px;
+	border-radius: 50%;
+	background: url('../img/left_home_account.svg') center/cover no-repeat;
+}
+
+.AccountRowName {
+	min-width: 0;
+	flex: 1;
+	font-size: 12px;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.AccountRowCheck {
+	width: 16px;
+	color: #00AE42;
+	font-weight: bold;
+	text-align: right;
+}
+
+.AddAccountIcon {
+	width: 15px;
+	margin-right: 8px;
+	font-size: 18px;
+	line-height: 15px;
+	text-align: center;
+}
+
+.SignInIcon {
+	width: 15px;
+	height: 15px;
+	margin-right: 8px;
+	border: 2px solid #00AE42;
+	border-radius: 50%;
+	box-sizing: border-box;
+}
+
+#AccountSwitchingOverlay {
+	display: none;
+	position: fixed;
+	inset: 0;
+	z-index: 1000;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.28);
+}
+
+.AccountSwitchingCard {
+	padding: 12px 16px;
+	border-radius: 8px;
+	background: white;
+	color: #333;
+	font-size: 13px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
 .LogoutIcon {
 	width: 15px;
 	height: 15px;
@@ -431,4 +511,3 @@ body
 {
 	background-color: rgba(238, 238, 238, 1);
 }
-

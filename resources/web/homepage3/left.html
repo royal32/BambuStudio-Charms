@@ -43,7 +43,16 @@
 							<div class="UserEmail TextS2" id="DropdownUserEmail"></div>
 						</div>
 					</div>
-					<div class="DropdownFooter">
+					<div id="AccountList" class="AccountList" style="display: none;"></div>
+					<div class="DropdownFooter" id="AddAccountFooter" style="display: none;" onClick="OnAddAccount(event)">
+						<div class="AddAccountIcon">+</div>
+						<div class="LogoutBtn TextS2">Add account</div>
+					</div>
+					<div class="DropdownFooter" id="SignInFooter" style="display: none;" onClick="OnLoginFromMenu(event)">
+						<div class="SignInIcon"></div>
+						<div class="LogoutBtn TextS2">Sign in</div>
+					</div>
+					<div class="DropdownFooter" id="LogoutFooter">
 						<div class="LogoutIcon"></div>
 						<div class="LogoutBtn TextS2 trans" tid="t50" onClick="OnLogOut()">log out</div>
 					</div>
@@ -102,6 +111,10 @@
 			</div>
 		</div>
 	</div>
+</div>
+
+<div id="AccountSwitchingOverlay">
+	<div class="AccountSwitchingCard">Switching account…</div>
 </div>
 
 <div id="HideBtn" onClick="ChangeLeftWidth()"></div>
