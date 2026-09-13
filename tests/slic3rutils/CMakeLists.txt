@@ -7,6 +7,11 @@ add_executable(${_TEST_NAME}_tests
     helio_recent_runs_tests.cpp
     )
 
+if (SLIC3R_GUI)
+    find_package(wxWidgets 3.1 REQUIRED COMPONENTS core base)
+    include(${wxWidgets_USE_FILE})
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
+endif ()
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
