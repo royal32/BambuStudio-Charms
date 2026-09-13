@@ -73,6 +73,8 @@ set(lisbslic3r_sources
     CurveAnalyzer.hpp
     CutUtils.cpp
     CutUtils.hpp
+    PaintReproject.cpp
+    PaintReproject.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -363,6 +365,8 @@ set(lisbslic3r_sources
     TriangleMesh.hpp
     MeshDiagnostics.hpp
     MeshDiagnostics.cpp
+    MeshRaycast.hpp
+    MeshRaycast.cpp
     TriangleMeshDeal.cpp
     TriangleMeshDeal.hpp
     TriangleMeshSlicer.cpp
@@ -523,10 +527,22 @@ cmake_policy(PUSH)
 cmake_policy(SET CMP0011 NEW)
 find_package(CGAL REQUIRED)
 if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND NOT DEFINED OpenCV_RUNTIME)
-    # OpenCV 4.6.0 doesn't recognize MSVC 19.5x (VS2026/v144). Our deps patch builds
-    # and installs OpenCV under the vc17 runtime layout (ABI-compatible), so select it
-    # explicitly here to match what find_package looks for.
-    set(OpenCV_RUNTIME vc17)
+    # OpenCV 4.6.0 doesn't recognize MSVC 19.5x (VS2026). Pick the installed runtime
+    # layout under CMAKE_PREFIX_PATH; vc16/vc17 static libs are ABI-compatible.
+    foreach(_opencv_runtime vc17 vc16)
+        foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
+            if(EXISTS "${_prefix}/x64/${_opencv_runtime}/staticlib/OpenCVConfig.cmake")
+                set(OpenCV_RUNTIME ${_opencv_runtime})
+                break()
+            endif()
+        endforeach()
+        if(DEFINED OpenCV_RUNTIME)
+            break()
+        endif()
+    endforeach()
+    if(NOT DEFINED OpenCV_RUNTIME)
+        set(OpenCV_RUNTIME vc17)
+    endif()
 endif()
 find_package(OpenCV REQUIRED core)
 find_package(assimp REQUIRED)
@@ -538,7 +554,7 @@ add_library(libslic3r_cgal STATIC
     MeshBoolean.hpp MeshBoolean.cpp
     TryCatchSignal.hpp TryCatchSignal.cpp
     Triangulation.hpp Triangulation.cpp)
-target_include_directories(libslic3r_cgal PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(libslic3r_cgal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
 # Reset compile options of libslic3r_cgal. Despite it being linked privately, CGAL options
 # (-frounding-math) still propagate to dependent libs which is not desired.
@@ -564,6 +580,51 @@ if (CMAKE_COMPILER_IS_GNUCC AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 14.1)
 endif()
 
 target_link_libraries(libslic3r_cgal PRIVATE ${_cgal_tgt} libigl mcut)
+if(SLIC3R_HAS_OPENMESHCRAFT_BOOLEAN)
+    # GMP/MPFR usually come with CGAL/DEP, but may not be visible to find_library
+    # in non-standard layouts. Missing deps used to fall back to MCUT silently;
+    # that is only allowed with SLIC3R_ALLOW_MCUT_BOOLEAN.
+    if(NOT GMP_LIBRARIES)
+        if(GMP_LIBRARY_RELEASE)
+            set(GMP_LIBRARIES ${GMP_LIBRARY_RELEASE})
+        else()
+            find_library(GMP_LIBRARIES NAMES libgmp-10 gmp)
+        endif()
+    endif()
+    if(NOT MPFR_LIBRARIES)
+        if(MPFR_LIBRARY_RELEASE)
+            set(MPFR_LIBRARIES ${MPFR_LIBRARY_RELEASE})
+        else()
+            find_library(MPFR_LIBRARIES NAMES libmpfr-4 mpfr)
+        endif()
+    endif()
+    if(GMP_LIBRARIES AND MPFR_LIBRARIES)
+        # MeshBoolean.cpp is compiled in libslic3r_cgal, not libslic3r.
+        target_compile_definitions(libslic3r PUBLIC SLIC3R_ENABLE_OPENMESHCRAFT_BOOLEAN=1)
+        target_compile_definitions(libslic3r_cgal PRIVATE SLIC3R_ENABLE_OPENMESHCRAFT_BOOLEAN=1)
+        target_sources(libslic3r_cgal PRIVATE MeshBooleanOpenMeshCraft.cpp)
+        target_link_libraries(libslic3r_cgal PRIVATE
+            OpenMeshCraftBoolean
+            ${GMP_LIBRARIES}
+            ${MPFR_LIBRARIES}
+        )
+    elseif(SLIC3R_ALLOW_MCUT_BOOLEAN)
+        set(SLIC3R_HAS_OPENMESHCRAFT_BOOLEAN FALSE CACHE INTERNAL "" FORCE)
+        message(STATUS "OpenMeshCraft boolean disabled: GMP/MPFR not found; using MCUT.")
+    else()
+        message(FATAL_ERROR
+            "OpenMeshCraft boolean is enabled but GMP/MPFR were not found. "
+            "Refusing silent MCUT fallback. Fix GMP/MPFR in the dep prefix.")
+    endif()
+elseif(SLIC3R_ENABLE_OPENMESHCRAFT_BOOLEAN)
+    if(SLIC3R_ALLOW_MCUT_BOOLEAN)
+        message(STATUS "OpenMeshCraft was not packaged; using MCUT (SLIC3R_ALLOW_MCUT_BOOLEAN=ON).")
+    else()
+        message(FATAL_ERROR
+            "OpenMeshCraft was not packaged. "
+            "Refusing an MCUT-only build. Install the prefix package or pass -DSLIC3R_ALLOW_MCUT_BOOLEAN=ON.")
+    endif()
+endif()
 
 if (MSVC AND "${CMAKE_SIZEOF_VOID_P}" STREQUAL "4") # 32 bit MSVC workaround
     target_compile_definitions(libslic3r_cgal PRIVATE CGAL_DO_NOT_USE_MPZF)
@@ -575,8 +636,18 @@ target_compile_definitions(libslic3r PUBLIC -DUSE_TBB -DTBB_USE_CAPTURED_EXCEPTI
 target_include_directories(libslic3r PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/TextureToColor PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(libslic3r PUBLIC ${EXPAT_INCLUDE_DIRS})
 
-# Find the OCCT and related libraries
-set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
+# Find the OCCT and related libraries.
+# CMAKE_PREFIX_PATH may be a list (e.g. after sibling dep probes); do not
+# concatenate "/lib/cmake/occt" onto the whole list string.
+if(NOT OpenCASCADE_DIR)
+    foreach(_occt_prefix IN LISTS CMAKE_PREFIX_PATH)
+        if(EXISTS "${_occt_prefix}/lib/cmake/occt")
+            set(OpenCASCADE_DIR "${_occt_prefix}/lib/cmake/occt")
+            break()
+        endif()
+    endforeach()
+    unset(_occt_prefix)
+endif()
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r PUBLIC ${OpenCASCADE_INCLUDE_DIR})
 
@@ -639,7 +710,8 @@ target_link_libraries(libslic3r
     )
 
 if(NOT WIN32)
-    target_link_libraries(libslic3r freetype)
+    find_package(Freetype REQUIRED)
+    target_link_libraries(libslic3r Freetype::Freetype)
     if (NOT APPLE)
         target_link_libraries(libslic3r fontconfig)
     endif()

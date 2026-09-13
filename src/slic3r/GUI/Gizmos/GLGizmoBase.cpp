@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI_Colors.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 
@@ -813,8 +814,10 @@ bool GLGizmoBase::is_activable() const
 
 bool GLGizmoBase::can_activable_in_current_canvas() const
 {
+    if (!m_parent.is_allow_use_gizmo_in_different_view())
+        return false;
     const auto &mng = m_parent.get_gizmos_manager();
-    const auto selectable = mng.get_selectable_idxs();
+    const auto selectable = mng.get_selectable_idxs(true);
     return std::find(selectable.begin(), selectable.end(), (size_t) get_sprite_id()) != selectable.end();
 }
 

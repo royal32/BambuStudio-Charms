@@ -364,39 +364,46 @@ namespace Slic3r
             for (const auto& local_access_info : local_access_infos) {
                 if (GUI::wxGetApp().is_closing()) return;
 
+                // bind_detect is a hint, not a gate. It used to skip the device whenever the probe
+                // was not conclusive, so a sleeping printer or a transient network hiccup was
+                // enough to make a remembered LAN printer disappear from the list. Keep its data
+                // when it answers, otherwise log and connect with the persisted local info.
                 detectResult detectData;
-                auto result = agent->bind_detect(local_access_info.dev_ip, "secure", detectData);
+                const int    result        = agent->bind_detect(local_access_info.dev_ip, "secure", detectData);
+                const char*  reject_reason = nullptr;
                 if (result < 0) {
-                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": bind_detect failed code=" << result
-                                             << ", dev_id=" << BBLCrossTalk::Crosstalk_DevId(local_access_info.dev_id);
-                    continue;
-                }
-
-                if (detectData.dev_id.empty()) {
-                    detectData.dev_id = local_access_info.dev_id;
-                }
-                if (detectData.dev_name.empty()) {
-                    detectData.dev_name = local_access_info.dev_id;
-                }
-                if (detectData.dev_id != local_access_info.dev_id) {
-                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": detected dev_id mismatch, config dev_id="
-                                             << BBLCrossTalk::Crosstalk_DevId(local_access_info.dev_id)
-                                             << ", detected dev_id=" << BBLCrossTalk::Crosstalk_DevId(detectData.dev_id);
-                    continue;
-                }
-
-                if (detectData.connect_type != "farm") {
-                    if (detectData.bind_state == "occupied") {
-                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": the device is already occupied, dev_id="
-                                                 << BBLCrossTalk::Crosstalk_DevId(local_access_info.dev_id);
-                        continue;
+                    reject_reason = "bind_detect failed";
+                } else {
+                    if (detectData.dev_id.empty()) {
+                        detectData.dev_id = local_access_info.dev_id;
+                    }
+                    if (detectData.dev_name.empty()) {
+                        detectData.dev_name = local_access_info.dev_id;
                     }
 
-                    if (detectData.connect_type == "cloud") {
-                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": the device is cloud, dev_id="
-                                                 << BBLCrossTalk::Crosstalk_DevId(local_access_info.dev_id);
-                        continue;
+                    if (detectData.dev_id != local_access_info.dev_id) {
+                        reject_reason = "detected dev_id mismatch";
+                    } else if (detectData.connect_type != "farm") {
+                        if (detectData.bind_state == "occupied") {
+                            reject_reason = "the device is already occupied";
+                        } else if (detectData.connect_type == "cloud") {
+                            reject_reason = "the device is cloud";
+                        }
                     }
+                }
+
+                if (reject_reason) {
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << reject_reason << ", code=" << result
+                                               << ", falling back to the persisted local info, dev_id="
+                                               << BBLCrossTalk::Crosstalk_DevId(local_access_info.dev_id)
+                                               << ", detected dev_id=" << BBLCrossTalk::Crosstalk_DevId(detectData.dev_id);
+
+                    detectData              = detectResult();
+                    detectData.dev_id       = local_access_info.dev_id;
+                    detectData.dev_name     = local_access_info.dev_id;
+                    detectData.connect_type = "lan";
+                    detectData.bind_state   = "free";
+                    detectData.model_id     = DevPrinterConfigUtil::get_model_id_by_dev_id(local_access_info.dev_id);
                 }
 
                 GUI::wxGetApp().CallAfter([detectData, local_access_info]() {
@@ -761,7 +768,7 @@ namespace Slic3r
         }
     }
 
-    void DeviceManager::parse_user_print_info(std::string body)
+    bool DeviceManager::parse_user_print_info(std::string body)
     {
         if (device_subseries.size() <= 0) {
             device_subseries = DevPrinterConfigUtil::get_all_subseries();
@@ -865,21 +872,34 @@ namespace Slic3r
         catch (std::exception& e)
         {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " exception=" << e.what();
+            return false;
         }
+
+        return true;
     }
 
-    void DeviceManager::update_user_machine_list_info()
+    void DeviceManager::update_user_machine_list_info(std::function<void(bool)> on_completed)
     {
-        if (!m_agent) return;
+        if (!m_agent) {
+            if (on_completed) {
+                Slic3r::GUI::wxGetApp().CallAfter([on_completed]() { on_completed(false); });
+            }
+            return;
+        }
 
         BOOST_LOG_TRIVIAL(debug) << "update_user_machine_list_info";
         unsigned int http_code;
         std::string body;
         int result = m_agent->get_user_print_info(&http_code, &body);
         if (result == 0) {
-            Slic3r::GUI::wxGetApp().CallAfter([this, body]() {
-                parse_user_print_info(body);
+            Slic3r::GUI::wxGetApp().CallAfter([this, body, on_completed]() {
+                const bool parsed = parse_user_print_info(body);
+                if (on_completed) {
+                    on_completed(parsed);
+                }
             });
+        } else if (on_completed) {
+            Slic3r::GUI::wxGetApp().CallAfter([on_completed]() { on_completed(false); });
         }
     }
 
@@ -906,16 +926,14 @@ namespace Slic3r
 
     void DeviceManager::load_last_machine()
     {
-        if (userMachineList.empty()) return;
-        else if (userMachineList.size() == 1) {
-            this->set_selected_machine(userMachineList.begin()->second->get_dev_id());
+        const auto my_machine_list = get_my_machine_list();
+        if (my_machine_list.empty()) return;
+
+        const auto& last_monitor_machine = get_user_last_machine();
+        if (my_machine_list.find(last_monitor_machine) != my_machine_list.end()) {
+            set_selected_machine(last_monitor_machine);
         } else {
-            const auto& last_monitor_machine = get_user_last_machine();
-            if (userMachineList.find(last_monitor_machine) != userMachineList.end()) {
-                set_selected_machine(last_monitor_machine);
-            } else {
-                this->set_selected_machine(userMachineList.begin()->second->get_dev_id());
-            }
+            set_selected_machine(my_machine_list.begin()->second->get_dev_id());
         }
     }
 

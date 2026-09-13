@@ -15,6 +15,7 @@
 #include "format.hpp"
 //BBS: add partplate related logic
 #include "PartPlate.hpp"
+#include "ColorDecomposeSupport.hpp"
 
 #include "Gizmos/GLGizmoSVG.hpp"
 #include "Gizmos/GLGizmoAlignment.hpp"
@@ -105,7 +106,7 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
                     {"bottom_shell_layers", "",1}, {"bottom_shell_thickness", "",1}, {"sparse_infill_density", "",1},
                     {"sparse_infill_pattern", "",1},{"sparse_infill_anchor", "",1},{"sparse_infill_anchor_max", "",1}, {"sparse_infill_lattice_angle_1", "",1},{"sparse_infill_lattice_angle_2", "",1},
                     {"top_surface_pattern", "",1},{"top_surface_density", "",1},{"monotonic_travel_into_wall", "",1},
-                    {"bottom_surface_pattern", "",1}, {"bottom_surface_density", "",1}, {"internal_solid_infill_pattern", "",1},
+                    {"bottom_surface_pattern", "",1}, {"bottom_surface_density", "",1}, {"internal_solid_infill_pattern", "",1}, {"sub_top_surface_pattern", "",1},
                     {"infill_combination", "",1}, {"infill_wall_overlap", "",1}, {"infill_direction", "",1}, {"bridge_angle", "",1},{"minimum_sparse_infill_area", "",1}
                     }},
     { L("Speed"), {{"outer_wall_speed", "",1},{"inner_wall_speed", "",2},{"sparse_infill_speed", "",3},{"top_surface_speed", "",4}, {"internal_solid_infill_speed", "",5},
@@ -597,9 +598,9 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
         sub_menu->AppendSeparator();
     }
 
-    std::vector<std::string> icons = {"Cube", "Cylinder", "Sphere", "Cone", "double_tear_romboid_cylinder", "Disc", "Torus", "rounded_rectangle"};
+    std::vector<std::string> icons = {"Cube", "Cylinder", "hexagonal_prism", "Sphere", "Cone", "double_tear_romboid_cylinder", "Disc", "Torus", "rounded_rectangle", "TearDrop"};
     size_t i = 0;
-    for (auto &item : {L("Cube"), L("Cylinder"), L("Sphere"), L("Cone"), L("Double Tear Romboid Cylinder"), L("Disc"), L("Torus"), L("Rounded Rectangle")})
+    for (auto &item : {L("Cube"), L("Cylinder"), L("Hexagonal Prism"), L("Sphere"), L("Cone"), L("Double Tear Romboid Cylinder"), L("Disc"), L("Torus"), L("Rounded Rectangle"), L("TearDrop")})
     {
         append_menu_item(sub_menu, wxID_ANY, _(item), "",
             [type, item](wxCommandEvent&) { obj_list()->load_generic_subobject(item, type); }, Slic3r::resources_dir() + "/model/" + icons[i++] + ".png", menu);
@@ -1404,6 +1405,7 @@ void MenuFactory::create_part_menu()
     wxMenu* menu = &m_part_menu;
     append_menu_item_rename(menu);
     append_menu_item_delete(menu);
+    append_menu_item_clone(menu);
     append_menu_item_reload_from_disk(menu);
     append_menu_item_export_stl(menu);
     append_menu_item_fix_through_netfabb(menu);
@@ -1461,6 +1463,7 @@ void MenuFactory::create_bbl_part_menu()
 {
     wxMenu* menu = &m_part_menu;
 
+    append_menu_item_clone(menu);
     append_menu_item_delete(menu);
     append_menu_item_edit_text(menu);
     append_menu_item_fix_through_netfabb(menu);
@@ -1507,38 +1510,42 @@ void MenuFactory::create_cut_cutter_menu()
     append_menu_item_change_type(menu);
 }
 
-void MenuFactory::create_filament_action_menu(bool init, int active_filament_menu_id)
+void MenuFactory::create_filament_action_menu(wxMenu* menu, int active_filament_menu_id)
 {
-    wxMenu *menu = &m_filament_action_menu;
+    m_filament_menu_active_id = active_filament_menu_id;
 
-    if (init) {
-        append_menu_item(
-            menu, wxID_ANY, _L("Edit"), "", [](wxCommandEvent&) {
-                plater()->sidebar().edit_filament(); }, "", nullptr,
-            []() { return true; }, m_parent);
-    }
+    auto can_decompose = [this]() {
+        if (!plater())
+            return false;
+        if (plater()->sidebar().combos_filament().size() < 2)
+            return false;
+        return decompose_color_block_reason(m_filament_menu_active_id) == DecomposeColorBlockReason::None;
+    };
 
-    if (init) {
-        append_menu_item(
-            menu, wxID_ANY, _L("Delete"), _L("Delete this filament"), [](wxCommandEvent&) {
-                plater()->sidebar().delete_filament(kSidebarContextMenuFilamentId); }, "", nullptr,
-            []() { return plater()->sidebar().combos_filament().size() > 1; }, m_parent);
-    }
+    append_menu_item(
+        menu, wxID_ANY, _L("Edit"), "", [](wxCommandEvent&) {
+            if (plater())
+                plater()->sidebar().edit_filament();
+        }, "", nullptr, []() { return true; }, nullptr);
 
-    if (init) {
-        append_menu_item(
-            menu, wxID_ANY, _L("Decompose Color"), "", [](wxCommandEvent&) {
-                plater()->sidebar().decompose_filament_color(kSidebarContextMenuFilamentId); }, "", nullptr,
-            []() { return plater()->sidebar().combos_filament().size() >= 2; }, m_parent);
-    }
+    auto* delete_item = append_menu_item(
+        menu, wxID_ANY, _L("Delete"), _L("Delete this filament"), [](wxCommandEvent&) {
+            if (plater())
+                plater()->sidebar().delete_filament(kSidebarContextMenuFilamentId);
+        }, "", nullptr, []() { return true; }, nullptr);
+    delete_item->Enable(plater() && plater()->sidebar().combos_filament().size() > 1);
 
-    const int item_id = menu->FindItem(_L("Merge with"));
-    if (item_id != wxNOT_FOUND)
-        menu->Destroy(item_id);
+    const auto reason = decompose_color_block_reason(active_filament_menu_id);
+    auto* decompose_item = append_menu_item(
+        menu, wxID_ANY, decompose_color_menu_label(reason), "", [](wxCommandEvent&) {
+            if (plater())
+                plater()->sidebar().decompose_filament_color(kSidebarContextMenuFilamentId);
+        }, "", nullptr, []() { return true; }, nullptr);
+    decompose_item->Enable(can_decompose());
 
     wxMenu* sub_menu = new wxMenu();
     std::vector<wxBitmap*> icons = get_extruder_color_icons(true);
-    int filaments_cnt = icons.size();
+    int filaments_cnt = static_cast<int>(icons.size());
     for (int i = 0; i < filaments_cnt; i++) {
         if (i == active_filament_menu_id)
             continue;
@@ -1547,11 +1554,14 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
         wxString item_name = preset ? from_u8(preset->label(false)) : wxString::Format(_L("Filament %d"), i + 1);
 
         append_menu_item(sub_menu, wxID_ANY, item_name, "",
-            [i](wxCommandEvent&) { plater()->sidebar().change_filament(kSidebarContextMenuFilamentId, i); }, *icons[i], menu,
-            []() { return true; }, m_parent);
+            [i](wxCommandEvent&) {
+                if (plater())
+                    plater()->sidebar().change_filament(kSidebarContextMenuFilamentId, i);
+            }, *icons[i], menu, []() { return true; }, nullptr);
     }
-    append_submenu(menu, sub_menu, wxID_ANY, _L("Merge with"), "", "",
-        [filaments_cnt]() { return filaments_cnt > 1; }, m_parent);
+    auto* merge_item = append_submenu(menu, sub_menu, wxID_ANY, _L("Merge with"), "", "",
+        []() { return true; }, nullptr);
+    merge_item->Enable(filaments_cnt > 1);
 }
 
 //BBS: add part plate related logic
@@ -1692,8 +1702,6 @@ void MenuFactory::init(wxWindow* parent)
     create_cut_cutter_menu();
     //BBS: add part plate related logic
     create_plate_menu();
-
-    create_filament_action_menu(true, -1);
 
     // create "Instance to Object" menu item
     append_menu_item_instance_to_object(&m_instance_menu);
@@ -1903,8 +1911,12 @@ wxMenu* MenuFactory::assemble_multi_selection_menu()
 }
 
 wxMenu *MenuFactory::filament_action_menu(int active_filament_menu_id) {
-    create_filament_action_menu(false, active_filament_menu_id);
-    return &m_filament_action_menu;
+    // Recreate the whole popup each time so Windows does not keep the previous HMENU width
+    // after a long disabled "Decompose Color (...)" label. Keep the unique_ptr until the next
+    // popup so the menu is not destroyed while PopupMenu is running.
+    m_filament_popup_menu = std::make_unique<wxMenu>();
+    create_filament_action_menu(m_filament_popup_menu.get(), active_filament_menu_id);
+    return m_filament_popup_menu.get();
 }
 
 
@@ -1946,10 +1958,10 @@ wxMenu* MenuFactory::assemble_object_menu()
 wxMenu* MenuFactory::assemble_part_menu()
 {
     wxMenu* menu = new MenuWithSeparators();
-
+    append_menu_items_assembly_steps(menu);
     //append_menu_item_delete(menu);
     //append_menu_item_simplify(menu);
-    //menu->AppendSeparator();
+    menu->AppendSeparator();
 
     append_menu_item_change_extruder(menu);
     //append_menu_item_per_object_settings(menu);

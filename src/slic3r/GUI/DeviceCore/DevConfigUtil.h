@@ -60,6 +60,11 @@ public:
     // info
     static std::map<std::string, std::string> get_all_model_id_with_name();
     static std::string get_printer_type(const std::string& type_str) { return get_value_from_config<std::string>(type_str, "printer_type"); }
+    // Resolve the printer identity from the SN prefix (the leading 3 chars of dev_id). The mapping
+    // comes from the sn_prefix field in printers/*.json, so it works without network or a reachable
+    // device. Returns an empty string when the prefix is unknown.
+    static std::string get_model_id_by_dev_id(const std::string& dev_id);
+    static std::string get_printer_type_by_dev_id(const std::string& dev_id);
     static std::string get_printer_display_name(const std::string& type_str) { return get_value_from_config<std::string>(type_str, "display_name"); }
     static std::string get_printer_series_str(std::string type_str) { return get_value_from_config<std::string>(type_str, "printer_series"); }
     static PrinterArch get_printer_arch(std::string type_str);
@@ -77,6 +82,7 @@ public:
 
     /*ams*/
     static std::string get_printer_use_ams_type(std::string type_str) { return get_value_from_config<std::string>(type_str, "use_ams_type"); }
+    static std::vector<std::string> get_supported_ams_names(const std::string& type_str) { return get_value_from_config<std::vector<std::string>>(type_str, "print", "support_ams_list"); }
     static std::string get_printer_ams_img(const std::string& type_str) { return get_value_from_config<std::string>(type_str, "printer_use_ams_image"); }
     static std::string get_printer_ext_img(const std::string& type_str, int pos);//printer_ext_image
     static bool        support_ams_fila_change_abort(std::string type_str) { return get_value_from_config<bool>(type_str, "print", "support_ams_filament_change_abort"); }

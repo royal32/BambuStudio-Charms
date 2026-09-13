@@ -451,6 +451,14 @@ wxBitmap create_scaled_bitmap(  const std::string& bmp_name_in,
                                 const vector<std::string>& array_new_color/* = vector<std::string>*/)//used for semi transparent material)
 {
     static Slic3r::GUI::BitmapCache cache;
+
+    /* An empty name means the caller failed to resolve the icon (eg. missing printer config).
+       Do not throw in this case, a missing icon must not take down the whole process */
+    if (bmp_name_in.empty() || bmp_name_in == ".png") {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": empty bitmap name";
+        return wxNullBitmap;
+    }
+
     if (bitmap2) {
         return create_scaled_bitmap2(bmp_name_in, cache, win, px_cnt, grayscale, resize, array_new_color);
     }
@@ -727,48 +735,33 @@ wxBitmap *get_extruder_color_icon(std::string color, std::string label, int icon
 
     wxBitmap *bitmap = bmp_cache.find(bitmap_key);
     if (bitmap == nullptr) {
-        // Paint the color icon.
-        // Slic3r::GUI::BitmapCache::parse_color(color, rgb);
-        // there is no neede to scale created solid bitmap
-        wxColor clr(color);
-        bitmap = bmp_cache.insert(bitmap_key, wxBitmap(icon_width, icon_height));
-#ifdef __WXOSX__
-        bitmap->UseAlpha();
-        wxMemoryDC dc(*bitmap);
-#elif defined(__WXMSW__)
-        wxClientDC cdc((wxWindow *) Slic3r::GUI::wxGetApp().mainframe);
-        wxMemoryDC dc(&cdc);
-        dc.SelectObject(*bitmap);
+        wxColour clr(color);
+        wxBitmap base_bitmap = Slic3r::GUI::create_filament_bitmap({clr}, wxSize(icon_width, icon_height), false);
+        if (!base_bitmap.IsOk())
+            return nullptr;
+
+        if (!label.empty()) {
+#ifndef __WXMSW__
+            wxMemoryDC dc(base_bitmap);
 #else
-        wxMemoryDC dc;
-        dc.SelectObject(*bitmap);
+            wxClientDC cdc((wxWindow *) Slic3r::GUI::wxGetApp().mainframe);
+            wxMemoryDC dc(&cdc);
+            dc.SelectObject(base_bitmap);
 #endif
-        dc.SetFont(::Label::Body_12);
-        Slic3r::GUI::WxFontUtils::get_suitable_font_size(icon_height - 2, dc);
-        if (clr.Alpha() == 0) {
-            int             size        = icon_height * 2;
-            static wxBitmap transparent = *Slic3r::GUI::BitmapCache().load_svg("transparent", size, size);
-            if (transparent.GetHeight() != size) transparent = *Slic3r::GUI::BitmapCache().load_svg("transparent", size, size);
-            wxPoint pt(0, 0);
-            while (pt.x < icon_width) {
-                dc.DrawBitmap(transparent, pt);
-                pt.x += size;
-            }
-            clr.SetRGB(0xffffff); // for text color
-            dc.SetBrush(*wxTRANSPARENT_BRUSH);
-        } else {
-            dc.SetBackground(wxBrush(clr));
-            dc.Clear();
-            dc.SetBrush(wxBrush(clr));
+            dc.SetFont(::Label::Body_12);
+            Slic3r::GUI::WxFontUtils::get_suitable_font_size(icon_height - 2, dc);
+            dc.SetBackgroundMode(wxTRANSPARENT);
+
+            auto size   = dc.GetTextExtent(wxString(label));
+            if (clr.Alpha() == 0)
+                dc.SetTextForeground(*wxBLACK);
+            else
+                dc.SetTextForeground(clr.GetLuminance() < 0.51 ? *wxWHITE : *wxBLACK);
+            dc.DrawText(label, (icon_width - size.x) / 2, (icon_height - size.y) / 2);
+            dc.SelectObject(wxNullBitmap);
         }
-        if (clr.Red() > 224 && clr.Blue() > 224 && clr.Green() > 224) {
-            dc.SetPen(*wxGREY_PEN);
-            dc.DrawRectangle(0, 0, icon_width, icon_height);
-        }
-        auto size = dc.GetTextExtent(wxString(label));
-        dc.SetTextForeground(clr.GetLuminance() < 0.51 ? *wxWHITE : *wxBLACK);
-        dc.DrawText(label, (icon_width - size.x) / 2, (icon_height - size.y) / 2);
-        dc.SelectObject(wxNullBitmap);
+
+        bitmap = bmp_cache.insert(bitmap_key, base_bitmap);
     }
     return bitmap;
 }

@@ -1161,7 +1161,7 @@ TEST_CASE("Test for bed center distance optimization", "[Nesting], [NestKernels]
     
     NfpPlacer::Config pconfig;
     
-    pconfig.object_function = [](const Item &item) -> double {
+    pconfig.object_function = [](const Item &item, const _ItemGroup<PolygonImpl> &) -> double {
         return pl::magnsq<PointImpl, double>(item.boundingBox().center());
     };
     
@@ -1205,7 +1205,7 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
         pile_box = sl::boundingBox(pile);
     };
 
-    pconfig.object_function = [&pile_box](const Item &item) -> double {
+    pconfig.object_function = [&pile_box](const Item &item, const _ItemGroup<PolygonImpl> &) -> double {
         Box b = sl::boundingBox(item.boundingBox(), pile_box);
         double area = b.area<double>() / (double(W) * W);
         return -area;

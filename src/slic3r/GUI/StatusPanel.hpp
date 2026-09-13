@@ -21,6 +21,7 @@
 #include "PrintOptionsDialog.hpp"
 #include "SafetyOptionsDialog.hpp"
 #include "AMSMaterialsSetting.hpp"
+#include "AMSRFIDMaterialView.hpp"
 #include "ExtrusionCalibration.hpp"
 #include "ReleaseNote.hpp"
 #include "Widgets/SwitchButton.hpp"
@@ -36,6 +37,7 @@
 #include "HMS.hpp"
 #include "PartSkipDialog.hpp"
 #include "DeviceErrorDialog.hpp"
+#include "fila_manager/wgtFilaManagerStore.h"
 
 class StepIndicator;
 
@@ -44,6 +46,7 @@ class StepIndicator;
 namespace Slic3r {
 
 class DevExtderSystem;
+struct BBLFinishTime;
 
 namespace GUI {
 
@@ -308,6 +311,7 @@ private:
     Label*          m_staticText_finish_time;
     RectTextPanel*  m_staticText_finish_day;
     wxStaticText*   m_staticText_layers;
+    wxStaticText*   m_staticTextPauses;
     wxStaticText *  m_has_rated_prompt;
     wxStaticText *  m_request_failed_info;
     wxStaticBitmap* m_bitmap_thumbnail;
@@ -345,8 +349,8 @@ private:
 public:
     void init_bitmaps();
     void init_scaled_buttons();
-    void error_info_reset();
-    void show_error_msg(wxString msg);
+    bool error_info_reset();
+    void show_error_msg(const wxString &msg);
     void reset_printing_value();
     void msw_rescale();
 
@@ -364,10 +368,11 @@ public:
     // Public interface to update remaining time text in the thermal dialog
     void update_progress_percent(wxString percent, wxString icon);
     void update_left_time(wxString time);
-    void update_finish_time(wxString finish_time);
-    void update_left_time(int mc_left_time);
+    void update_left_time(int mc_left_time, bool is_printing_finished);
     void show_layers_num(bool show) { m_staticText_layers->Show(show); }
     void update_layers_num(bool show, wxString num = wxEmptyString);
+    void updatePauseNum(bool show, wxString num = wxEmptyString);
+    void updatePauseMarkers(const DevPrintPauseList *pauseList, int printRemainingTime = 0);
     void show_priting_use_info(bool show, wxString time = wxEmptyString, wxString weight = wxEmptyString);
     void show_profile_info(bool show, wxString profile = wxEmptyString);
     void set_thumbnail_img(const wxBitmap& bmp, const std::string& bmp_name);
@@ -397,6 +402,9 @@ public:
     void                           set_has_reted_text(bool has_rated);
 
 private:
+    void update_finish_state(int mc_left_time, bool is_printing_finished, const BBLFinishTime &estimated_finish_time);
+    void update_finish_time_display(const wxString &text, const wxString &day_text = wxEmptyString);
+    void refreshErrorContents();
     void paint(wxPaintEvent&);
 };
 
@@ -659,8 +667,12 @@ protected:
     PrintOptionsDialog*  print_options_dlg { nullptr };
     SafetyOptionsDialog* safety_options_dlg { nullptr };
     CalibrationDialog*   calibration_dlg {nullptr};
+    std::string          m_task_lock_setup_handled_dev_id;
+    std::string          m_task_lock_verify_handled_dev_id;
     AMSMaterialsSetting *m_filament_setting_dlg{nullptr};
+    AMSRFIDMaterialView *m_rfid_view_dlg{nullptr};
     AMSNewOfficialFilamentDlg *m_new_official_filament_dlg{nullptr};
+    SoftMatchPendingResponse   m_soft_match_pending;
 
     DeviceErrorDialog* m_print_error_dlg = nullptr;
     SecondaryCheckDialog* abort_dlg = nullptr;
@@ -719,6 +731,7 @@ protected:
     void on_subtask_abort(wxCommandEvent &event);
     void on_print_error_clean(wxCommandEvent &event);
     void error_info_reset();
+    void refreshProjectTaskLayout();
     void show_recenter_dialog();
 
     /* axis control */
@@ -753,7 +766,16 @@ protected:
     void on_ams_setting_click(SimpleEvent& event);
     void on_filament_edit(wxCommandEvent &event);
     void on_new_official_filament_hint(wxCommandEvent &event);
+    void show_new_official_filament_dlg(const std::string& dev_id, const std::string& ams_id, const std::string& slot_id);
+    void dismiss_filament_hint_ui(const std::string& dev_id, const std::string& ams_id, const std::string& slot_id);
     void on_ext_spool_edit(wxCommandEvent &event);
+    void open_rfid_view(int ams_id, int slot_id,
+                        const std::string& setting_id, int ctype,
+                        const wxString& filament, const wxColour& color,
+                        const std::vector<wxColour>& cols,
+                        const std::string& temp_min, const std::string& temp_max,
+                        const std::string& sn_number, const wxString& k_val,
+                        wxPoint pos);
     void on_filament_extrusion_cali(wxCommandEvent &event);
     void on_ams_refresh_rfid(wxCommandEvent &event);
     void on_ams_selected(wxCommandEvent &event);
@@ -788,7 +810,6 @@ protected:
     void update(MachineObject* obj);
 
     void show_printing_status(bool ctrl_area = true, bool temp_area = true);
-    void update_left_time(int mc_left_time);
     void update_basic_print_data(bool def = false);
     void update_model_info();
     void update_subtask(MachineObject* obj);
@@ -826,6 +847,7 @@ protected:
 
 public:
     void update_error_message();
+    void show_ams_filament_hint(const std::string& ams_id, const std::string& slot_id);
 
 public:
     StatusPanel(wxWindow *      parent,

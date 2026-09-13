@@ -54,6 +54,7 @@ class SLAPrint;
 class PartPlateList;
 class SlicingStatusEvent;
 class HelioCompletionEvent;
+class HelioActionEvent;
 enum SLAPrintObjectStep : unsigned int;
 enum class ConversionType : int;
 class DevAms;
@@ -111,7 +112,7 @@ wxDECLARE_EVENT(EVT_REPAIR_MODEL,        wxCommandEvent);
 wxDECLARE_EVENT(EVT_FILAMENT_COLOR_CHANGED,        wxCommandEvent);
 wxDECLARE_EVENT(EVT_INSTALL_PLUGIN_NETWORKING,        wxCommandEvent);
 wxDECLARE_EVENT(EVT_INSTALL_PLUGIN_HINT,        wxCommandEvent);
-wxDECLARE_EVENT(EVT_UPDATE_PLUGINS_WHEN_LAUNCH,        wxCommandEvent);
+// EVT_UPDATE_PLUGINS_WHEN_LAUNCH: declared in NotificationManager.hpp (used by basic_notifications).
 wxDECLARE_EVENT(EVT_PREVIEW_ONLY_MODE_HINT,        wxCommandEvent);
 wxDECLARE_EVENT(EVT_GLCANVAS_COLOR_MODE_CHANGED,   SimpleEvent);
 wxDECLARE_EVENT(EVT_ENABLE_GCODE_OPTION_ITEM_CHANGED, SimpleEvent);
@@ -128,7 +129,7 @@ wxDECLARE_EVENT(EVT_SWITCH_TO_PREPARE_TAB, wxCommandEvent);
 
 // helio
 wxDECLARE_EVENT(EVT_HELIO_PROCESSING_COMPLETED, HelioCompletionEvent);
-wxDECLARE_EVENT(EVT_HELIO_PROCESSING_STARTED, SimpleEvent);
+wxDECLARE_EVENT(EVT_HELIO_PROCESSING_STARTED, HelioActionEvent);
 wxDECLARE_EVENT(EVT_HELIO_INPUT_DLG, SimpleEvent);
 // end helio
 wxDECLARE_EVENT(EVT_GCODE_VIEWER_CHANGED, SimpleEvent);
@@ -196,6 +197,7 @@ public:
     void change_filament(size_t from_id, size_t to_id);  // 0 base
     void edit_filament();
     void add_custom_filament(wxColour new_col, const std::string& preset_name = std::string(), bool skip_preset_validation = false);
+    void scroll_filament_area_to_bottom();
     bool is_new_project_in_gcode3mf();
     // BBS
     void on_bed_type_change(BedType bed_type);
@@ -420,6 +422,7 @@ public:
     std::map<std::string, std::string> get_bed_texture_maps();
     int                                get_right_icon_offset_bed(int i = 0);
     bool                               get_enable_wrapping_detection();
+    void                               on_show_bed_heat_soak_area_changed();
 
     static wxColour get_next_color_for_filament();
     static wxString get_slice_warning_string(GCodeProcessorResult::SliceWarning& warning);
@@ -484,7 +487,7 @@ public:
     void reset(bool apply_presets_change = false);
     void reset_with_confirm();
     //BBS: return int for various result
-    int close_with_confirm(std::function<bool(bool yes_or_no)> second_check = nullptr); // BBS close project
+    int close_with_confirm(std::function<bool(bool yes_or_no)> second_check = nullptr, bool allow_cancel = true); // BBS close project
     //BBS: trigger a restore project event
     void trigger_restore_project(int skip_confirm = 0);
     bool delete_object_from_model(size_t obj_idx, bool refresh_immediately = true); // BBS support refresh immediately
@@ -670,6 +673,15 @@ public:
     int get_publish_finished_event();
 
     void set_current_canvas_as_dirty();
+    // Thin canvas facades — prefer these over including GLCanvas3D.hpp in leaf .cpp files.
+    void schedule_extra_frame(int miliseconds = 0);
+    void highlight_toolbar_item(const std::string &item_name);
+    void highlight_gizmo(const std::string &gizmo_name);
+    // Same semantics as canvas3D()->deselect_all() (current canvas), unlike deselect_all() which always hits View3D.
+    void deselect_current_canvas();
+    wxWindow *get_assemble_wxglcanvas();
+    bool is_allow_x_ray_in_assembly();
+    bool get_orient_min_area();
     void unbind_canvas_event_handlers();
     void reset_canvas_volumes();
 
@@ -706,6 +718,9 @@ public:
     // While set, prepare-side object removals are treated as internal restructuring (split / merge) and
     // are NOT propagated as deletes to the independent assembly model (m_assemble_model).
     void set_suppress_assemble_delete_propagation(bool suppress);
+    // Seed each model-part volume's assemble transform from its current transform (once),
+    // and ensure a stable part GUID. Used when cloning / loading / preparing assembly views.
+    void ensure_model_object_volume_assemble_initialized(ModelObject *object);
     // Prepare-side per-volume delete: drop the assembly volume referencing this part (call before the
     // prepare ModelVolume is destroyed) so the independent assembly model stays consistent immediately,
     // and the persisted assembly_model.json does not keep referencing a part that no longer exists.
@@ -781,6 +796,9 @@ public:
     const Camera& get_camera() const;
     Camera& get_camera();
     void mark_assemble_view_requires_zoom_to_volumes();
+    // True while the assembly view owns Undo/Redo, i.e. snapshots go to the assembly stack
+    // instead of the prepare one.
+    bool is_assemble_undo_stack_active() const;
     const Camera& get_picking_camera() const;
     Camera& get_picking_camera();
 
@@ -873,6 +891,8 @@ public:
                        const std::string   &custom_texture,
                        const std::string   &custom_model,
                        bool                 force_as_custom = false) const;
+    // Generic seam: plate layout / bed state changed
+    void on_plate_layout_changed();
 
 	const NotificationManager* get_notification_manager() const;
 	NotificationManager* get_notification_manager();
@@ -997,6 +1017,8 @@ public:
     wxMenu* instance_menu();
     wxMenu* layer_menu();
     wxMenu* multi_selection_menu();
+    wxMenu* assemble_object_menu();
+    wxMenu* assemble_part_menu();
     wxMenu* assemble_multi_selection_menu();
     wxMenu* filament_action_menu(int active_filament_menu_id);
     int     GetPlateIndexByRightMenuInLeftUI();
@@ -1055,6 +1077,7 @@ private:
     void _calib_pa_select_added_objects();
 
     void on_filament_map_mode_change();
+    void update_bed_heat_soak_notification();
     friend class SuppressBackgroundProcessingUpdate;
 };
 

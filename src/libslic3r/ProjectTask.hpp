@@ -48,11 +48,14 @@ struct FilamentInfo
     float       used_g{0.f};
     int         tray_id{0}; // start with 0
     float       distance{0.f};
+    int         remain{-1};    // filament remain on the mapped tray: 0~100, -1 = unknown / not reported by the printer
     int         ctype = 0;
     std::vector<std::string> colors = std::vector<std::string>();
     int         mapping_result = 0;
     bool        used_for_support{false};
     bool        used_for_object{false};
+    double      total_load_time{0.0};
+    double      total_unload_time{0.0};
 
     /*for multi nozzle*/
     std::vector<int> group_id;

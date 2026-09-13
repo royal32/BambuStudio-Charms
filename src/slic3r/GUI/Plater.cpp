@@ -1,15 +1,20 @@
 #include "Plater.hpp"
+#include "PerfTrace.hpp"
 #include <array>
+#include <boost/format/format_fwd.hpp>
 #include <cstddef>
 #include <cstdio>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <map>
 #include <numeric>
 #include <vector>
 #include <string>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <sstream>
 #include <regex>
 #include <optional>
@@ -72,6 +77,8 @@
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/Geometry/ConvexHull.hpp"
+#include "WipeTowerPlacement.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/FilamentMixer.hpp"
@@ -150,6 +157,7 @@
 #include "ParamsDialog.hpp"
 #include "ImageDPIFrame.hpp"
 #include "FilamentBitmapUtils.hpp"
+#include "EncodedFilament.hpp"
 #include "Widgets/Label.hpp"
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/RadioBox.hpp"
@@ -181,6 +189,8 @@
 #include "PlateMoveDialog.hpp"
 #include "DailyTips.hpp"
 #include "CreatePresetsDialog.hpp"
+#include "CreateFilamentWebDialog.hpp"
+#include "EditFilamentWebDialog.hpp"
 #include "StepMeshDialog.hpp"
 #include "PurgeModeDialog.hpp"
 #include "FilamentMapDialog.hpp"
@@ -239,6 +249,9 @@ static bool has_importable_texture(const Slic3r::TexturedMesh& textured_mesh)
     if (textured_mesh.vertices.empty() || textured_mesh.indices.empty())
         return false;
 
+    if (!textured_mesh.precomputed_face_colors.empty())
+        return true;
+
     return std::any_of(textured_mesh.textures.begin(), textured_mesh.textures.end(),
         [](const Slic3r::TextureImage& texture) { return !texture.data.empty(); });
 }
@@ -286,7 +299,7 @@ wxDEFINE_EVENT(EVT_SWITCH_TO_PREPARE_TAB, wxCommandEvent);
 
 // helio
 wxDEFINE_EVENT(EVT_HELIO_PROCESSING_COMPLETED, HelioCompletionEvent);
-wxDEFINE_EVENT(EVT_HELIO_PROCESSING_STARTED, SimpleEvent);
+wxDEFINE_EVENT(EVT_HELIO_PROCESSING_STARTED, HelioActionEvent);
 wxDEFINE_EVENT(EVT_HELIO_INPUT_DLG, SimpleEvent);
 // end helio
 
@@ -313,6 +326,43 @@ static void set_config_values(DynamicPrintConfig *config, const std::string &key
     else {
         BOOST_LOG_TRIVIAL(info) << "set_config_values: the key" << key << "is empty.";
     }
+}
+
+// Decide whether a loaded 3mf config really belongs to a Bambu Lab machine
+static bool is_bbl_vendor_config(const DynamicPrintConfig &config_loaded, PresetBundle *preset_bundle)
+{
+    if (!preset_bundle) return false;
+    auto *printer_model_opt = config_loaded.option<ConfigOptionString>("printer_model");
+    if (!printer_model_opt || printer_model_opt->value.empty()) return false;
+
+    for (const auto &vendor : preset_bundle->vendors) {
+        for (const auto &vendor_model : vendor.second.models) {
+            if (vendor_model.name == printer_model_opt->value) return vendor.first == "BBL";
+        }
+    }
+    return false;
+}
+
+// Check whether a 3mf's per-extruder options match the nozzle_diameter count.
+// Must run on the raw loaded config, before defaults backfill would mask absent options.
+// Returns true when consistent, false on the first size mismatch.
+static bool check_project_config(const DynamicPrintConfig &config_loaded)
+{
+    if(config_loaded.empty()) return true;
+
+    auto *nd = config_loaded.option<ConfigOptionFloatsNullable>("nozzle_diameter");
+    if (!nd) return true;
+
+    const size_t extruder_count = nd->size();
+    if (extruder_count <= 1) return true;
+
+    const auto  *opt = dynamic_cast<const ConfigOptionVectorBase *>(config_loaded.option("extruder_type"));
+    const size_t sz  = opt ? opt->size() : 0;
+    if (sz != extruder_count) {
+        BOOST_LOG_TRIVIAL(warning) << "config invalid, extruder_type size expected " << extruder_count << " got " << sz;
+        return false;
+    }
+    return true;
 }
 
 // When saving layer-slider ticks to the model, re-append entries whose print_z is above the current
@@ -379,7 +429,7 @@ static std::map<BedType, std::string> bed_type_thumbnails = {
     {BedType::btPC, "bed_cool"},
     {BedType::btEP, "bed_engineering"},
     {BedType::btPEI, "bed_high_templ"},
-    {BedType::btPTE, "bed_pei"},
+    {BedType::btPTE, "bed_texture"},
     {BedType::btSuperTack, "bed_cool_supertack"}
 };
 
@@ -725,8 +775,8 @@ struct Sidebar::priv
     int m_menu_filament_id = -1;
     wxPanel*          m_panel_filament_subtitle{nullptr};  // "Filament" subtitle row with +/-/AMS/set buttons
     wxPanel*          m_filament_area_wrapper{nullptr};   // Wrapper panel for collapse/expand
-    wxScrolledWindow* m_physical_scroll_area{nullptr};    // Scroll area for physical filaments (max 3 rows when total > 12)
-    wxScrolledWindow* m_mixed_scroll_area{nullptr};       // Scroll area for mixed filaments (max 3 rows when total > 12)
+    wxScrolledWindow* m_physical_scroll_area{nullptr};    // Scroll area for physical filaments (max 6 rows, scrolls when exceeded)
+    wxScrolledWindow* m_mixed_scroll_area{nullptr};       // Scroll area for mixed filaments (max 6 rows, scrolls when exceeded)
     wxPanel*          m_panel_filament_content{nullptr};
     wxStaticLine* m_staticline2;
     wxPanel* m_panel_project_title;
@@ -1257,7 +1307,7 @@ static std::map<int, std::vector<DevNozzle>> deserialize_nozzle_config(const std
             boost::split(values, part, boost::is_any_of(","));
             if (values.size() == 2) {
                 DevNozzle nozzle;
-                nozzle.m_diameter = std::stof(values[0]);
+                nozzle.m_diameter = string_to_double_decimal_point(values[0]);
                 nozzle.m_nozzle_flow = static_cast<NozzleFlowType>(std::stoi(values[1]));
                 nozzles.push_back(nozzle);
             }
@@ -1871,6 +1921,8 @@ void ExtruderGroup::sync_ams(MachineObject const *obj, std::vector<DevAms *> con
 
 bool Sidebar::priv::switch_diameter(bool single)
 {
+    PERF_TRACE("switch diameter");
+
     wxString diameter;
     if (single) {
         diameter = single_extruder->combo_diameter->GetValue();
@@ -1997,9 +2049,12 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
     nozzle_diameters.resize(extruder_nums);
     std::vector<NozzleVolumeType>target_types(extruder_nums, NozzleVolumeType::nvtStandard);
 
+    // Two extruder id spaces are in play here: "index" is the logical id (0 = left, 1 = right),
+    // which is what nozzle_diameters/target_types and every downstream preset consumer are keyed by,
+    // while physical id is used as a device query argument.
     for (size_t index = 0; index < extruder_nums; ++index) {
-        int extruder_id = extruder_map[index]; //physical extruder id
-        nozzle_diameters[extruder_id] = nozzle_option ? atof(nozzle_option->diameter.c_str()) : obj->GetExtderSystem()->GetNozzleDiameter(index);
+        int physical_extruder_id = extruder_map[index]; // physical extruder id
+        nozzle_diameters[index]  = nozzle_option ? string_to_double_decimal_point(nozzle_option->diameter) : obj->GetExtderSystem()->GetNozzleDiameter(physical_extruder_id);
         std::optional<NozzleVolumeType> select_type;
         NozzleVolumeType target_type = NozzleVolumeType::nvtStandard;
         if (nozzle_option && nozzle_option->extruder_nozzle_stats.count(index)) {
@@ -2010,15 +2065,15 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
         }
 
         if (obj->is_nozzle_flow_type_supported()) {
-            if (obj->GetExtderSystem()->GetNozzleFlowType(index) == NozzleFlowType::NONE_FLOWTYPE) {
+            if (obj->GetExtderSystem()->GetNozzleFlowType(physical_extruder_id) == NozzleFlowType::NONE_FLOWTYPE) {
                 MessageDialog dlg(this->plater, _L("There are unset nozzle types. Please set the nozzle types of all extruders before synchronizing."),
                                   _L("Sync extruder information"), wxICON_WARNING | wxOK);
                 dlg.ShowModal();
                 continue;
             }
             // hack code, only use standard flow for 0.2
-            if (std::fabs(nozzle_diameters[extruder_id] - 0.2) > EPSILON && !is_skip_high_flow_printer(printer_model))
-                target_type = DevNozzle::ToNozzleVolumeType(obj->GetExtderSystem()->GetNozzleFlowType(extruder_id));
+            if (std::fabs(nozzle_diameters[index] - 0.2) > EPSILON && !is_skip_high_flow_printer(printer_model))
+                target_type = DevNozzle::ToNozzleVolumeType(obj->GetExtderSystem()->GetNozzleFlowType(physical_extruder_id));
         }
         if (select_type)
             target_type = *select_type;
@@ -2053,7 +2108,7 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
     int deputy_index = obj->is_main_extruder_on_left() ? 1 : 0;
 
     auto find_string = [](ComboBox *combo, const wxString& str) {
-        for (int i = 0; i < combo->GetCount(); ++i) {
+        for (int i = 0; i < (int)combo->GetCount(); ++i) {
             wxString text = combo->GetString(i);
             if (text.StartsWith(str)) {
                 return i;
@@ -2086,7 +2141,17 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
 
     // set nozzle volume type after switching prset, so this value can override the old value stored in conf
     auto printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
+    auto *nozzle_sys = obj->GetNozzleSystem();
     for (size_t idx = 0; idx < target_types.size(); ++idx) {
+        // When syncing, the connected machine is the source of truth for the nozzle count.
+        // For single-nozzle extruders on_volume_type_switch only carries the previous count
+        // forward and never refreshes it, so read presence straight from the machine here:
+        // 1 if the extruder actually has a nozzle installed, 0 otherwise.
+        if (!support_multi_nozzle && nozzle_sys) {
+            int  physical_extruder_id = extruder_map[idx];
+            bool nozzle_installed     = !nozzle_sys->GetExtNozzle(physical_extruder_id).IsEmpty();
+            preset_bundle->extruder_nozzle_stat.set_extruder_nozzle_count(idx, target_types[idx], int(nozzle_installed), true);
+        }
         printer_tab->set_extruder_volume_type(idx, target_types[idx]);
     }
 
@@ -2908,6 +2973,7 @@ Sidebar::Sidebar(Plater *parent)
         del_btn->SetToolTip(_L("Remove last filament"));
         del_btn->Bind(wxEVT_BUTTON, [this, scrolled_sizer](wxCommandEvent& e) {
             delete_filament();
+            scroll_filament_area_to_bottom();
         });
         p->m_bpButton_del_filament = del_btn;
         subtitle_sizer->Add(del_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(12));
@@ -3711,8 +3777,15 @@ BedType Sidebar::get_cur_select_bed_type() {
 std::string Sidebar::get_cur_select_bed_image(bool &exist)
 {
     auto select_bed_type   = get_cur_select_bed_type();
-    auto series_suffix_str = m_cur_image_bed_type.empty() ? "" : ("_" + m_cur_image_bed_type);
-    auto image_name        = bed_type_thumbnails[select_bed_type] + series_suffix_str;
+    auto image_name        = bed_type_thumbnails[select_bed_type];
+    // Highest priority: if the current printer model declares a resource-binding
+    auto pm = p->plater->get_curr_printer_model();
+    if (pm && !pm->resource_bind_name.empty()) {
+        image_name             +=  "_" + pm->resource_bind_name;
+    } else {
+        auto series_suffix_str = m_cur_image_bed_type.empty() ? "" : ("_" + m_cur_image_bed_type);
+        image_name += series_suffix_str;
+    }
     auto full_path         = into_u8(Slic3r::GUI::from_u8(Slic3r::var(image_name + ".png")));
     if (boost::filesystem::exists(full_path)) {
         exist = true;
@@ -4114,6 +4187,9 @@ void Sidebar::add_filament() {
     if (p->combos_filament.size() >= size_t(EnforcerBlockerType::ExtruderMax)) return;
     wxColour    new_col        = Plater::get_next_color_for_filament();
     add_custom_filament(new_col);
+    // Reveal the just-added filament: it is appended at the end of the physical
+    // filament list, which may sit below the fold when the scroll area is capped.
+    scroll_filament_area_to_bottom();
 }
 
 void Sidebar::delete_filament(size_t filament_id, int replace_filament_id) {
@@ -4291,6 +4367,22 @@ void Sidebar::add_custom_filament(wxColour new_col, const std::string& preset_na
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
     wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
     auto_calc_flushing_volumes(insert_pos);
+}
+
+void Sidebar::scroll_filament_area_to_bottom()
+{
+    auto* sw = p->m_physical_scroll_area;
+    if (!sw) return;
+    // Defer until after the pending layout pass so the virtual size reflects the new row.
+    sw->CallAfter([sw]() {
+        int ppu_x = 0, ppu_y = 0;
+        sw->GetScrollPixelsPerUnit(&ppu_x, &ppu_y);
+        if (ppu_y <= 0) return;
+        int virtual_h = sw->GetVirtualSize().GetHeight();
+        int client_h  = sw->GetClientSize().GetHeight();
+        int max_units = std::max(0, (virtual_h - client_h + ppu_y - 1) / ppu_y);
+        sw->Scroll(0, max_units);
+    });
 }
 
 bool Sidebar::is_new_project_in_gcode3mf()
@@ -4654,7 +4746,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
         else if(color_before_sync[i] != color_opt->values[i] && wxGetApp().app_config->get("auto_calculate_flush") != "disabled"){
             auto_calc_flushing_volumes(i);
         }
-        else if(is_support_filament(i) !=is_support_before[i] && wxGetApp().app_config->get("auto_calculate_flush") == "all"){
+        else if((int)is_support_filament(i) !=is_support_before[i] && wxGetApp().app_config->get("auto_calculate_flush") == "all"){
             auto_calc_flushing_volumes(i);
         }
     }
@@ -5006,7 +5098,7 @@ void Sidebar::udpate_combos_filament_badge() {
 
 // ---- Mixed Filament sidebar methods ----
 
-static constexpr int kMaxFilamentScrollRows  = 3;
+static constexpr int kMaxFilamentScrollRows  = 6;
 static constexpr int kScrollCapThreshold     = 12;
 
 void Sidebar::recalc_filament_scroll_sizes()
@@ -5707,7 +5799,13 @@ void Sidebar::collect_physical_filament_info(std::vector<std::string>& color_str
         Preset* preset = nullptr;
         if (cfg_idx < preset_bundle.filament_presets.size())
             preset = preset_bundle.filaments.find_preset(preset_bundle.filament_presets[cfg_idx]);
-        types.push_back(filament_type_for_color_decompose(preset));
+        std::string ft;
+        if (preset) {
+            std::string display_type;
+            ft = preset->config.get_filament_type(display_type);
+        }
+        if (ft.empty()) ft = "PLA";
+        types.push_back(ft);
     }
 }
 
@@ -6042,6 +6140,8 @@ void Sidebar::decompose_filament_color(int filament_idx)
         filament_idx = p->m_menu_filament_id;
     if (filament_idx < 0)
         return;
+    if (decompose_color_block_reason(filament_idx) != DecomposeColorBlockReason::None)
+        return;
 
     auto& project_config = wxGetApp().preset_bundle->project_config;
     auto* colours_opt = project_config.option<ConfigOptionStrings>("filament_colour");
@@ -6053,6 +6153,21 @@ void Sidebar::decompose_filament_color(int filament_idx)
     std::vector<std::string> color_strs, names, types;
     std::vector<size_t> physical_config_indices;
     collect_physical_filament_info(color_strs, names, types, &physical_config_indices);
+
+    // Build decompose-specific types: ColorDecomposeDialog needs "PLA Basic"
+    // distinction (for CMYW/RYBW card visibility), while collect_physical_filament_info
+    // now returns coarse filament_type (e.g. "PLA" for all PLA variants).
+    std::vector<std::string> decompose_types;
+    {
+        auto& pb = *wxGetApp().preset_bundle;
+        for (size_t i = 0; i < physical_config_indices.size(); ++i) {
+            const size_t ci = physical_config_indices[i];
+            Preset* pr = (ci < pb.filament_presets.size())
+                ? pb.filaments.find_preset(pb.filament_presets[ci]) : nullptr;
+            decompose_types.push_back(filament_type_for_color_decompose(pr));
+        }
+    }
+
     size_t source_physical_idx = size_t(-1);
     for (size_t i = 0; i < physical_config_indices.size(); ++i) {
         if (physical_config_indices[i] == static_cast<size_t>(filament_idx)) {
@@ -6063,7 +6178,7 @@ void Sidebar::decompose_filament_color(int filament_idx)
 
     ColorDecomposeDialog dlg(this,
                              source_physical_idx == size_t(-1) ? -1 : static_cast<int>(source_physical_idx),
-                             target_color, color_strs, names, types,
+                             target_color, color_strs, names, decompose_types,
                              wxGetApp().preset_bundle->filament_presets.size(),
                              static_cast<size_t>(EnforcerBlockerType::ExtruderMax),
                              physical_config_indices);
@@ -6073,7 +6188,7 @@ void Sidebar::decompose_filament_color(int filament_idx)
         MixedFilamentResult mixed_result;
         std::vector<DecomposeMissingComponent> missing_components;
         if (!prepare_decompose_mixed_result(dialog_result, static_cast<size_t>(filament_idx), source_physical_idx,
-                                            color_strs, types, physical_config_indices, mixed_result, missing_components))
+                                            color_strs, decompose_types, physical_config_indices, mixed_result, missing_components))
             return;
 
         if (!confirm_create_decompose_missing_components(this, missing_components))
@@ -6700,7 +6815,8 @@ public:
 
     bool run_textured_mesh_import_dialog(Slic3r::Model& loaded_model, TextureImportResult& result,
                                          std::function<bool()> cancel_callback = {},
-                                         std::function<bool(int)> progress_callback = {});
+                                         std::function<bool(int)> progress_callback = {},
+                                         std::function<void(bool)> progress_visibility_callback = {});
     void apply_textured_mesh_import_result(Slic3r::Model& loaded_model, const std::vector<size_t>& obj_idxs,
                                            const TextureImportResult& result,
                                            LoadProgressCallback progress_callback = {}, bool update_scene = true);
@@ -6761,6 +6877,12 @@ public:
     bool leave_gizmos_stack();
     // Derive the persistent independent assembly model from the prepare model (shared meshes, GUIDs copied).
     void derive_assemble_model();
+    // Project reset / load_project: drop assemble objects, undo, and assembly artifacts on both models.
+    void invalidate_assemble_model_on_project_reset();
+    // True when the live m_assemble_model is stale relative to prepare (e.g. emptied by
+    // propagate_delete_to_assemble after a prepare delete, while prepare undo restored objects /
+    // assembly_model.json). Next assembly enter must re-derive instead of append+set_assembly_pos.
+    bool assemble_model_needs_rederive_from_prepare() const;
     // On entering the assembly view: append prepare-side objects not yet referenced (by part_guid) in a_model.
     void sync_assemble_model_on_enter(const std::vector<size_t>& loaded_idxs = {});
     // Mirror the render-relevant per-part state (filament / MMU color painting) between the prepare model
@@ -6785,14 +6907,22 @@ public:
     // On assembly-view entry: reproduce each prepare part's world size (instance_scale ⊙ volume_scale,
     // covering both object-level and part-level prepare scaling) on its assembly counterpart (matched by
     // assembly_src_guid) by baking it into the assembly volume's assemble scale and dividing out the
-    // assembly instance scale. Only the scale is touched; the assembly offset / rotation stay independent.
-    // The assembly view has no scale tool, so size is always prepare-authoritative (one-way sync).
+    // assembly instance scale. When the prepare side uniformly rescales a whole model -- or a whole
+    // prepare object (e.g. a STEP multipart while a neighbouring cube is left alone) -- assembly poses
+    // are also scaled about a ground-level pivot so the parts do not fall apart. The assembly view has
+    // no scale tool, so size is always prepare-authoritative (one-way sync).
     void sync_assemble_scale_from_prepare();
     // Safety net run at the end of sync_assemble_model_on_enter: drop assembly volumes whose
     // assembly_src_guid no longer matches any prepare part (a prepare-side delete that did not propagate,
     // or an inconsistent restored state), then drop any assembly object left with no volumes. Pruned
     // volumes / objects are logged by name. Prepare-side split/combine keep GUIDs, so they are never pruned.
     void prune_orphan_assemble_parts();
+    // Pull prepare-side ModelObject / ModelInstance printable onto matching assembly ModelVolumes
+    // (matched by assembly_src_guid -> prepare part_guid). On the assembly side, printable is
+    // ModelVolume-only: this never leaves a meaningful assembly ModelObject / ModelInstance
+    // printable (forced true on sync) so a multipart assembly MO can grey individual parts.
+    // Re-enter must refresh this.
+    void sync_assemble_printable_from_prepare();
     // Mirror the assembly steps / tree authored on m_assemble_model back onto the prepare model so the
     // existing 3mf export path (which serializes from the prepare model) persists assembly-view edits.
     void sync_assemble_steps_to_main_model();
@@ -6802,6 +6932,20 @@ public:
     // Slim Undo/Redo path used only while the assembly stack is active: restores m_assemble_model and
     // reloads the assembly scene, deliberately skipping the prepare-model project machinery in undo_redo_to().
     void assemble_undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator it_snapshot);
+    // Assembly guide UI cursor history, keyed by assemble-stack snapshot timestamps.
+    // Kept out of UndoRedo::SnapshotData so the undo core stays domain-agnostic.
+    struct AssemblyGuideUiSnapshot {
+        // Stable AssemblyStepsTreeNode::id of the selected step folder. Node indices
+        // cannot be used here: undo/redo rebuilds the whole node vector from JSON in
+        // traversal order, while runtime edits append, so the same step changes index.
+        // -1 means overall-preview / no step editing.
+        int selected_folder_id{-1};
+        int keyframe_selected{-1};
+    };
+    void remember_assemble_guide_ui(size_t snapshot_timestamp);
+    void remember_assemble_guide_ui_for_latest_action_snapshot();
+    void prune_assemble_guide_ui_snapshots();
+    void clear_assemble_guide_ui_snapshots() { m_assemble_guide_ui_by_time.clear(); }
 
     void take_snapshot(const std::string& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action);
     /*void take_snapshot(const wxString& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action)
@@ -6893,10 +7037,14 @@ public:
 
     // V2: single material path (feature flag OFF)
     int update_helio_background_process_v2(std::string& printer_id, std::string& material_id);
+    int update_helio_background_process_v2_once(std::string& printer_id, std::string& material_id);
     // V3: multi-material path (feature flag ON)
     int update_helio_background_process(std::string& printer_id,
                                          std::vector<HelioQuery::MaterialInput>& materials,
                                          bool& is_multi_color, bool& is_multi_material);
+    int update_helio_background_process_once(std::string& printer_id,
+                                              std::vector<HelioQuery::MaterialInput>& materials,
+                                              bool& is_multi_color, bool& is_multi_material);
 
     void clear_warnings();
     void add_warning(const Slic3r::PrintStateBase::Warning &warning, size_t oid);
@@ -6944,9 +7092,9 @@ public:
     void on_action_slice_plate(SimpleEvent&);
     void on_action_slice_all(SimpleEvent&);
     void on_helio_processing_complete(HelioCompletionEvent &);
-    void on_helio_processing_start(SimpleEvent &);
+    void on_helio_processing_start(HelioActionEvent &);
     void on_helio_input_dlg(SimpleEvent &);
-    void on_helio_process();
+    void on_helio_process(const PartPlate* expected_plate);
     void on_action_publish(wxCommandEvent &evt);
     void on_action_print_plate(SimpleEvent&);
     void on_action_print_all(SimpleEvent&);
@@ -7095,6 +7243,13 @@ private:
     // outside the assembly stack: the retained snapshots would otherwise no longer match the model and an
     // undo could resurrect / drop the just-synced parts. This flag requests that reset on next entry.
     bool                        m_assemble_undo_baseline_dirty = true;
+    // True when the independent assembly undo stack has project-modifying edits since the last
+    // project save. The main-stack up_to_date() check alone cannot see these edits, so close /
+    // new-project prompts must consult this flag (see priv::up_to_date).
+    bool                        m_assemble_project_dirty = false;
+    // timestamp -> guide UI cursor at that assemble-stack snapshot (grows with take_snapshot /
+    // pre-jump capture; pruned against live stack timestamps).
+    std::unordered_map<size_t, AssemblyGuideUiSnapshot> m_assemble_guide_ui_by_time;
     // Set while a prepare-side structural restructure (split / combine) destroys and re-creates objects.
     // Such internal removes are NOT user deletes and must not be propagated to the assembly model:
     // the split/combine products keep the source part_guid, so the assembly view stays untouched.
@@ -7131,7 +7286,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     , main_frame(main_frame)
     //BBS: add bed_exclude_area
     , config(Slic3r::DynamicPrintConfig::new_from_defaults_keys({
-        "printable_area", "bed_exclude_area", "wrapping_exclude_area", "extruder_printable_area", "bed_custom_texture", "bed_custom_model", "print_sequence",
+        "printable_area", "bed_exclude_area", "bed_heat_soak_area", "wrapping_exclude_area", "extruder_printable_area", "bed_custom_texture", "bed_custom_model", "print_sequence",
         "extruder_clearance_dist_to_rod", "extruder_clearance_max_radius",
         "extruder_clearance_height_to_lid", "extruder_clearance_height_to_rod",
 		"nozzle_height", "skirt_loops", "skirt_distance",
@@ -7827,12 +7982,10 @@ wxColour Plater::get_next_color_for_filament()
 
 wxString Plater::get_slice_warning_string(GCodeProcessorResult::SliceWarning& warning)
 {
-    if (warning.msg == BED_TEMP_TOO_HIGH_THAN_FILAMENT) {
-        return _L("The current hot bed temperature is relatively high. The nozzle may be clogged when printing this filament in a closed enclosure. Please open the front door and/or remove the upper glass.");
-    } else if (warning.msg == NOZZLE_HRC_CHECKER) {
+    if (warning.msg == NOZZLE_HRC_CHECKER) {
         return _L("The nozzle hardness required by the filament is higher than the default nozzle hardness of the printer. Please replace the hardened nozzle or filament, otherwise, the nozzle will be attrited or damaged.");
     } else if (warning.msg == NOT_SUPPORT_TRADITIONAL_TIMELAPSE) {
-        return _L("Enabling traditional timelapse photography may cause surface imperfections. It is recommended to change to smooth mode.") +_L("\n") +
+        return _L("Enabling instant timelapse photography may cause surface imperfections. It is recommended to change to smooth mode.") +_L("\n") +
                _L("(Path to modify: 'Process'-'Others'-'Special Mode'-'Timelapsed')");
     } else if (warning.msg == NOT_GENERATE_TIMELAPSE) {
         return wxString();
@@ -8327,13 +8480,23 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     else
                         load_type  = static_cast<LoadType>(std::stoi(import_project_action));
 
+                    // check the loaded config if its not from BBL
+                    if (!is_bbl_vendor_config(config_loaded, wxGetApp().preset_bundle) && !check_project_config(config_loaded)) {
+                        load_config = false;
+                        q->get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                            NotificationManager::NotificationLevel::WarningNotificationLevel,
+                            into_u8(_L("The 3mf file has invalid config, load geometry data only")));
+                    }
+
                     // BBS: version check
                     Semver app_version = *(Semver::parse(SLIC3R_VERSION));
                     if (en_3mf_file_type == En3mfType::From_Prusa) {
                         // do not reset the model config
                         load_config = false;
                         if(load_type != LoadType::LoadGeometry)
-                            show_info(q, _L("The 3mf is not from Bambu Lab, load geometry data only."), _L("Load 3mf"));
+                            q->get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                into_u8(_L("The 3mf is not from Bambu Lab, load geometry data only.")));
                     }
                     else if (load_config && (file_version.maj() > app_version.maj())) {
                         // version mismatch, only load geometries
@@ -8353,7 +8516,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             if (en_3mf_file_type == En3mfType::From_BBS)
                                 show_info(q, _L("Due to the lower version of Bambu Studio, this 3mf file cannot be fully loaded. Please update Bambu Studio to the latest version"), _L("Load 3mf"));
                             else
-                                show_info(q, _L("The 3mf is not from Bambu Lab, load geometry data only."), _L("Load 3mf"));
+                                q->get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                    NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                    into_u8(_L("The 3mf is not from Bambu Lab, load geometry data only.")));
                         }
                         //for (ModelObject *model_object : model.objects) {
                         //    model_object->config.reset();
@@ -8394,7 +8559,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             else {
                                 //if the minor version is not matched
                                 //if (file_version.min() != app_version.min()) {
-                                    Newer3mfVersionDialog newer_dlg(q, &file_version, &cloud_ver, "");
+                                Newer3mfVersionDialog newer_dlg(q, &file_version, &cloud_ver, "");
                                     auto res = newer_dlg.ShowModal();
                                 //}
                             }
@@ -8403,14 +8568,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     else if (load_config && config_loaded.empty()) {
                         load_config = false;
                         if (wxGetApp().app_config->get_bool("skip_non_bambu_3mf_warning") != true) {
-                            TipsDialog dlg(q,
-                                _L("Load 3mf"),
-                                file_version.maj() == 0 && file_version.min() == 0 && file_version.patch() == 0
-                                    ? _L("The 3mf is not from Bambu Lab, load geometry data and color data only.")
-                                    : _L("The 3mf is generated by old Bambu Studio, load geometry data only."),
-                                "skip_non_bambu_3mf_warning",
-                                wxOK);
-                            dlg.ShowModal();
+                            wxString warn_text = file_version.maj() == 0 && file_version.min() == 0 && file_version.patch() == 0
+                                ? _L("The 3mf is not from Bambu Lab, load geometry data and color data only.")
+                                : _L("The 3mf is generated by old Bambu Studio, load geometry data only.");
+                            q->get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                into_u8(warn_text));
                         }
                     }
                     else if (!load_config) {
@@ -8767,9 +8930,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 preset_bundle->extruder_nozzle_stat.set_force_keep_flag(false);
 
                                 // 导入的配置中存在有效nozzle_stats，则复用
-                                if (auto nozzle_stats_ptr = proj_cfg.option<ConfigOptionStrings>("extruder_nozzle_stats");
-                                    nozzle_stats_ptr && !(nozzle_stats_ptr->values.empty() || std::any_of(nozzle_stats_ptr->values.begin(), nozzle_stats_ptr->values.end(),
-                                                                                                          [](const std::string &elem) { return elem.empty(); }))) {
+                                // extruder_nozzle_stats_new holds the untranslated volume type names, while the legacy
+                                // key may have been downgraded on export, so it only serves older projects.
+                                auto nozzle_stats_valid = [](const ConfigOptionStrings *opt) {
+                                    return opt && !(opt->values.empty() || std::any_of(opt->values.begin(), opt->values.end(),
+                                                                                       [](const std::string &elem) { return elem.empty(); }));
+                                };
+                                const ConfigOptionStrings *nozzle_stats_ptr = proj_cfg.option<ConfigOptionStrings>("extruder_nozzle_stats_new");
+                                if (!nozzle_stats_valid(nozzle_stats_ptr))
+                                    nozzle_stats_ptr = proj_cfg.option<ConfigOptionStrings>("extruder_nozzle_stats");
+                                if (nozzle_stats_valid(nozzle_stats_ptr)) {
                                     preset_bundle->extruder_nozzle_stat = ExtruderNozzleStat(get_extruder_nozzle_stats(nozzle_stats_ptr->values));
                                 } else {
                                     // 打印机型切换或数据无效，则读取默认值
@@ -8780,6 +8950,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                         preset_bundle->extruder_nozzle_stat.on_volume_type_switch(idx, NozzleVolumeType(nozzle_volume_opt->values[idx]));
                                     }
                                 }
+                                // The legacy key arrives downgraded from a project exported by this or a newer build,
+                                // and full_fff_config() derives the extruder variants from it before refreshing it from
+                                // extruder_nozzle_stat. Push the resolved stats back so project_config stays consistent.
+                                {
+                                    const std::vector<std::string> resolved_nozzle_stats = save_extruder_nozzle_stats_to_string(
+                                        preset_bundle->extruder_nozzle_stat.get_raw_stat());
+                                    proj_cfg.option<ConfigOptionStrings>("extruder_nozzle_stats", true)->values     = resolved_nozzle_stats;
+                                    proj_cfg.option<ConfigOptionStrings>("extruder_nozzle_stats_new", true)->values = resolved_nozzle_stats;
+                                }
                                 //BBS: rewrite wipe tower pos stored in 3mf file , the code above should be seriously reconsidered
                                  ConfigOptionFloats* wipe_tower_x = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_x");
                                 ConfigOptionFloats* wipe_tower_y = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_y");
@@ -8788,13 +8967,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 if (file_wipe_tower_y)
                                     *wipe_tower_y = *file_wipe_tower_y;
 
-                                // Re-clamp restored 3mf wipe tower positions against the current plate;
-                                // values that still fit are kept as-is.
+                                // Re-clamp restored 3mf tower positions to the current plate; the placed-flag
+                                // decision is deferred until filament/nozzle sync finishes below.
                                 {
                                     PartPlateList& plate_list = this->partplate_list;
-                                    for (size_t plate_id = 0; plate_id < plate_list.get_plate_list().size(); ++plate_id) {
+                                    for (size_t plate_id = 0; plate_id < plate_list.get_plate_list().size(); ++plate_id)
                                         plate_list.set_default_wipe_tower_pos_for_plate((int)plate_id, /*init_pos=*/false, /*keep_existing=*/true);
-                                    }
                                 }
 
                                 ConfigOptionStrings* filament_color = proj_cfg.opt<ConfigOptionStrings>("filament_colour");
@@ -8840,6 +9018,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                             }
                                         }
                                     }
+
+                                    // Old projects may use HSV-set first color as main; align to JSON[0].
+                                    Slic3r::align_project_filament_primary_colors_with_json(preset_bundle);
+                                    // Align only wrote project_config; object GLVolumes read p->config
+                                    // (filled earlier by on_filament_count_change). Sync before load_model_objects.
+                                    q->update_filament_colors_in_full_config();
                                 }
                             }
                             // Update filament combobox after loading config
@@ -8851,7 +9035,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 for (int extruder_id = 0; extruder_id < extruder_count; ++extruder_id)
                                     updateNozzleCountDisplay(preset_bundle, extruder_id, NozzleVolumeType(nozzle_volumes_values[extruder_id]));
                             }
-                            this->q->m_loading_project=false;
+                            // The placed-flag decision and clearing m_loading_project are deferred until
+                            // after load_model_objects() below actually attaches objects to plates.
                         }
                     }
                     if (!silence) wxGetApp().app_config->update_config_dir(path.parent_path().string());
@@ -9026,16 +9211,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 else if (model.looks_like_saved_in_meters()) {
                     // BBS do not handle look like in meters
                     MessageDialog dlg(q,
-                                      format_wxstr(_L("The object from file %s is too small, and maybe in meters or inches.\n Do you want to scale to millimeters?"),
-                                                   from_path(filename)),
+                                      _L("The object size in the file is very small. Would you like to import it using millimeters as the default unit?"),
                                       _L("Object too small"), wxICON_QUESTION | wxYES_NO);
                     int           answer = dlg.ShowModal();
                     if (answer == wxID_YES) model.convert_from_meters(true);
                 } else if (model.looks_like_imperial_units()) {
                     // BBS do not handle look like in meters
                     MessageDialog dlg(q,
-                                      format_wxstr(_L("The object from file %s is too small, and maybe in meters or inches.\n Do you want to scale to millimeters?"),
-                                                   from_path(filename)),
+                                      _L("The object size in the file is very small. Would you like to import it using millimeters as the default unit?"),
                                       _L("Object too small"), wxICON_QUESTION | wxYES_NO);
                     int           answer = dlg.ShowModal();
                     if (answer == wxID_YES) convert_from_imperial_units(model, true);
@@ -9156,11 +9339,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     instance->set_assemble_transformation(instance->get_transformation());
                 }
                 // BBS: keep each volume's assemble transformation in sync with its base transformation
-                for (ModelVolume *mv : object->volumes) {
-                    if (mv != nullptr && !mv->is_assemble_initialized()) {
-                        mv->set_assemble_transformation(mv->get_transformation());
-                    }
-                }
+                q->ensure_model_object_volume_assemble_initialized(object);
                 object->invalidate_bounding_box();
                 BOOST_LOG_TRIVIAL(info) << "STEP import: restore sub-assembly relative position for object \""
                                         << object->name << "\", compensation="
@@ -9250,7 +9429,12 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     dlg_cont = dlg.Update(mapped_percent, texture_msg);
                     return dlg_cont;
                 };
-                if (!run_textured_mesh_import_dialog(model, texture_import_result, cancel_cb, progress_cb)) {
+                auto progress_visibility_cb = [&dlg](bool visible) {
+                    dlg.Show(visible);
+                    if (visible)
+                        dlg.Raise();
+                };
+                if (!run_textured_mesh_import_dialog(model, texture_import_result, cancel_cb, progress_cb, progress_visibility_cb)) {
                     q->skip_thumbnail_invalid = false;
                     return empty_result;
                 }
@@ -9328,21 +9512,29 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 if (type_step && !model.step_import_tree_nodes.empty() && !loaded_idxs.empty()) {
                     BOOST_LOG_TRIVIAL(info) << "STEP import: forward tree to assemble canvas, node_count=" << model.step_import_tree_nodes.size()
                                             << ", loaded_object_count=" << loaded_idxs.size();
-                    if (GLCanvas3D *assemble_canvas = q->get_assmeble_canvas3D()) {
-                        assemble_canvas->append_step_import_to_assembly_tree(model.step_import_tree_nodes, loaded_idxs, model.step_import_path);
-                    }
                     // A STEP import establishes an assembly structure up front. Capture it into the
                     // independent assembly model BEFORE the prepare-side merge below, so the assembly
                     // model / tree keeps each STEP part as its own object (pre-merge structure).
                     // First STEP: full derive. Later STEPs: the model already exists, so append the
                     // just-loaded (still separate) objects instead of skipping -- otherwise a second STEP
                     // import is never captured and its assembly objects are lost.
+                    //
+                    // Derive/sync MUST happen before seeding steps. After visiting assemble view the
+                    // canvas stays bound to m_assemble_model; new_project clears that model's objects
+                    // but leaves the binding. Seeding first would write into an empty model (or into
+                    // the prepare model on a cold start) and then be wiped by `m_assemble_model = model`.
                     if (!m_assemble_model_valid)
                         derive_assemble_model();//step import first
                     else
                         sync_assemble_model_on_enter(loaded_idxs);
-                    if (GLCanvas3D *ac = q->get_assmeble_canvas3D())
-                         ac->notify_step_import();
+                    if (GLCanvas3D *assemble_canvas = q->get_assmeble_canvas3D()) {
+                        assemble_canvas->set_model(&m_assemble_model);
+                        assemble_canvas->append_step_import_to_assembly_tree(model.step_import_tree_nodes, loaded_idxs, model.step_import_path);
+                        assemble_canvas->notify_step_import();
+                    }
+                    // Keep prepare-side JSON/tree in sync so save without re-entering assemble view
+                    // still persists the auto-seeded steps.
+                    sync_assemble_steps_to_main_model();
                     // Now merge the objects brought in by THIS STEP import into a single multipart object on
                     auto is_split_compound = wxGetApp().app_config->get_bool("is_split_compound");
                     need_show_sole_text_notice = is_split_compound;
@@ -9371,6 +9563,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 }
             }
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", finished load_model_objects");
+            if (is_project_file) {
+                // First point where objects are actually attached to plates, so the placed-flag
+                // decision can be made now. Set it before clearing m_loading_project so any
+                // reload_scene() triggered above still saw the flag as unset.
+                PartPlateList& plate_list = this->partplate_list;
+                for (size_t plate_id = 0; plate_id < plate_list.get_plate_list().size(); ++plate_id)
+                    init_wipe_tower_placed_flag(*plate_list.get_plate((int)plate_id));
+                this->q->m_loading_project = false;
+            }
             wxString msg = wxString::Format(_L("Loading file: %s"), from_path(real_filename));
             dlg_cont     = dlg.Update(progress_percent, msg);
             if (!dlg_cont) {
@@ -9634,10 +9835,7 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
                     }
                 }
                 // BBS: also initialize per-volume assemble transformation so the assembly view can render new volumes correctly even before any explicit per-volume edit.
-                for (ModelVolume *mv : model_object->volumes) {
-                    if (mv != nullptr && !mv->is_assemble_initialized())
-                        mv->set_assemble_transformation(mv->get_transformation());
-                }
+                q->ensure_model_object_volume_assemble_initialized(model_object);
             }
         }
     }
@@ -9730,7 +9928,8 @@ void Plater::priv::load_auxiliary_files()
 
 bool Plater::priv::run_textured_mesh_import_dialog(Slic3r::Model& loaded_model, TextureImportResult& result,
                                                    std::function<bool()> cancel_callback,
-                                                   std::function<bool(int)> progress_callback)
+                                                   std::function<bool(int)> progress_callback,
+                                                   std::function<void(bool)> progress_visibility_callback)
 {
     if (!loaded_model.texture_mesh || !has_importable_texture(*loaded_model.texture_mesh)) return false;
 
@@ -9795,7 +9994,8 @@ bool Plater::priv::run_textured_mesh_import_dialog(Slic3r::Model& loaded_model, 
     }
 
     TextureImportDialog dlg(q, *loaded_model.texture_mesh, filament_entries,
-                            std::move(cancel_callback), std::move(progress_callback));
+                            std::move(cancel_callback), std::move(progress_callback),
+                            std::move(progress_visibility_callback));
     if (dlg.ShowModal() != wxID_OK) {
         if (dlg.was_skipped()) {
             BOOST_LOG_TRIVIAL(info) << "handle_textured_mesh_import: user skipped texture matching";
@@ -9877,6 +10077,10 @@ void Plater::priv::apply_textured_mesh_import_result(Slic3r::Model& loaded_model
     };
 
     const auto& entries = result.filament_entries;
+    // Final sidebar ordering produced here (ExistingPhysical -> NewPhysical ->
+    // ExistingMixed -> NewMixed) MUST stay in sync with
+    // TextureImportDialog::compute_display_numbers(), which mirrors this order
+    // so the import dialog shows the same IDs the sidebar will show after OK.
     std::vector<int> filament_index_remap(entries.size(), -1);
     size_t existing_physical_count = 0;
     size_t new_physical_count = 0;
@@ -10421,14 +10625,7 @@ void Plater::priv::reset(bool apply_presets_change)
     // Stop and reset the Print content.
     this->background_process.reset();
     model.clear_objects();
-    // Invalidate the independent assembly model so it is re-derived for the next project.
-    m_assemble_model.clear_objects();
-    m_assemble_model_valid = false;
-    // Drop any retained assembly undo history and force a fresh baseline for the next project.
-    m_undo_redo_stack_assemble.clear();
-    m_assemble_undo_baseline_dirty = true;
-    // Drop the persisted assembly-model graph so a fresh / next project does not rebuild a stale a_model.
-    model.set_assembly_model_json_str(std::string());
+    invalidate_assemble_model_on_project_reset();
     assemble_view->get_canvas3d()->reset_explosion_ratio();
     update();
 
@@ -10807,9 +11004,14 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     else
         invalidated = background_process.apply(this->model, preset_bundle->full_config(false));
 
-    if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
+    if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED)) {
         // BBS: add only gcode mode
         q->set_only_gcode(false);
+        // A real slice-affecting change (only possible with printable model) means the
+        // imported .gcode.3mf is no longer the payload; clear it so send re-exports.
+        if (!model.objects.empty())
+            q->set_using_exported_file(false);
+    }
 
     //BBS: add slicing related logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": background process apply result=%1%")%invalidated;
@@ -12012,13 +12214,13 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
             }
             if (!view3d_volume_idxs.empty())
                 view3d_selection.add_volumes(Selection::Volume, view3d_volume_idxs, true);
-            // Close the independent assembly undo/redo stack and rebind the assembly canvas back to the
-            // shared prepare model, so m_assemble_model can be safely rebuilt on the next entry.
+            // Leave the independent assembly undo/redo stack, but keep the hidden assembly canvas
+            // bound to m_assemble_model. Rebinding it to the prepare model breaks the independent
+            // assembly-view model contract and makes prepare-side preview code lose assembly GLVolumes.
             // leave_assemble_stack() already wrote assembly-view filament / painting edits back onto the
             // prepare model (via sync_assemble_steps_to_main_model), so refresh the prepare scene to show
             // the updated colors.
             leave_assemble_stack();
-            assemble_canvas->set_model(&model);
             view3D->reload_scene(true);
         }
 
@@ -12050,10 +12252,9 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
             view3D->get_canvas3d()->unbind_event_handlers();
         else if (old_panel == assemble_view) {
             assemble_view->get_canvas3d()->unbind_event_handlers();
-            // Close the independent assembly undo/redo stack and rebind the assembly canvas back to the
-            // shared prepare model, so m_assemble_model can be safely rebuilt on the next entry.
+            // Leave the independent assembly undo/redo stack, but keep the hidden assembly canvas
+            // bound to m_assemble_model for the same reason as the view3D path above.
             leave_assemble_stack();
-            assemble_view->get_canvas3d()->set_model(&model);
         }
 
         preview->get_canvas3d()->bind_event_handlers();
@@ -12116,10 +12317,16 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
             // it across view switches so assembly edits and structure survive and stay independent of the
             // prepare-side structural edits (split / combine). Bind the assembly canvas + its undo/redo
             // stack to m_assemble_model only.
-            if (!m_assemble_model_valid)
+            //
+            // Prepare delete(+propagate) can empty the live assemble model while leaving valid=true;
+            // prepare undo restores objects / assembly_model.json on the main model only. Detect that
+            // hole and re-derive from JSON (or clone) so relationships are restored — otherwise sync
+            // treats every prepare object as new and calls set_assembly_pos, wiping assembly poses.
+            if (!m_assemble_model_valid || assemble_model_needs_rederive_from_prepare())
                 derive_assemble_model();//set_current_panel
-            else
-                // Existing assembly model: pull in prepare-side objects added since last entry.
+            // Always sync after derive/keep: refresh mesh/scale/render, and append truly new prepare
+            // objects that are not in the persisted assembly graph.
+            if (m_assemble_model_valid)
                 sync_assemble_model_on_enter();
             assemble_view->get_canvas3d()->set_model(&m_assemble_model);
         }
@@ -12394,6 +12601,9 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
 
 void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
 {
+    if (evt.status.is_helio && !helio_background_process.is_action_current(evt.generation)) {
+        return;
+    }
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, percent %2%, text %3%") % evt.GetEventType() % evt.status.percent % evt.status.text;
     //BBS: add slice project logic
     std::string title_text = _u8L("Slicing");
@@ -12467,7 +12677,8 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
         for (auto const& warning : state.warnings) {
             if (warning.current) {
                 NotificationManager::NotificationLevel notif_level = NotificationManager::NotificationLevel::WarningNotificationLevel;
-                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingReplaceInitEmptyLayers | PrintStateBase::SlicingNotificationType::SlicingEmptyGcodeLayers) {
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingReplaceInitEmptyLayers ||
+                    evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingEmptyGcodeLayers) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);
@@ -12794,9 +13005,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         if (exporting_status == ExportingStatus::EXPORTING_TO_LOCAL && !has_error)
             notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path, false);
 
-        // Show tutorial popup after successful slicing (if tutorial is active)
+        // Show tutorial popup after successful slicing (if Helio is enabled and tutorial is active)
         if (!has_error && !evt.cancelled() && evt.success() && is_finished) {
-            if (wxGetApp().app_config->get("helio_first_time_tutorial") == "active") {
+            if (wxGetApp().app_config->get("helio_enable") == "true" &&
+                wxGetApp().app_config->get("helio_first_time_tutorial") == "active") {
                 wxString tutorial_msg = _L("Great! Now click the Helio button to start optimization.");
                 notification_manager->push_notification(
                     NotificationType::CustomNotification,
@@ -12925,7 +13137,7 @@ void Plater::priv::on_action_open_project(SimpleEvent&)
 void Plater::priv::on_action_slice_plate(SimpleEvent&)
 {
     if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice plate event\n" ;
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice plate event\n";
         //BBS update extruder params and speed table before slicing
         const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
         auto& print = q->get_partplate_list().get_current_fff_print();
@@ -12982,19 +13194,21 @@ static std::vector<std::string> extract_material_keywords(const std::string& mat
 
 // Helper function to find similar materials based on keywords
 static std::vector<HelioQuery::SupportedData> find_similar_materials(
+    const SupportDataCatalogPairView& support_data,
     const std::string& target_name,
     const std::vector<std::string>& keywords)
 {
     std::vector<HelioQuery::SupportedData> similar_materials;
+    const auto& supported_materials = support_data.materials;
 
-    if (keywords.empty()) {
+    if (keywords.empty() || !supported_materials) {
         return similar_materials;
     }
 
     std::string lower_target = target_name;
     boost::algorithm::to_lower(lower_target);
 
-    for (const HelioQuery::SupportedData& pdata : HelioQuery::global_supported_materials) {
+    for (const HelioQuery::SupportedData& pdata : *supported_materials) {
         if (pdata.native_name.empty()) {
             continue;
         }
@@ -13044,14 +13258,19 @@ static std::vector<std::string> extract_printer_keywords(const std::string& prin
 
 // Helper function to find similar printers based on keywords
 static std::vector<HelioQuery::SupportedData> find_similar_printers(
+    const SupportDataCatalogPairView& support_data,
     const std::string& target_name,
     const std::vector<std::string>& keywords)
 {
     std::vector<HelioQuery::SupportedData> similar_printers;
+    const auto& supported_printers = support_data.printers;
+    if (!supported_printers) {
+        return similar_printers;
+    }
 
     // If no keywords found, return all printers as options
     if (keywords.empty()) {
-        for (const HelioQuery::SupportedData& pdata : HelioQuery::global_supported_printers) {
+        for (const HelioQuery::SupportedData& pdata : *supported_printers) {
             if (!pdata.native_name.empty()) {
                 similar_printers.push_back(pdata);
             }
@@ -13062,7 +13281,7 @@ static std::vector<HelioQuery::SupportedData> find_similar_printers(
     std::string lower_target = target_name;
     boost::algorithm::to_lower(lower_target);
 
-    for (const HelioQuery::SupportedData& pdata : HelioQuery::global_supported_printers) {
+    for (const HelioQuery::SupportedData& pdata : *supported_printers) {
         if (pdata.native_name.empty()) {
             continue;
         }
@@ -13220,7 +13439,8 @@ struct FilamentSupportInfo {
 };
 
 // Helper function to check if a single filament is supported by Helio and get its material ID
-static FilamentSupportInfo check_filament_helio_support(const std::string& filament_preset_name, int extruder_index)
+static FilamentSupportInfo check_filament_helio_support(const SupportDataCatalogPairView& support_data,
+                                                        const std::string& filament_preset_name, int extruder_index)
 {
     FilamentSupportInfo info;
     info.preset_name = filament_preset_name;
@@ -13244,7 +13464,12 @@ static FilamentSupportInfo check_filament_helio_support(const std::string& filam
     // Find best (longest) match to prefer specific materials over generic ones
     size_t best_match_length = 0;
 
-    for (const HelioQuery::SupportedData& pdata : HelioQuery::global_supported_materials) {
+    const auto& supported_materials = support_data.materials;
+    if (!supported_materials) {
+        return info;
+    }
+
+    for (const HelioQuery::SupportedData& pdata : *supported_materials) {
         if (pdata.native_name.empty()) continue;
 
         std::string native_name = pdata.native_name;
@@ -13361,12 +13586,6 @@ public:
         warning_box->SetSizer(warning_sizer);
         main_sizer->Add(warning_box, 0, wxALL, wxWindowBase::FromDIP(15, this));
 
-        // Future support message
-        Label* future_msg = new Label(this, Label::Body_13,
-            _L("True multi-material support will be added in a future update."), LB_AUTO_WRAP);
-        future_msg->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
-        future_msg->Wrap(wxWindowBase::FromDIP(470, this));
-        main_sizer->Add(future_msg, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, wxWindowBase::FromDIP(15, this));
 
         // Option 1: Proceed with single filament
         StaticBox* option1_box = new StaticBox(this, wxID_ANY, wxDefaultPosition,
@@ -13549,6 +13768,32 @@ public:
 
         option2_box->SetSizer(option2_sizer);
         main_sizer->Add(option2_box, 0, wxLEFT | wxRIGHT | wxBOTTOM, wxWindowBase::FromDIP(15, this));
+        wxColour option3_bg = is_dark_mode ? wxColour(30, 45, 70) : wxColour("#E3F2FD");
+        wxColour option3_border = is_dark_mode ? wxColour(100, 181, 246) : wxColour("#2196F3");
+        wxColour option3_text_color = is_dark_mode ? wxColour(240, 240, 240) : text_color;
+        // Option 3: Enable multi-material optimization
+        StaticBox* option3_box = new StaticBox(this, wxID_ANY, wxDefaultPosition,
+                                               wxSize(wxWindowBase::FromDIP(470, this), -1));
+        option3_box->SetBackgroundColor(StateColor(std::make_pair(option3_bg, (int)StateColor::Normal)));
+        option3_box->SetBackgroundColour(option3_bg);
+        option3_box->SetBorderColor(StateColor(std::make_pair(option3_border, (int)StateColor::Normal)));
+        option3_box->SetBorderWidth(1);
+        option3_box->SetCornerRadius(wxWindowBase::FromDIP(6, this));
+
+        wxBoxSizer* option3_sizer = new wxBoxSizer(wxVERTICAL);
+        option3_sizer->AddSpacer(wxWindowBase::FromDIP(12, this));
+        Label* option3_title = new Label(option3_box, Label::Head_14, _L("Option 3: Enable multi-material optimization"));
+        option3_title->SetForegroundColour(option3_text_color);
+        option3_sizer->Add(option3_title, 0, wxLEFT | wxRIGHT, wxWindowBase::FromDIP(16, this));
+        option3_sizer->AddSpacer(wxWindowBase::FromDIP(8, this));
+        Label* option3_desc = new Label(option3_box, Label::Body_13,
+            _L("Click third-party icon → Enable Helio Additive → Check \"Experimental: Enable multi-material support\""), LB_AUTO_WRAP);
+        option3_desc->SetForegroundColour(option3_text_color);
+        option3_desc->Wrap(wxWindowBase::FromDIP(440, this));
+        option3_sizer->Add(option3_desc, 0, wxEXPAND | wxLEFT | wxRIGHT, wxWindowBase::FromDIP(16, this));
+        option3_sizer->AddSpacer(wxWindowBase::FromDIP(12, this));
+        option3_box->SetSizer(option3_sizer);
+        main_sizer->Add(option3_box, 0, wxLEFT | wxRIGHT | wxBOTTOM, wxWindowBase::FromDIP(15, this));
 
         SetSizerAndFit(main_sizer);
         {
@@ -13887,9 +14132,10 @@ private:
 // Progress dialog shown while re-fetching supported printers/materials from Helio
 class HelioSyncProgressDialog : public DPIDialog {
 public:
-    HelioSyncProgressDialog(wxWindow* parent)
+    HelioSyncProgressDialog(wxWindow* parent, bool wait_for_refresh_completion = false)
         : DPIDialog(parent, wxID_ANY, _L("Syncing Data"),
                    wxDefaultPosition, wxDefaultSize, wxCAPTION)
+        , m_wait_for_refresh_completion(wait_for_refresh_completion)
     {
         SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
 
@@ -13906,7 +14152,12 @@ public:
                               wxSize(wxWindowBase::FromDIP(300, this), -1), wxGA_HORIZONTAL);
         m_gauge->Pulse();
         sizer->Add(m_gauge, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, wxWindowBase::FromDIP(20, this));
-        sizer->AddSpacer(wxWindowBase::FromDIP(20, this));
+        sizer->AddSpacer(wxWindowBase::FromDIP(10, this));
+
+        m_cancel_btn = new Button(this, _L("Cancel"));
+        m_cancel_btn->Bind(wxEVT_BUTTON, &HelioSyncProgressDialog::OnCancel, this);
+        sizer->Add(m_cancel_btn, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM, wxWindowBase::FromDIP(20, this));
+        sizer->AddSpacer(wxWindowBase::FromDIP(10, this));
 
         SetSizerAndFit(sizer);
         CentreOnParent();
@@ -13914,7 +14165,6 @@ public:
 
         m_timer = new wxTimer(this);
         Bind(wxEVT_TIMER, &HelioSyncProgressDialog::OnTimer, this);
-        m_start_time = std::chrono::steady_clock::now();
         m_timer->Start(500);
     }
 
@@ -13926,17 +14176,36 @@ public:
     }
 
     void on_dpi_changed(const wxRect& suggested_rect) override {}
+    bool was_cancelled_by_user() const { return m_cancelled_by_user; }
+
 
 private:
+    void OnCancel(wxCommandEvent&) {
+        m_cancelled_by_user = true;
+        if (m_timer) {
+            m_timer->Stop();
+        }
+        EndModal(wxID_CANCEL);
+    }
+
     void OnTimer(wxTimerEvent&) {
         m_gauge->Pulse();
-        if (HelioQuery::global_printers_fully_loaded && HelioQuery::global_materials_fully_loaded) {
+        const auto support_data = HelioQuery::supported_data_view();
+
+        if (m_wait_for_refresh_completion) {
+            if (support_data.printers_state != SupportDataLoadState::Loading &&
+                support_data.materials_state != SupportDataLoadState::Loading) {
+                const bool refresh_succeeded = support_data.printers_state == SupportDataLoadState::Ready &&
+                                               support_data.materials_state == SupportDataLoadState::Ready;
+                EndModal(refresh_succeeded ? wxID_OK : wxID_CANCEL);
+            }
+            return;
+        }
+        if (support_data.availability == SupportDataAvailability::Usable) {
             EndModal(wxID_OK);
             return;
         }
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - m_start_time).count();
-        if (elapsed >= 15) {
+        if (support_data.availability == SupportDataAvailability::LoadFailed) {
             EndModal(wxID_CANCEL);
             return;
         }
@@ -13944,14 +14213,68 @@ private:
 
     wxTimer* m_timer;
     wxGauge* m_gauge;
-    std::chrono::steady_clock::time_point m_start_time;
+    Button* m_cancel_btn;
+    bool m_wait_for_refresh_completion{false};
+    bool m_cancelled_by_user{false};
+
 };
+
+static std::string helio_support_data_error_details(const SupportDataCatalogPairView& support_data)
+{
+    std::string details = support_data.printers_last_error;
+    const std::string material_error = support_data.materials_last_error;
+    if (!material_error.empty()) {
+        if (!details.empty()) details += "\n";
+        details += material_error;
+    }
+    return details;
+}
+
+static bool refresh_helio_supported_data(wxWindow* parent)
+{
+    wxGetApp().request_helio_supported_data(true);
+    HelioSyncProgressDialog sync_dlg(parent, true);
+    if (sync_dlg.ShowModal() == wxID_OK) {
+        return true;
+    }
+    if (sync_dlg.was_cancelled_by_user()) {
+        return false;
+    }
+
+
+    const auto support_data = HelioQuery::supported_data_view();
+    wxString message = support_data.availability == SupportDataAvailability::Usable
+        ? _L("Helio could not refresh all printer and material data. The previous complete data remains available.")
+        : _L("Helio could not load complete printer and material data. Matching remains paused.");
+    const std::string details = helio_support_data_error_details(support_data);
+    if (!details.empty()) {
+        message += "\n\n";
+        message += wxString::FromUTF8(details);
+    }
+    MessageDialog failure_dialog(parent, message, _L("Helio Data Refresh Failed"), wxOK | wxICON_ERROR);
+    failure_dialog.ShowModal();
+    return false;
+}
 
 // ===========================================================================
 // V2 PATH: Single material_id, uses HelioMixedFilamentDialog for mixed types
 // Used when helio_multimaterial_enabled feature flag is OFF
 // ===========================================================================
+static constexpr int HELIO_SUPPORT_DATA_REFRESHED = -2;
+
 int Plater::priv::update_helio_background_process_v2(std::string& printer_id, std::string& material_id)
+{
+    for (;;) {
+        const int result = update_helio_background_process_v2_once(printer_id, material_id);
+        if (result != HELIO_SUPPORT_DATA_REFRESHED) {
+            return result;
+        }
+        printer_id.clear();
+        material_id.clear();
+    }
+}
+
+int Plater::priv::update_helio_background_process_v2_once(std::string& printer_id, std::string& material_id)
 {
     helio_using_reference_material = false; // Reset at start (Issue D fix)
 
@@ -13968,8 +14291,17 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
          return -1;
      }
 
+    const auto support_data = HelioQuery::supported_data_view();
+    const auto& supported_printers = support_data.printers;
+    const auto& supported_materials = support_data.materials;
+    if (support_data.availability != SupportDataAvailability::Usable ||
+        !supported_printers || !supported_materials) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Helio support-data snapshot is unavailable";
+        return -1;
+    }
+
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": preset_name = '" << preset_name << "', preset_pure_name = '" << preset_pure_name << "'";
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": global_supported_printers.size() = " << HelioQuery::global_supported_printers.size();
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": supported_printers.size() = " << supported_printers->size();
 
     std::string printer_target_name = preset_name;
     boost::trim(printer_target_name);
@@ -13985,7 +14317,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
 
     // Step 1: Try word-boundary matching
     auto [best_match_id, best_match_length] = match_printer_with_boundaries(
-        printer_target_name, HelioQuery::global_supported_printers);
+        printer_target_name, *supported_printers);
 
     if (!best_match_id.empty()) {
         helio_support = true;
@@ -13996,7 +14328,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
     // Step 2: Token-based matching
     if (!helio_support) {
         auto [token_printer_id, token_native_name] = match_printer_tokens(
-            printer_target_name, HelioQuery::global_supported_printers);
+            printer_target_name, *supported_printers);
 
         if (!token_printer_id.empty()) {
             wxString message = wxString::Format(
@@ -14019,7 +14351,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
     // Step 3: Reference printer selection dialog
     if (!helio_support) {
         std::vector<std::string> keywords = extract_printer_keywords(printer_target_name);
-        std::vector<HelioQuery::SupportedData> similar_printers = find_similar_printers(printer_target_name, keywords);
+        std::vector<HelioQuery::SupportedData> similar_printers = find_similar_printers(support_data, printer_target_name, keywords);
 
         if (!similar_printers.empty()) {
             wxArrayString printer_choices;
@@ -14073,7 +14405,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
     for (size_t i = 0; i < extruders.size(); ++i) {
         int extruder_idx = extruders[i] - 1;
         if (extruder_idx >= 0 && extruder_idx < (int)preset_filaments.size()) {
-            FilamentSupportInfo info = check_filament_helio_support(preset_filaments[extruder_idx], extruder_idx);
+            FilamentSupportInfo info = check_filament_helio_support(support_data, preset_filaments[extruder_idx], extruder_idx);
             all_filament_infos.push_back(info);
 
             if (info.is_supported) {
@@ -14128,7 +14460,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
         boost::trim(target_name);
 
         std::vector<std::string> keywords = extract_material_keywords(target_name);
-        std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(target_name, keywords);
+        std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(support_data, target_name, keywords);
 
         std::string default_material_id;
         for (const auto& info : all_filament_infos) {
@@ -14149,6 +14481,9 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
                 material_id = unsupported_dialog.get_selected_material_id();
                 helio_using_reference_material = true;
                 material_already_selected = true;
+            } else if (choice == 3 && refresh_helio_supported_data(
+                           static_cast<wxWindow*>(wxGetApp().mainframe))) {
+                return HELIO_SUPPORT_DATA_REFRESHED;
             } else {
                 return -1;
             }
@@ -14169,7 +14504,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
         size_t best_mat_match_length = 0;
         std::string best_mat_id;
 
-        for (HelioQuery::SupportedData pdata : HelioQuery::global_supported_materials) {
+        for (const HelioQuery::SupportedData& pdata : *supported_materials) {
             if (!pdata.native_name.empty()) {
                 std::string native_name = pdata.native_name;
                 size_t atPos = used_filament.find('@');
@@ -14212,7 +14547,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
             std::string best_token_material_id;
             std::string best_token_native_name;
 
-            for (HelioQuery::SupportedData pdata : HelioQuery::global_supported_materials) {
+            for (const HelioQuery::SupportedData& pdata : *supported_materials) {
                 if (!pdata.native_name.empty()) {
                     std::string native_name = pdata.native_name;
                     boost::algorithm::to_lower(native_name);
@@ -14270,7 +14605,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
                 boost::trim(target_name2);
 
                 std::vector<std::string> keywords = extract_material_keywords(target_name2);
-                std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(target_name2, keywords);
+                std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(support_data, target_name2, keywords);
 
                 if (!similar_materials.empty()) {
                     wxArrayString material_choices;
@@ -14283,7 +14618,7 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
                     // Collect unsupported filament info for dialog
                     std::vector<FilamentSupportInfo> unsupported_for_dialog;
                     unsupported_for_dialog.push_back(all_filament_infos.empty() ?
-                        check_filament_helio_support(used_filament, extruders.front() - 1) :
+                        check_filament_helio_support(support_data, used_filament, extruders.front() - 1) :
                         all_filament_infos[0]);
 
                     std::string default_mat_id;
@@ -14301,6 +14636,9 @@ int Plater::priv::update_helio_background_process_v2(std::string& printer_id, st
                         material_id = unsupported_dialog.get_selected_material_id();
                         is_supported_by_helio = true;
                         helio_using_reference_material = true;
+                    } else if (choice == 3 && refresh_helio_supported_data(
+                                   static_cast<wxWindow*>(wxGetApp().mainframe))) {
+                        return HELIO_SUPPORT_DATA_REFRESHED;
                     } else {
                         GUI::MessageDialog errordialog(nullptr,
                             wxString::Format(_L("Helio does not support materials %s.\n\nPlease choose an officially supported material. "), used_filament),
@@ -14360,6 +14698,23 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
                                                    std::vector<HelioQuery::MaterialInput>& materials,
                                                    bool& is_multi_color, bool& is_multi_material)
 {
+    for (;;) {
+        const int result = update_helio_background_process_once(printer_id, materials,
+                                                                 is_multi_color, is_multi_material);
+        if (result != HELIO_SUPPORT_DATA_REFRESHED) {
+            return result;
+        }
+        printer_id.clear();
+        materials.clear();
+        is_multi_color = false;
+        is_multi_material = false;
+    }
+}
+
+int Plater::priv::update_helio_background_process_once(std::string& printer_id,
+                                                        std::vector<HelioQuery::MaterialInput>& materials,
+                                                        bool& is_multi_color, bool& is_multi_material)
+{
     helio_using_reference_material = false; // Reset at start (Issue D fix)
     notification_manager->close_notification_of_type(NotificationType::HelioSlicingError);
     PresetBundle *           preset_bundle     = wxGetApp().preset_bundle;
@@ -14374,9 +14729,18 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
          return -1;
      }
 
+    const auto support_data = HelioQuery::supported_data_view();
+    const auto& supported_printers = support_data.printers;
+    const auto& supported_materials = support_data.materials;
+    if (support_data.availability != SupportDataAvailability::Usable ||
+        !supported_printers || !supported_materials) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Helio support-data snapshot is unavailable";
+        return -1;
+    }
+
     /*invalid printer preset*/
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": preset_name = '" << preset_name << "', preset_pure_name = '" << preset_pure_name << "'";
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": global_supported_printers.size() = " << HelioQuery::global_supported_printers.size();
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": supported_printers.size() = " << supported_printers->size();
 
     // For printer matching, use the full preset_name to handle modified names like "myBambu Lab H2Dsmells"
     std::string printer_target_name = preset_name;
@@ -14395,7 +14759,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
     // This finds the best (longest) match to prefer specific printers over generic ones
     // e.g., "H2D Pro" should match before "H2D" when both could match
     auto [best_match_id, best_match_length] = match_printer_with_boundaries(
-        printer_target_name, HelioQuery::global_supported_printers);
+        printer_target_name, *supported_printers);
 
     if (!best_match_id.empty()) {
         helio_support = true;
@@ -14407,7 +14771,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
     // This handles cases like "myBambu Lab H2Dsmells" or "yourH2Dfast"
     if (!helio_support) {
         auto [token_printer_id, token_native_name] = match_printer_tokens(
-            printer_target_name, HelioQuery::global_supported_printers);
+            printer_target_name, *supported_printers);
 
         if (!token_printer_id.empty()) {
             // Show confirmation dialog for token-based match
@@ -14436,7 +14800,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
 
         // Extract keywords and find similar printers
         std::vector<std::string> keywords = extract_printer_keywords(printer_target_name);
-        std::vector<HelioQuery::SupportedData> similar_printers = find_similar_printers(printer_target_name, keywords);
+        std::vector<HelioQuery::SupportedData> similar_printers = find_similar_printers(support_data, printer_target_name, keywords);
 
         if (!similar_printers.empty()) {
             // Create list of printer names for selection dialog
@@ -14707,7 +15071,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
     for (size_t i = 0; i < extruders.size(); ++i) {
         int extruder_idx = extruders[i] - 1; // Extruders are 1-indexed
         if (extruder_idx >= 0 && extruder_idx < (int)preset_filaments.size()) {
-            FilamentSupportInfo info = check_filament_helio_support(preset_filaments[extruder_idx], extruder_idx);
+            FilamentSupportInfo info = check_filament_helio_support(support_data, preset_filaments[extruder_idx], extruder_idx);
             all_filament_infos.push_back(info);
 
             if (info.is_supported) {
@@ -14782,7 +15146,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
         std::string best_token_material_id;
         std::string best_token_native_name;
 
-        for (const HelioQuery::SupportedData& pdata : HelioQuery::global_supported_materials) {
+        for (const HelioQuery::SupportedData& pdata : *supported_materials) {
             if (pdata.native_name.empty()) continue;
             std::string native_name = pdata.native_name;
             boost::algorithm::to_lower(native_name);
@@ -14831,7 +15195,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
 
         // No token match — show reference material selection dialog
         std::vector<std::string> keywords = extract_material_keywords(target_name);
-        std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(target_name, keywords);
+        std::vector<HelioQuery::SupportedData> similar_materials = find_similar_materials(support_data, target_name, keywords);
 
         if (!similar_materials.empty()) {
             wxArrayString material_choices;
@@ -14853,7 +15217,7 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
 
             int choice = 0;
             std::string selected_ref_material_id;
-            do {
+            {
                 HelioUnsupportedFilamentsDialog unsupported_dialog(
                     static_cast<wxWindow*>(wxGetApp().mainframe),
                     unsupported_for_slot, similar_materials, default_material_id);
@@ -14865,23 +15229,12 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
                 if (choice == 3) {
                     // Re-fetch supported data from Helio
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": User chose to refresh supported data for slot " << i;
-                    std::string helio_api_url = HelioQuery::get_helio_api_url();
-                    std::string helio_api_key = HelioQuery::get_helio_pat();
-                    HelioQuery::request_all_support_machine(helio_api_url, helio_api_key);
-                    HelioQuery::request_all_support_materials(helio_api_url, helio_api_key);
-
-                    // Show progress dialog while data syncs
-                    HelioSyncProgressDialog sync_dlg(static_cast<wxWindow*>(wxGetApp().mainframe));
-                    sync_dlg.ShowModal();
-
-                    // Re-compute similar materials with refreshed data
-                    similar_materials = find_similar_materials(target_name, keywords);
-                    if (similar_materials.empty()) {
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": No similar materials found after refresh for slot " << i;
-                        break;
+                    if (!refresh_helio_supported_data(static_cast<wxWindow*>(wxGetApp().mainframe))) {
+                        return -1;
                     }
+                    return HELIO_SUPPORT_DATA_REFRESHED;
                 }
-            } while (choice == 3);
+            }
 
             if (choice == 1) {
                 materials[i].materialId = selected_ref_material_id;
@@ -14945,6 +15298,9 @@ int Plater::priv::update_helio_background_process(std::string& printer_id,
 
 void Plater::priv::on_helio_processing_complete(HelioCompletionEvent &a)
 {
+    if (!helio_background_process.is_action_current(a.generation)) {
+        return;
+    }
     if (a.is_successful) {
         this->reset_gcode_toolpaths();
 
@@ -15023,8 +15379,11 @@ void Plater::priv::on_helio_processing_complete(HelioCompletionEvent &a)
     }
 }
 
-void Plater::priv::on_helio_processing_start(SimpleEvent &a)
+void Plater::priv::on_helio_processing_start(HelioActionEvent &a)
 {
+    if (!helio_background_process.is_action_current(a.generation)) {
+        return;
+    }
     notification_manager->close_notification_of_type(GUI::NotificationType::SignDetected);
     notification_manager->close_notification_of_type(GUI::NotificationType::ExportFinished);
     notification_manager->set_slicing_progress_began(true);
@@ -15032,8 +15391,20 @@ void Plater::priv::on_helio_processing_start(SimpleEvent &a)
 }
 
 //BBS: GUI refactor: slice with helio
-void Plater::priv::on_helio_process()
+void Plater::priv::on_helio_process(const PartPlate* expected_plate)
 {
+    auto helio_launch_allowed = [this, expected_plate]() {
+        const PartPlate* current_plate = partplate_list.get_curr_plate();
+        return current_plate != nullptr && current_plate == expected_plate &&
+               current_plate->is_slice_result_valid() && current_plate->can_slice() &&
+               !q->only_gcode_mode() && !q->using_exported_file() &&
+               !sidebar->has_broken_mixed_filament(current_plate) &&
+               !q->is_background_process_slicing();
+    };
+
+    if (!helio_launch_allowed())
+        return;
+
     std::string helio_api_url = Slic3r::HelioQuery::get_helio_api_url();
     std::string helio_api_key = Slic3r::HelioQuery::get_helio_pat();
 
@@ -15083,25 +15454,40 @@ void Plater::priv::on_helio_process()
 
         while (dlg.ShowModal() == wxID_OK)
         {
+            if (!helio_launch_allowed())
+                return;
+
             if (partplate_list.get_curr_plate()->empty()) return;
             GCodeProcessorResult* g_result = background_process.get_current_gcode_result();
 
             /*simulation*/
             int action = dlg.get_action();
-            helio_background_process.set_action(action);
 
             if (action == 0) {
                 bool valid = false;
                 HelioQuery::SimulationInput data = dlg.get_simulation_input(valid);
                 if (!valid) { continue; }
 
-                helio_background_process.set_simulation_input_data(data);
-                if (multimaterial_enabled) {
-                    helio_background_process.init(helio_api_key, helio_api_url, printer_id, materials, is_multi_color, is_multi_material, g_result, preview, [this]() {});
-                } else {
-                    helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result, preview, [this]() {});
+                const bool initialized = multimaterial_enabled
+                    ? helio_background_process.init(helio_api_key, helio_api_url, printer_id, materials, is_multi_color,
+                                                    is_multi_material, g_result, preview, [this]() {})
+                    : helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result,
+                                                    preview, [this]() {});
+                if (!initialized) {
+                    MessageDialog dlg(nullptr, _L("Previous Helio action is still stopping; try again shortly"),
+                                      _L("Helio Additive"), wxOK | wxICON_WARNING);
+                    dlg.ShowModal();
+                    continue;
                 }
-                helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition, background_process.m_state, notification_manager);
+                helio_background_process.set_action(action);
+                helio_background_process.set_simulation_input_data(data);
+                if (!helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition,
+                                                                 background_process.m_state, notification_manager)) {
+                    MessageDialog dlg(nullptr, _L("Previous Helio action is still stopping; try again shortly"),
+                                      _L("Helio Additive"), wxOK | wxICON_WARNING);
+                    dlg.ShowModal();
+                    continue;
+                }
                 BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":helio simulation process called (V" << (multimaterial_enabled ? "3" : "2") << ")";
 
                 if (wxGetApp().getAgent()) {
@@ -15117,13 +15503,26 @@ void Plater::priv::on_helio_process()
                 HelioQuery::OptimizationInput data = dlg.get_optimization_input(valid);
                 if (!valid) { continue; }
 
-                helio_background_process.set_optimization_input_data(data);
-                if (multimaterial_enabled) {
-                    helio_background_process.init(helio_api_key, helio_api_url, printer_id, materials, is_multi_color, is_multi_material, g_result, preview, [this]() {});
-                } else {
-                    helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result, preview, [this]() {});
+                const bool initialized = multimaterial_enabled
+                    ? helio_background_process.init(helio_api_key, helio_api_url, printer_id, materials, is_multi_color,
+                                                    is_multi_material, g_result, preview, [this]() {})
+                    : helio_background_process.init(helio_api_key, helio_api_url, printer_id, material_id, g_result,
+                                                    preview, [this]() {});
+                if (!initialized) {
+                    MessageDialog dlg(nullptr, _L("Previous Helio action is still stopping; try again shortly"),
+                                      _L("Helio Additive"), wxOK | wxICON_WARNING);
+                    dlg.ShowModal();
+                    continue;
                 }
-                helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition, background_process.m_state, notification_manager);
+                helio_background_process.set_action(action);
+                helio_background_process.set_optimization_input_data(data);
+                if (!helio_background_process.helio_thread_start(background_process.m_mutex, background_process.m_condition,
+                                                                 background_process.m_state, notification_manager)) {
+                    MessageDialog dlg(nullptr, _L("Previous Helio action is still stopping; try again shortly"),
+                                      _L("Helio Additive"), wxOK | wxICON_WARNING);
+                    dlg.ShowModal();
+                    continue;
+                }
                 BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":helio optimization process called (V" << (multimaterial_enabled ? "3" : "2") << ")";
 
                 if (wxGetApp().getAgent()) {
@@ -15141,6 +15540,12 @@ void Plater::priv::on_helio_process()
 
 void Plater::priv::on_helio_input_dlg(SimpleEvent &a)
 {
+    const PartPlate* current_plate = partplate_list.get_curr_plate();
+    if (current_plate == nullptr || !current_plate->is_slice_result_valid() ||
+        !current_plate->can_slice() || q->only_gcode_mode() || q->using_exported_file() ||
+        sidebar->has_broken_mixed_filament(current_plate) || q->is_background_process_slicing())
+        return;
+
     std::string helio_api_key = Slic3r::HelioQuery::get_helio_pat();
 
     if (helio_api_key.empty()) {
@@ -15172,22 +15577,46 @@ void Plater::priv::on_helio_input_dlg(SimpleEvent &a)
         }
     }
     else {
-        if (!HelioQuery::global_printers_fully_loaded || !HelioQuery::global_materials_fully_loaded) {
+        const SupportDataAvailability availability = HelioQuery::supported_data_view().availability;
+        if (availability == SupportDataAvailability::Usable) {
+            on_helio_process(current_plate);
+        }
+        else if (availability == SupportDataAvailability::Synchronizing) {
             wxGetApp().request_helio_supported_data();
             auto dlg = MessageDialog(nullptr, _L("The printer list and material list are being synchronized. Please try again later."), _L("Synchronizing Helio"), wxOK | wxICON_WARNING);
             dlg.ShowModal();
         }
         else {
-            on_helio_process();
+                const std::string details = helio_support_data_error_details(HelioQuery::supported_data_view());
+
+                wxString message = _L("Helio could not load the supported printer and material lists. Matching has been paused so unavailable data is not treated as an unsupported material.");
+                if (!details.empty()) {
+                    message += "\n\n";
+                    message += wxString::FromUTF8(details);
+                }
+                MessageDialog dlg(nullptr, message, _L("Helio Data Load Failed"), wxYES_NO | wxNO_DEFAULT | wxICON_ERROR);
+                dlg.SetButtonLabel(wxID_YES, _L("Retry"));
+                dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
+                if (dlg.ShowModal() != wxID_YES) {
+                    return;
+                }
+
+                wxGetApp().request_helio_supported_data(true);
+                HelioSyncProgressDialog sync_dlg(static_cast<wxWindow*>(wxGetApp().mainframe), true);
+                sync_dlg.ShowModal();
+                if (HelioQuery::supported_data_view().availability == SupportDataAvailability::Usable) {
+                    on_helio_process(current_plate);
+                    return;
+                }
+            }
         }
     }
-}
 
 //BBS: GUI refactor: slice all
 void Plater::priv::on_action_slice_all(SimpleEvent&)
 {
     if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice project event\n" ;
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice project event\n";
         //BBS update extruder params and speed table before slicing
         const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
         auto& print = q->get_partplate_list().get_current_fff_print();
@@ -15256,6 +15685,8 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print plate event\n" ;
     }
+
+    if (!wxGetApp().check_send_print_version_policy()) return;
 
     //BBS
     if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
@@ -15326,6 +15757,8 @@ void Plater::priv::on_action_print_plate_from_sdcard(SimpleEvent&)
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print plate event\n";
     }
 
+    if (!wxGetApp().check_send_print_version_policy()) return;
+
     //BBS
     if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
     m_select_machine_dlg->set_print_type(PrintFromType::FROM_SDCARD_VIEW);
@@ -15349,6 +15782,8 @@ int Plater::priv::update_print_required_data(Slic3r::DynamicPrintConfig config, 
 
 void Plater::priv::on_action_send_to_printer(bool isall)
 {
+    if (!wxGetApp().check_send_print_version_policy()) return;
+
 	if (!m_send_to_sdcard_dlg) m_send_to_sdcard_dlg = new SendToPrinterDialog(q);
     if (isall) {
         m_send_to_sdcard_dlg->prepare(PLATE_ALL_IDX);
@@ -15374,6 +15809,8 @@ void Plater::priv::on_action_print_all(SimpleEvent&)
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print all event\n" ;
     }
+
+    if (!wxGetApp().check_send_print_version_policy()) return;
 
     //BBS
     if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
@@ -15436,6 +15873,8 @@ void Plater::priv::on_plate_selected(SimpleEvent&)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received plate selected event\n" ;
     sidebar->obj_list()->on_plate_selected(partplate_list.get_curr_plate_index());
+    if (view3D && view3D->get_canvas3d())
+        view3D->get_canvas3d()->update_all_objects_unprintable_warning();
 }
 
 void Plater::priv::on_action_request_model_id(wxCommandEvent& evt)
@@ -15969,6 +16408,7 @@ void Plater::priv::init_notification_manager()
     notification_manager->init_progress_indicator();
 }
 
+
 void Plater::priv::update_objects_position_when_select_preset(const std::function<void()> &select_prest)
 {
     PartPlateList &old_plate_list = this->partplate_list;
@@ -15984,9 +16424,23 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
     old_plate_bbox_list.reserve(old_plate_list.get_plate_count());
     std::vector<BoundingBoxf3> old_plate_wt_bbox; // per-plate wipe tower bbox; .defined=false when absent
     old_plate_wt_bbox.reserve(old_plate_list.get_plate_count());
+    // Snapshot of old plate's filament count; new plate's AMS association
+    // isn't settled yet right after select_prest(), so reuse this instead.
+    std::vector<int> old_plate_filament_cnt;
+    old_plate_filament_cnt.reserve(old_plate_list.get_plate_count());
     const DynamicPrintConfig &old_full_config         = wxGetApp().preset_bundle->full_config();
     const int                 old_nozzle_nums         = wxGetApp().preset_bundle->get_printer_extruder_count();
     const bool                old_prime_tower_enabled = old_full_config.opt_bool("enable_prime_tower");
+    // Smooth-mode timelapse needs a wipe tower even for a single-filament plate, so it
+    // must gate the snapshot/translate logic the same way filament_cnt>1 does.
+    const auto old_timelapse_smooth = []() -> bool {
+        if (auto *opt = wxGetApp().preset_bundle->full_config().option<ConfigOptionEnum<TimelapseType>>("timelapse_type"))
+            return opt->value == TimelapseType::tlSmooth;
+        return false;
+    }();
+    // Wrapping/clumping detection needs a tower too, even on a single-filament plate.
+    const bool old_wrapping_detection = old_full_config.opt_bool("enable_wrapping_detection");
+    const bool old_tower_needed_regardless = old_timelapse_smooth || old_wrapping_detection;
     for (size_t i = 0; i < old_plate_list.get_plate_count(); ++i) {
         PartPlate                    *plate   = old_plate_list.get_plate(i);
         std::set<std::pair<int, int>> obj_set = plate->get_obj_and_inst_set();
@@ -16002,14 +16456,20 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
 
         BoundingBoxf3 wt_bbox; // default-constructed: defined=false
         const int     filament_cnt = static_cast<int>(plate->get_extruders().size());
-        // Wipe tower contributes only when prime tower is on and the plate has >1 filament.
-        if (old_prime_tower_enabled && filament_cnt > 1) {
+        old_plate_filament_cnt.emplace_back(filament_cnt);
+        // Wipe tower contributes when prime tower is on and (plate has >1 filament
+        // OR smooth-mode timelapse, which needs a tower even for a single filament).
+        if (old_prime_tower_enabled && (filament_cnt > 1 || old_tower_needed_regardless)) {
             Vec3d wt_pos, wt_size;
             plate->estimate_wipe_tower_polygon(old_full_config, static_cast<int>(i),
                                                wt_pos, wt_size, old_nozzle_nums, filament_cnt);
             if (wt_size.x() > 1e-3 && wt_size.y() > 1e-3) {
+                // Anchor from raw wipe_tower_x/y; wt_pos from estimate_wipe_tower_polygon
+                // includes brim clamp and would skew the pre-switch snapshot.
                 const Vec3d plate_origin = plate->get_origin();
-                const Vec3d wt_min       = plate_origin + Vec3d(wt_pos.x(), wt_pos.y(), 0.0);
+                const double raw_x        = old_full_config.option<ConfigOptionFloats>("wipe_tower_x")->get_at((int) i);
+                const double raw_y        = old_full_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at((int) i);
+                const Vec3d  wt_min       = plate_origin + Vec3d(raw_x, raw_y, 0.0);
                 wt_bbox = BoundingBoxf3(wt_min, wt_min + wt_size);
             }
         }
@@ -16130,11 +16590,43 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
         std::vector<int> effective_objs;
         // Snapshot only; delta is re-derived after create_plate settles the final grid.
         Vec3d            content_center;
+        // Extra whole-assembly translate to move parts+tower off forbidden regions,
+        // applied after the centering translate.
+        Vec3d            avoid_delta = Vec3d::Zero();
+        // Optimal-position result, pre-switch frame; used instead of the plain anchor
+        // when has_wt_min_override is set.
+        Vec3d            wt_min_override     = Vec3d::Zero();
+        bool             has_wt_min_override = false;
     };
     std::set<int>                     reschedule_set;
     std::vector<PassPlateTranslation> pass_translations;
     const int                         new_plate_count = cur_plate_list.get_plate_count();
     const int                         common_count    = std::min(static_cast<int>(plate_object.size()), new_plate_count);
+
+    // Fit / reschedule decision must use the target printer's wipe-tower footprint, not
+    // the pre-switch snapshot size (e.g. large-plate tower size when switching back
+    // to a small plate would falsely trigger a full re-arrange)
+    const DynamicPrintConfig &new_full_config_for_wt = wxGetApp().preset_bundle->full_config();
+    const int new_nozzle_nums = wxGetApp().preset_bundle->get_printer_extruder_count();
+    const bool new_prime_tower_enabled = new_full_config_for_wt.opt_bool("enable_prime_tower");
+    const bool new_timelapse_smooth = []() -> bool {
+        if (auto *opt = wxGetApp().preset_bundle->full_config().option<ConfigOptionEnum<TimelapseType>>("timelapse_type"))
+            return opt->value == TimelapseType::tlSmooth;
+        return false;
+    }();
+    const bool enable_wrapping = new_full_config_for_wt.opt_bool("enable_wrapping_detection");
+    // Mirrors the pre-switch check above, evaluated against the target printer's config.
+    const bool new_tower_needed_regardless = new_timelapse_smooth || enable_wrapping;
+
+    // Baseline arrange params for the "optimal wipe tower position" heuristic.
+    const bool                 try_optimal_wt_pos = wipe_tower_optimal_pos_enabled();
+    arrangement::ArrangeParams optimal_wt_arr_params;
+    if (try_optimal_wt_pos) {
+        optimal_wt_arr_params = init_arrange_params(q);
+        // best_object_pos lags one update behind during a preset switch; same caveat as below.
+        if (auto *bop = new_full_config_for_wt.opt<ConfigOptionPoint>("best_object_pos"))
+            optimal_wt_arr_params.align_center = bop->value;
+    }
 
     for (int i = 0; i < static_cast<int>(plate_object.size()); ++i) {
         std::vector<int> effective_objs;
@@ -16160,11 +16652,31 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
                 continue;
             content_bbox.merge(mo->instance_bounding_box(0));
         }
-        if (i < static_cast<int>(old_plate_wt_bbox.size()) && old_plate_wt_bbox[i].defined)
-            content_bbox.merge(old_plate_wt_bbox[i]);
 
-        PartPlate  *new_plate    = cur_plate_list.get_plate(i);
+        // Merge footprint at the pre-switch anchor with the target printer's tower size.
+        // filament_cnt comes from the pre-switch plate snapshot since new_plate's isn't settled yet.
+        PartPlate *new_plate = cur_plate_list.get_plate(i);
+        if (i < static_cast<int>(old_plate_wt_bbox.size()) && old_plate_wt_bbox[i].defined) {
+            const BoundingBoxf3 &old_wt  = old_plate_wt_bbox[i];
+            Vec3d new_wt_size = Vec3d::Zero();
+            const int filament_cnt = old_plate_filament_cnt[i];
+            if (new_prime_tower_enabled && (filament_cnt > 1 || new_tower_needed_regardless)){
+                Vec3d new_wt_pos_unused;
+                // use_global_objects=true: per-plate containment isn't reliable yet here,
+                // so scan all objects instead.
+                new_plate->estimate_wipe_tower_polygon(new_full_config_for_wt, static_cast<int>(i),
+                                                        new_wt_pos_unused, new_wt_size,
+                                                        new_nozzle_nums, filament_cnt, /*use_global_objects=*/true);
+            }
+            content_bbox.merge(BoundingBoxf3(old_wt.min, old_wt.min + new_wt_size));
+        }
+
+
         const Vec3d new_plate_sz = new_plate->get_bounding_box().size();
+        const Vec3d old_plate_sz = old_plate_bbox_list[i].size();
+        const double plate_size_eps = 0.1;
+        const bool  same_plate_size = std::abs(new_plate_sz.x() - old_plate_sz.x()) <= plate_size_eps
+                                    && std::abs(new_plate_sz.y() - old_plate_sz.y()) <= plate_size_eps;
         const Vec3d content_dim  = content_bbox.size();
         const bool  xy_over      = content_dim.x() > new_plate_sz.x() + xy_overflow_eps
                                 || content_dim.y() > new_plate_sz.y() + xy_overflow_eps;
@@ -16172,8 +16684,180 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
             for (int o : effective_objs)
                 reschedule_set.insert(o);
         } else {
+            // Same plate size -> delta ends up ~zero, but still go through this
+            // path so the wipe tower position write below always runs.
+            const Vec3d pass_center = same_plate_size ? old_plate_bbox_list[i].center() : content_bbox.center();
+            const Vec3d center_delta = Vec3d(new_plate->get_center_origin() - pass_center);
+
+            // Forbidden-region avoidance: try a whole-assembly axis-aligned translate
+            // (parts + tower together) to clear exclude/wrapping areas. Bail -> rearrange.
+            std::vector<BoundingBoxf3> part_bboxes;
+            part_bboxes.reserve(effective_objs.size());
+            for (int o : effective_objs) {
+                ModelObject *mo = model.objects[o];
+                if (!mo || mo->instances.empty())
+                    continue;
+                part_bboxes.push_back(mo->instance_bounding_box(0));
+            }
+            BoundingBoxf3         tower_bb;
+            const BoundingBoxf3  *tower_ptr = nullptr;
+            Vec3d                 tower_size = Vec3d::Zero();
+            if (i < static_cast<int>(old_plate_wt_bbox.size()) && old_plate_wt_bbox[i].defined) {
+                const BoundingBoxf3 &old_wt = old_plate_wt_bbox[i];
+                Vec3d                new_wt_size = Vec3d::Zero();
+                const int            filament_cnt = old_plate_filament_cnt[i];
+                if (new_prime_tower_enabled && (filament_cnt > 1 || new_tower_needed_regardless)) {
+                    Vec3d new_wt_pos_unused;
+                    new_plate->estimate_wipe_tower_polygon(new_full_config_for_wt, static_cast<int>(i),
+                                                            new_wt_pos_unused, new_wt_size,
+                                                            new_nozzle_nums, filament_cnt, /*use_global_objects=*/true);
+                }
+                if (new_wt_size(0) > 0.0 && new_wt_size(1) > 0.0) {
+                    tower_bb   = BoundingBoxf3(old_wt.min, old_wt.min + new_wt_size);
+                    tower_ptr  = &tower_bb;
+                    tower_size = new_wt_size;
+                }
+            }
+            const std::vector<BoundingBoxf3> &exclude_aabbs = new_plate->get_exclude_areas();
+            BoundingBoxf3                    wrapping_bb;
+            bool                             has_wrapping = false;
+            if (enable_wrapping) {
+                // Wrapping exclude area is plate-local; add this plate's origin for world coords.
+                const Pointfs wpts = cur_plate_list.get_wrapping_exclude_area();
+                if (!wpts.empty()) {
+                    const Vec3d plate_origin = new_plate->get_origin();
+                    wrapping_bb = BoundingBoxf3();
+                    for (const Vec2d &p : wpts)
+                        wrapping_bb.merge(Vec3d(p.x() + plate_origin.x(), p.y() + plate_origin.y(), 0.0));
+                    has_wrapping = wrapping_bb.defined;
+                }
+            }
+
+            Vec3d avoid_delta = Vec3d::Zero();
+            // tower_forbidden_clearance mirrors wipe_tower_pullback_then_avoid()'s own clearance
+            // (2*brim + gap) so first-placement and this repositioning pass agree.
+            const double tower_brim_width = tower_ptr
+                ? wipe_tower_brim_width(new_full_config_for_wt, tower_size.z())
+                : 0.0;
+            const double tower_forbidden_clearance = tower_ptr
+                ? wipe_tower_brim_footprint_expand(tower_brim_width, wipe_tower_line_width(new_full_config_for_wt))
+                      + WIPE_TOWER_ARRANGE_GAP
+                : (double) WIPE_TOWER_ARRANGE_GAP;
+            auto run_avoidance = [&](const BoundingBoxf3 *tower, const Vec3d &pre_delta, Vec3d &out_delta) {
+                return avoid_forbidden_regions_delta(part_bboxes, tower, pre_delta,
+                                                     exclude_aabbs, has_wrapping ? &wrapping_bb : nullptr,
+                                                     new_plate->get_bounding_box(), new_plate->get_build_volume(true),
+                                                     (double) WIPE_TOWER_MARGIN, tower_brim_width,
+                                                     (double) WIPE_TOWER_ARRANGE_GAP, tower_forbidden_clearance, out_delta);
+            };
+
+            // A) Preferred: re-seat the tower at its "optimal position" (hugging the parts'
+            //    inflated hull along the printer's native tower direction) and only then run
+            //    the centering/avoidance pass. Any failure here falls through to B unchanged.
+            Vec3d optimal_wt_min_old_frame = Vec3d::Zero();
+            bool  has_optimal_wt           = false;
+            if (try_optimal_wt_pos && tower_ptr != nullptr) {
+                arrangement::ArrangeParams p = optimal_wt_arr_params;
+                Polygons inflated_parts;
+                {
+                    arrangement::ArrangePolygons aps;
+                    aps.reserve(effective_objs.size());
+                    for (int o : effective_objs) {
+                        ModelObject *mo = model.objects[o];
+                        if (!mo || mo->instances.empty())
+                            continue;
+                        aps.emplace_back(get_instance_arrange_poly(mo->instances[0], new_full_config_for_wt));
+                    }
+                    if (!aps.empty()) {
+                        arrangement::update_selected_items_inflation(aps, new_full_config_for_wt, p);
+                        for (const arrangement::ArrangePolygon &ap : aps) {
+                            Polygon c = ap.poly.contour;
+                            c.translate(ap.translation.x(), ap.translation.y());
+                            // Shift into the target plate's frame so the hull and plate centre
+                            // agree; centring uses the original tower position.
+                            c.translate(scaled(center_delta.x()), scaled(center_delta.y()));
+                            // Floor matches arrange's effective inflation so a support-less
+                            // plate doesn't under-inflate relative to a real arrange.
+                            const coord_t infl_amount = std::max(ap.inflation, scaled(WIPE_TOWER_ARRANGE_GAP));
+                            if (infl_amount > 0) {
+                                Polygons infl = offset(c, (float) infl_amount);
+                                for (Polygon &ip : infl) inflated_parts.emplace_back(std::move(ip));
+                            } else {
+                                inflated_parts.emplace_back(std::move(c));
+                            }
+                        }
+                    }
+                }
+
+                const Vec3d plate_origin  = new_plate->get_origin();
+                const Vec3d plate_center3 = new_plate->get_center_origin();
+                const Vec2d def_local     = cur_plate_list.get_machine_default_wipe_tower_pos();
+                // Direction anchor: the DEFAULT tower's centre (not its min corner), so the
+                // ray isn't skewed by half the tower footprint.
+                const Vec2d default_tower_center(plate_origin.x() + def_local.x() + tower_size.x() / 2.0,
+                                                  plate_origin.y() + def_local.y() + tower_size.y() / 2.0);
+                // Hug gap matches nest (2x brim + wipe_tower_side_gap) plus extra optimal-position clearance.
+                const double optimal_pos_clearance = wipe_tower_hug_clearance_matching_nest(
+                    new_full_config_for_wt, tower_size.z(), p);
+                Vec2d optimal_min_new;
+                if (compute_optimal_wipe_tower_min(inflated_parts,
+                                                   Vec2d(plate_center3.x(), plate_center3.y()),
+                                                   default_tower_center,
+                                                   Vec2d(tower_size.x(), tower_size.y()),
+                                                   optimal_pos_clearance,
+                                                   optimal_min_new)) {
+                    // Gate first: the optimal position ignores the plate entirely, so only take
+                    // it when legal on its own (inside the reachable area, clear of forbidden
+                    // regions). optimal_min_new is already in the target plate's frame.
+                    const double brim = wipe_tower_brim_width(new_full_config_for_wt, tower_size.z());
+                    const BoundingBoxf legal = wipe_tower_legal_corner_range(
+                        new_plate->get_build_volume(true), Vec2d(tower_size.x(), tower_size.y()), brim);
+                    const double ox0 = optimal_min_new.x(), oy0 = optimal_min_new.y();
+                    const double ox1 = ox0 + tower_size.x(), oy1 = oy0 + tower_size.y();
+                    bool usable = ox0 >= legal.min.x() - EPSILON && ox0 <= legal.max.x() + EPSILON &&
+                                  oy0 >= legal.min.y() - EPSILON && oy0 <= legal.max.y() + EPSILON;
+                    if (usable) {
+                        // Test against the tower's brim footprint (2*brim), matching the
+                        // convention used elsewhere for an existing tower's real bbox.
+                        const double expand = wipe_tower_brim_footprint_expand(brim, wipe_tower_line_width(new_full_config_for_wt));
+                        const double c = WIPE_TOWER_ARRANGE_GAP;
+                        auto hits = [&](const BoundingBoxf3 &r) {
+                            return ox0 - expand < r.max.x() + c && ox1 + expand > r.min.x() - c &&
+                                   oy0 - expand < r.max.y() + c && oy1 + expand > r.min.y() - c;
+                        };
+                        for (const BoundingBoxf3 &r : exclude_aabbs)
+                            if (hits(r)) { usable = false; break; }
+                        if (usable && has_wrapping && hits(wrapping_bb))
+                            usable = false;
+                    }
+                    if (usable) {
+                        // Legal on its own, so run the same whole-assembly avoidance B uses,
+                        // but with the tower at its optimal spot instead of the carried-over one.
+                        const Vec3d cand_min_old(optimal_min_new.x() - center_delta.x(),
+                                                  optimal_min_new.y() - center_delta.y(),
+                                                  tower_bb.min.z());
+                        const BoundingBoxf3 cand_tower_bb(cand_min_old, cand_min_old + tower_size);
+                        Vec3d               cand_delta = Vec3d::Zero();
+                        if (run_avoidance(&cand_tower_bb, center_delta, cand_delta)) {
+                            avoid_delta              = cand_delta;
+                            optimal_wt_min_old_frame = cand_min_old;
+                            has_optimal_wt           = true;
+                        }
+                    }
+                    // else (or avoidance failed): fall through to B and keep the carried-over one.
+                }
+            }
+
+            // B) Fallback: keep the tower where it was and let centering/avoidance move the
+            // whole assembly.
+            if (!has_optimal_wt && !run_avoidance(tower_ptr, center_delta, avoid_delta)) {
+                // Nothing clears the forbidden regions and content still fits: keep the layout
+                // rather than tear apart a valid arrangement.
+                avoid_delta = Vec3d::Zero();
+            }
             // Defer delta until create_plate has settled the final grid.
-            pass_translations.push_back({ i, std::move(effective_objs), content_bbox.center() });
+            pass_translations.push_back({i, std::move(effective_objs), pass_center, avoid_delta,
+                                         optimal_wt_min_old_frame, has_optimal_wt});
         }
     }
 
@@ -16211,7 +16895,7 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
                 arrangement::ArrangeParams params = init_arrange_params(q);
                 // init_arrange_params reads best_object_pos from the slicing Print
                 // config, which lags one update behind during a preset switch.
-                // Override from the fresh full_config so arrange aligns to the NEW printer.
+                // Override from the fresh full_config so arrange aligns to the target printer.
                 if (auto *bop = new_full_config.opt<ConfigOptionPoint>("best_object_pos"))
                     params.align_center = bop->value;
                 arrangement::update_arrange_params(params, new_full_config, arrange_items);
@@ -16230,6 +16914,10 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
                         return false;
                     auto op_tl = edited_print_cfg.option("timelapse_type");
                     if (op_tl && op_tl->getInt() == TimelapseType::tlSmooth)
+                        return true;
+                    // enable_wrapping_detection alone also needs a tower even on a single-color
+                    // plate (GLCanvas3D.cpp's equivalent gate ORs this in too, ~line 3897-3898).
+                    if (edited_print_cfg.opt_bool("enable_wrapping_detection"))
                         return true;
                     for (const auto &item : arrange_items)
                         if (item.extrude_id_filament_types.size() > 1)
@@ -16250,13 +16938,64 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
                 if (need_wipe_tower && cur_plate_list.get_plate_count() > 0) {
                     PartPlate *tpl_plate = cur_plate_list.get_plate(0);
                     if (tpl_plate) {
-                        std::set<int> extruder_ids   = cur_plate_list.get_extruders(true);
-                        const int     extruder_size  = static_cast<int>(extruder_ids.size());
-                        const int     nozzle_nums    = wxGetApp().preset_bundle->get_printer_extruder_count();
-                        Vec3d         wt_pos, wt_size;
-                        arrangement::ArrangePolygon wt_template = tpl_plate->estimate_wipe_tower_polygon(
-                            new_full_config, /*plate_index=*/0, wt_pos, wt_size,
-                            nozzle_nums, extruder_size, /*use_global_objects=*/false);
+                        const int nozzle_nums = wxGetApp().preset_bundle->get_printer_extruder_count();
+                        const DynamicPrintConfig &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+                        const float prime_tower_width = print_cfg.opt_float("prime_tower_width");
+                        std::vector<double> prime_volumes = new_full_config.option<ConfigOptionFloats>("filament_prime_volume")->values;
+                        if (new_full_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode")->value == pvmSaving)
+                            for (auto &pv : prime_volumes) pv = 15.f;
+                        const bool enable_wrapping_wt = new_full_config.opt_bool("enable_wrapping_detection");
+                        // Obstacle size follows this round's actual filament types (falls back
+                        // to 2 only when empty), matching ArrangeJob::prepare_wipe_tower.
+                        std::set<int> extruder_ids;
+                        for (const auto &item : arrange_items)
+                            for (const auto &kv : item.extrude_id_filament_types)
+                                extruder_ids.insert(kv.first);
+                        const int plate_extruder_size = extruder_ids.empty() ? 2 : (int) extruder_ids.size();
+                        const Vec3d wt_size_3d = tpl_plate->estimate_wipe_tower_size(
+                            print_cfg, prime_tower_width, get_max_element(prime_volumes),
+                            nozzle_nums, plate_extruder_size, /*use_global_objects=*/false, enable_wrapping_wt);
+                        const Vec2d tower_size(wt_size_3d.x(), wt_size_3d.y());
+
+                        const Vec3d plate_origin = tpl_plate->get_origin();
+                        const Vec2d def_local = cur_plate_list.get_machine_default_wipe_tower_pos();
+                        float x = (float) def_local.x() + (float) plate_origin.x();
+                        float y = (float) def_local.y() + (float) plate_origin.y();
+
+                        std::vector<ForbiddenRect2d> forbidden;
+                        for (const BoundingBoxf3 &b : tpl_plate->get_exclude_areas())
+                            forbidden.push_back({b.min.x(), b.min.y(), b.max.x(), b.max.y()});
+                        if (enable_wrapping_wt) {
+                            const Pointfs wpts = cur_plate_list.get_wrapping_exclude_area();
+                            if (!wpts.empty()) {
+                                BoundingBoxf wrap_bb(wpts);
+                                forbidden.push_back({wrap_bb.min.x() + plate_origin.x(), wrap_bb.min.y() + plate_origin.y(),
+                                                      wrap_bb.max.x() + plate_origin.x(), wrap_bb.max.y() + plate_origin.y()});
+                            }
+                        }
+
+                        const double brim = wipe_tower_brim_width(print_cfg, wt_size_3d.z());
+                        wipe_tower_pullback_then_avoid(x, y, tower_size, tpl_plate->get_build_volume(true), brim,
+                                                       wipe_tower_line_width(print_cfg), forbidden);
+
+                        const float local_x = x - (float) plate_origin.x();
+                        const float local_y = y - (float) plate_origin.y();
+
+                        arrangement::ArrangePolygon wt_template;
+                        const BoundingBoxf footprint = wipe_tower_nest_footprint(tower_size.x(), tower_size.y(), brim);
+                        wt_template.poly.contour = Polygon({
+                            {scaled(footprint.min)},
+                            {scaled(footprint.max.x()), scaled(footprint.min.y())},
+                            {scaled(footprint.max)},
+                            {scaled(footprint.min.x()), scaled(footprint.max.y())}
+                            });
+                        wt_template.translation    = Vec2crd{scaled(local_x), scaled(local_y)};
+                        wt_template.setter         = NULL; // do not move wipe tower
+                        wt_template.name           = "WipeTower";
+                        wt_template.is_virt_object = true;
+                        wt_template.is_wipe_tower  = true;
+                        // Preview-only obstacle; create_plate() below persists the real value.
+
                         // One obstacle per potential new bed, capped to global plate budget.
                         const int existing_plate_count_now = static_cast<int>(cur_plate_list.get_plate_count());
                         const int budget = std::max(0,
@@ -16270,6 +17009,12 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
                         wt_obstacle_count = max_new_beds;
                     }
                 }
+
+                // Make the fresh arrange forbidden-aware so both overflow and bail plates
+                // avoid exclude/wrapping areas (mirrors ArrangeJob::process).
+                const bool enable_wrapping_arr = new_full_config.opt_bool("enable_wrapping_detection");
+                cur_plate_list.preprocess_exclude_areas(excludes, enable_wrapping_arr, static_cast<int>(arrange_items.size()));
+                arrangement::update_unselected_items_inflation(excludes, new_full_config, params);
 
                 arrangement::arrange(arrange_items, excludes, bedpts, params);
                 for (const auto &ap : arrange_items)
@@ -16295,42 +17040,110 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
         DynamicConfig      &proj_cfg     = wxGetApp().preset_bundle->project_config;
         ConfigOptionFloats *wipe_tower_x = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_x");
         ConfigOptionFloats *wipe_tower_y = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_y");
+
         for (const auto &pt : pass_translations) {
             if (pt.plate_idx < 0 || pt.plate_idx >= final_plate_count)
                 continue;
-            PartPlate  *new_plate        = cur_plate_list.get_plate(pt.plate_idx);
+            PartPlate *new_plate = cur_plate_list.get_plate(pt.plate_idx);
             const Vec3d new_plate_center = new_plate->get_center_origin();
-            const Vec3d delta(new_plate_center.x() - pt.content_center.x(),
-                              new_plate_center.y() - pt.content_center.y(),
-                              0.0);
-            if (delta.cwiseAbs().maxCoeff() <= 1e-6)
-                continue;
-            for (int obj_idx : pt.effective_objs) {
-                if (obj_idx < 0 || obj_idx >= static_cast<int>(model.objects.size()))
-                    continue;
-                ModelObject *o = model.objects[obj_idx];
-                if (!o || o->instances.empty())
-                    continue;
-                ModelInstance *inst = o->instances[0];
-                inst->set_offset(inst->get_offset() + delta);
-                o->invalidate_bounding_box();
+            const Vec3d center_delta(new_plate_center.x() - pt.content_center.x(), new_plate_center.y() - pt.content_center.y(), 0.0);
+            // Center translate + forbidden-region avoidance translate (parts + tower together).
+            // Both paths centre first (using the ORIGINAL tower position); the optimal-position
+            // path only swaps the tower's anchor afterwards, it does not re-centre.
+            const Vec3d delta = center_delta + pt.avoid_delta;
+            if(delta.cwiseAbs().maxCoeff() > 1e-6) {
+                for (int obj_idx : pt.effective_objs) {
+                    if (obj_idx < 0 || obj_idx >= static_cast<int>(model.objects.size())) continue;
+                    ModelObject *o = model.objects[obj_idx];
+                    if (!o || o->instances.empty()) continue;
+                    ModelInstance *inst = o->instances[0];
+                    inst->set_offset(inst->get_offset() + delta);
+                    o->invalidate_bounding_box();
+                }
             }
 
-            if (pt.plate_idx < static_cast<int>(old_plate_wt_bbox.size())
-                && old_plate_wt_bbox[pt.plate_idx].defined
-                && wipe_tower_x && wipe_tower_y
-                && pt.plate_idx < static_cast<int>(wipe_tower_x->values.size())
-                && pt.plate_idx < static_cast<int>(wipe_tower_y->values.size())) {
-                const Vec3d new_plate_origin = new_plate->get_origin();
-                const Vec3d new_wt_world_min = old_plate_wt_bbox[pt.plate_idx].min + delta;
-                wipe_tower_x->values[pt.plate_idx] = new_wt_world_min.x() - new_plate_origin.x();
-                wipe_tower_y->values[pt.plate_idx] = new_wt_world_min.y() - new_plate_origin.y();
+            const bool has_tower_snapshot =
+                    pt.plate_idx < static_cast<int>(old_plate_wt_bbox.size()) && old_plate_wt_bbox[pt.plate_idx].defined
+                    && wipe_tower_x && wipe_tower_y && pt.plate_idx < static_cast<int>(wipe_tower_x->values.size()) &&
+                    pt.plate_idx < static_cast<int>(wipe_tower_y->values.size());
+
+            // Always (re)write the tower position: set_default_wipe_tower_pos_for_plate()
+            // unconditionally reset wipe_tower_x/y earlier, so it must be re-derived here.
+            if(has_tower_snapshot){
+                const BoundingBoxf3 &old_wt = old_plate_wt_bbox[pt.plate_idx];
+
+                Vec3d new_wt_size = old_wt.max - old_wt.min;
+                const int filament_cnt = old_plate_filament_cnt[pt.plate_idx];
+                if (new_prime_tower_enabled && (filament_cnt > 1 || new_tower_needed_regardless)) {
+                    Vec3d new_wt_pos_unused;
+                    new_plate->estimate_wipe_tower_polygon(new_full_config_for_wt, pt.plate_idx, new_wt_pos_unused, new_wt_size,
+                                                            new_nozzle_nums, filament_cnt, /*use_global_objects=*/true);
+                }
+
+                // Anchor by the bottom-left corner, replaced by the optimal-position result
+                // when that pass succeeded; both then take the same delta.
+                const Vec3d wt_anchor  = pt.has_wt_min_override ? pt.wt_min_override : old_wt.min;
+                const Vec3d new_wt_min = wt_anchor + delta;
+
+                // Tower-only pull-back into the reachable area, always runs for both paths.
+                const BoundingBoxf legal = wipe_tower_legal_corner_range(new_plate->get_build_volume(true),
+                                                                          Vec2d(new_wt_size(0), new_wt_size(1)),
+                                                                          wipe_tower_brim_width(new_full_config_for_wt, new_wt_size(2)));
+                Vec3d clamped_wt_min = new_wt_min;
+                clamped_wt_min(0) = std::clamp(new_wt_min(0), legal.min.x(), legal.max.x());
+                clamped_wt_min(1) = std::clamp(new_wt_min(1), legal.min.y(), legal.max.y());
+                Vec3d pull_back = clamped_wt_min - new_wt_min;
+
+                // Try applying the pull-back to objects too; keep it only if they still
+                // fit, otherwise it's tower-only so objects don't get shoved off-plate.
+                Vec3d obj_shift = Vec3d::Zero();
+                if (pull_back.cwiseAbs().maxCoeff() > 1e-6) {
+                    BoundingBoxf3 shifted_content_bbox;
+                    for (int obj_idx : pt.effective_objs) {
+                        if (obj_idx < 0 || obj_idx >= static_cast<int>(model.objects.size())) continue;
+                        ModelObject *o = model.objects[obj_idx];
+                        if (!o || o->instances.empty()) continue;
+                        BoundingBoxf3 ibb = o->instance_bounding_box(0);
+                        shifted_content_bbox.merge(BoundingBoxf3(ibb.min + pull_back, ibb.max + pull_back));
+                    }
+                    if (shifted_content_bbox.defined) {
+                        const Vec3d new_plate_sz    = new_plate->get_bounding_box().size();
+                        const Vec3d shifted_dim     = shifted_content_bbox.size();
+                        const bool  objs_would_overflow =
+                                shifted_dim.x() > new_plate_sz.x() + xy_overflow_eps
+                                || shifted_dim.y() > new_plate_sz.y() + xy_overflow_eps
+                                || shifted_content_bbox.min.x() < new_plate->get_bounding_box().min.x() - xy_overflow_eps
+                                || shifted_content_bbox.min.y() < new_plate->get_bounding_box().min.y() - xy_overflow_eps
+                                || shifted_content_bbox.max.x() > new_plate->get_bounding_box().max.x() + xy_overflow_eps
+                                || shifted_content_bbox.max.y() > new_plate->get_bounding_box().max.y() + xy_overflow_eps;
+                        if (!objs_would_overflow)
+                            obj_shift = pull_back;
+                    }
+                }
+                if (obj_shift.cwiseAbs().maxCoeff() > 1e-6) {
+                    for (int obj_idx : pt.effective_objs) {
+                        if (obj_idx < 0 || obj_idx >= static_cast<int>(model.objects.size())) continue;
+                        ModelObject *o = model.objects[obj_idx];
+                        if (!o || o->instances.empty()) continue;
+                        ModelInstance *inst = o->instances[0];
+                        inst->set_offset(inst->get_offset() + obj_shift);
+                        o->invalidate_bounding_box();
+                    }
+                }
+                const Vec3d final_wt_min = new_wt_min + pull_back;
+
+                const Vec3d new_plate_origin       = new_plate->get_origin();
+                wipe_tower_x->values[pt.plate_idx] = final_wt_min.x() - new_plate_origin.x();
+                wipe_tower_y->values[pt.plate_idx] = final_wt_min.y() - new_plate_origin.y();
+                if (pt.plate_idx < static_cast<int>(model.wipe_tower.positions.size()))
+                    model.wipe_tower.positions[pt.plate_idx] = Vec2d(wipe_tower_x->values[pt.plate_idx], wipe_tower_y->values[pt.plate_idx]);
             }
         }
 
         // 4. Apply arrange result; items that didn't fit a fresh bin or exceed
         //    MAX_PLATES_COUNT are deferred to the virtual plate below.
         std::set<int> arrange_unpackable;
+        std::set<int> rescheduled_placed_objs;
         for (size_t i = 0; i < arrange_items.size(); ++i) {
             arrangement::ArrangePolygon &ap     = arrange_items[i];
             const int                    obj_id = arrange_obj_ids[i];
@@ -16349,12 +17162,13 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
             if (obj_id >= 0 && obj_id < static_cast<int>(model.objects.size())
                 && model.objects[obj_id] && !model.objects[obj_id]->instances.empty())
                 model.objects[obj_id]->invalidate_bounding_box();
+            rescheduled_placed_objs.insert(obj_id);
         }
 
-        // 5. Park virtual-bound objects on the virtual plate, aligned by
-        //    convex-hull centre so multi-part offset origins don't spill out.
+        // 5. Park virtual-bound objects on the virtual plate, aligned by bbox
+        //    top-left corner so oversized items spill right/down, not onto other plates.
         PartPlate    &unprintable_plate = cur_plate_list.get_unprintable_plate();
-        const Vec3d   virtual_center    = unprintable_plate.get_center_origin();
+        const Vec3d   virtual_topleft   = unprintable_plate.get_topleft_origin();
         std::set<int> all_virtual       = virtual_obj_idxs;
         all_virtual.insert(arrange_unpackable.begin(), arrange_unpackable.end());
         for (int obj_idx : all_virtual) {
@@ -16363,12 +17177,11 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
             ModelObject *o = model.objects[obj_idx];
             if (!o || o->instances.empty())
                 continue;
-            ModelInstance *inst        = o->instances[0];
-            BoundingBoxf3  hull        = o->instance_convex_hull_bounding_box(static_cast<size_t>(0));
-            const Vec3d    cur_off     = inst->get_offset();
-            const Vec3d    hull_center = hull.center();
-            inst->set_offset(Vec3d(cur_off.x() + (virtual_center.x() - hull_center.x()),
-                                   cur_off.y() + (virtual_center.y() - hull_center.y()),
+            ModelInstance *inst    = o->instances[0];
+            BoundingBoxf3  hull    = o->instance_convex_hull_bounding_box(static_cast<size_t>(0));
+            const Vec3d    cur_off = inst->get_offset();
+            inst->set_offset(Vec3d(cur_off.x() + (virtual_topleft.x() - hull.min(0)),
+                                   cur_off.y() + (virtual_topleft.y() - hull.max(1)),
                                    cur_off.z()));
             o->invalidate_bounding_box();
         }
@@ -16418,8 +17231,47 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
         }
         cur_plate = cur_plate_list.get_curr_plate();
 
+        // 8c. Reschedule/overflow plates skipped the per-plate optimal-position pass
+        //     step 3 ran; seat them now, after reload_all_objects() (step 6) has
+        //     backfilled obj_to_instance_set, so plate membership below is real.
+        //     Always seat the OFF-equivalent default position first, then only
+        //     overwrite it with the ON optimal result when that pass succeeds -
+        //     this guarantees ON-failure falls back to the same baseline as OFF.
+        if (!rescheduled_placed_objs.empty() && wipe_tower_x && wipe_tower_y) {
+            const int plate_count_now = static_cast<int>(cur_plate_list.get_plate_count());
+            for (int idx = 0; idx < plate_count_now; ++idx) {
+                PartPlate *rp = cur_plate_list.get_plate(idx);
+                if (!rp || rp->is_locked())
+                    continue;
+                bool has_rescheduled_obj = false;
+                for (const auto &oi : rp->get_obj_and_inst_set())
+                    if (rescheduled_placed_objs.count(oi.first) > 0) {
+                        has_rescheduled_obj = true;
+                        break;
+                    }
+                if (!has_rescheduled_obj)
+                    continue;
+                cur_plate_list.set_default_wipe_tower_pos_for_plate(idx, /*init_pos=*/false);
+                if (try_optimal_wt_pos)
+                    try_optimal_wipe_tower_position_for_plate(*rp, idx, model, cur_plate_list,
+                                                              *wipe_tower_x, *wipe_tower_y,
+                                                              new_full_config_for_wt, optimal_wt_arr_params);
+            }
+        }
+
         // Rebind slice context before update() reads the current Print.
         cur_plate_list.update_slice_context_to_current_plate(this->background_process);
+
+        // Same as ArrangeJob::finalize: mark placed before reload_all_plates(), which itself
+        // calls update() and would otherwise re-run first-time seating.
+        if (wipe_tower_x && wipe_tower_y) {
+            const int plate_count_now = static_cast<int>(cur_plate_list.get_plate_count());
+            for (int idx = 0; idx < plate_count_now; ++idx) {
+                PartPlate *p = cur_plate_list.get_plate(idx);
+                if (p)
+                    init_wipe_tower_placed_flag(*p);
+            }
+        }
 
         // delete_plate does not notify ObjectList; mirror Plater::delete_plate.
         wxGetApp().obj_list()->reload_all_plates();
@@ -16428,6 +17280,9 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
         update();
 
         view3D->deselect_all();
+
+        if (q)
+            q->on_plate_layout_changed();
     }
 
     // EVT_GLCANVAS_ARRANGE_OUTPLATE intentionally NOT posted: reschedule is now
@@ -16632,7 +17487,7 @@ bool Plater::priv::check_ams_status_impl(bool is_slice_all)
             } dlg(q);
             dlg.Fit();
             if (dlg.ShowModal() == wxID_YES) {
-                if (GUI::wxGetApp().sidebar().sync_extruder_list()) {
+                if (GUI::wxGetApp().sidebar().sync_extruder_list() && wxGetApp().check_slice_version_policy()) {
                     if (is_slice_all)
                         wxPostEvent(q, SimpleEvent(EVT_GLTOOLBAR_SLICE_ALL));
                     else
@@ -17008,6 +17863,16 @@ void Plater::priv::set_bed_shape(const Pointfs       &shape,
         if (shape_position != new_shape_position)
             bed.set_shape(shape, printable_height, extruder_areas, extruder_heights, custom_model, force_as_custom, new_shape_position);
     }
+
+    // Always refresh heat-soak zones from printer config (may be empty on non-A2L).
+    {
+        Pointfs heat_soak_areas;
+        if (auto *opt = config->option<ConfigOptionPoints>("bed_heat_soak_area"))
+            heat_soak_areas = opt->values;
+        partplate_list.set_heat_soak_areas(heat_soak_areas);
+        if (q)
+            q->on_plate_layout_changed();
+    }
 }
 
 bool Plater::priv::can_delete() const
@@ -17174,46 +18039,57 @@ void Plater::priv::on_action_layersediting(SimpleEvent&)
 
 void Plater::priv::on_create_filament(SimpleEvent &)
 {
-    CreateFilamentPresetDialog dlg(wxGetApp().mainframe);
+    CreateFilamentWebDialog dlg(wxGetApp().mainframe);
     int res = dlg.ShowModal();
     if (wxID_OK == res) {
         wxGetApp().mainframe->update_side_preset_ui();
         update_ui_from_settings();
         sidebar->update_all_preset_comboboxes();
-        CreatePresetSuccessfulDialog success_dlg(wxGetApp().mainframe, SuccessType::FILAMENT);
-        int                          res = success_dlg.ShowModal();
     }
-    wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_FILAMENTS);
+    // Re-open the filament management page so the user can see the newly created
+    // filament in the custom filaments list (same behaviour as before the refactor).
+    // SP_CUSTOM (rather than SP_FILAMENTS) makes it land on the Custom tab.
+    wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_CUSTOM);
 }
 
 void Plater::priv::on_modify_filament(SimpleEvent &evt)
 {
     FilamentInfomation *filament_info = static_cast<FilamentInfomation *>(evt.GetEventObject());
-    int                 res;
-    std::shared_ptr<Preset> need_edit_preset;
-    {
-        EditFilamentPresetDialog dlg(wxGetApp().mainframe, filament_info);
-        res = dlg.ShowModal();
-        need_edit_preset = dlg.get_need_edit_preset();
+
+    EditFilamentWebDialog dlg(wxGetApp().mainframe, filament_info->filament_id);
+    int res = dlg.ShowModal();
+
+    if (res == wxID_EDIT) {
+        // The dialog closed itself so the params tab can be opened without a
+        // modal-within-modal state; do that now that ShowModal() has returned.
+        std::string preset_name = dlg.get_edit_preset_name();
+        Tab *tab = wxGetApp().get_tab(Preset::Type::TYPE_FILAMENT);
+        if (tab) {
+            // Same as EditFilamentPresetDialog::edit_preset(): remembering the filament_id
+            // here is what makes ParamsDialog's close handler queue EVT_MODIFY_FILAMENT and
+            // bring the user back to the Edit Filament dialog once they're done editing the
+            // preset's parameters. Without this, closing the params dialog leaves nothing open.
+            wxGetApp().params_dialog()->set_editing_filament_id(filament_info->filament_id);
+            wxGetApp().params_dialog()->Popup();
+            tab->restore_last_select_item();
+            tab->set_just_edit(true);
+            tab->select_preset(preset_name);
+            // If the printer isn't compatible with this preset, select_preset() above
+            // can silently jump the Tab to a different preset; select it again so the
+            // user still sees the preset they asked to edit.
+            Preset *preset = wxGetApp().preset_bundle->filaments.find_preset(preset_name, false);
+            if (preset && !preset->is_compatible)
+                tab->select_preset(preset_name);
+        }
+        return;
     }
+
     wxGetApp().mainframe->update_side_preset_ui();
     update_ui_from_settings();
     sidebar->update_all_preset_comboboxes();
-    if (wxID_EDIT == res) {
-        Tab *tab = wxGetApp().get_tab(Preset::Type::TYPE_FILAMENT);
-        //tab->restore_last_select_item();
-        if (tab == nullptr) { return; }
-        // Popup needs to be called before "restore_last_select_item", otherwise the page may not be updated
-        wxGetApp().params_dialog()->Popup();
-        tab->restore_last_select_item();
-        // Opening Studio and directly accessing the Filament settings interface through the edit preset button will not take effect and requires manual settings.
-        tab->set_just_edit(true);
-        tab->select_preset(need_edit_preset->name);
-        // when some preset have modified, if the printer is not need_edit_preset_name compatible printer, the preset will jump to other preset, need select again
-        if (!need_edit_preset->is_compatible) tab->select_preset(need_edit_preset->name);
-    } else
-        wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_FILAMENTS);
 
+    // SP_CUSTOM (rather than SP_FILAMENTS) makes it land on the Custom tab.
+    wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_CUSTOM);
 }
 
 void Plater::priv::on_add_filament(SimpleEvent &evt) {
@@ -17262,10 +18138,32 @@ bool Plater::priv::leave_gizmos_stack()
     return changed;
 }
 
+void Plater::priv::invalidate_assemble_model_on_project_reset()
+{
+    // Drop the assembly BVH cache so ratios / bounds / notifications do not leak into the next project.
+    GLCanvas3D::clear_isolated_volumes_cache();
+    // Invalidate the independent assembly model so it is re-derived for the next project.
+    m_assemble_model.clear_objects();
+    m_assemble_model_valid = false;
+    // Drop any retained assembly undo history and force a fresh baseline for the next project.
+    m_undo_redo_stack_assemble.clear();
+    m_assemble_undo_baseline_dirty = true;
+    m_assemble_project_dirty       = false;
+    clear_assemble_guide_ui_snapshots();
+    // clear_objects() does not touch assembly steps/tree. After leaving assembly view those
+    // artifacts live on the prepare model (sync_assemble_steps_to_main_model); if they survive
+    // reset, the next homepage STEP open does derive_assemble_model() via `m_assemble_model =
+    // model` and then appends a fresh STEP seed on top — leaving an empty leftover step.
+    // new_project avoids this via model.load_from(empty); load_project only calls reset().
+    model.clear_assembly_artifacts();
+    m_assemble_model.clear_assembly_artifacts();
+}
+
 void Plater::priv::derive_assemble_model()
 {
     // A freshly derived / restored assembly model has no matching undo history: force a clean baseline.
     m_assemble_undo_baseline_dirty = true;
+    m_assemble_project_dirty = false;
     // Ensure every prepare-side model part has a stable GUID before cloning, so each assembly-side
     // counterpart can reference it through assembly_src_guid.
     for (ModelObject *mo : model.objects)
@@ -17335,6 +18233,45 @@ void Plater::priv::derive_assemble_model()
 #endif
 }
 
+bool Plater::priv::assemble_model_needs_rederive_from_prepare() const
+{
+    // Live assemble already matches prepare well enough for incremental sync.
+    if (!m_assemble_model_valid || model.objects.empty())
+        return false;
+
+    // Prepare delete emptied the live assemble model (valid stays true). Prepare undo restores
+    // objects on the main model only — re-derive from assembly_model.json / clone instead of
+    // treating every object as a fresh import via set_assembly_pos.
+    if (m_assemble_model.objects.empty())
+        return true;
+
+    // Partial delete + undo: some prepare parts are back but missing from live assemble, while the
+    // persisted assembly graph still describes them. Prefer a full JSON restore over set_assembly_pos.
+    const std::string &json = model.get_assembly_model_json_str();
+    if (json.empty())
+        return false;
+
+    std::unordered_set<std::string> asm_guids;
+    for (const ModelObject *ao : m_assemble_model.objects)
+        for (const ModelVolume *mv : ao->volumes)
+            if (mv != nullptr && !mv->assembly_src_guid().empty())
+                asm_guids.insert(mv->assembly_src_guid());
+
+    for (const ModelObject *po : model.objects) {
+        for (const ModelVolume *mv : po->volumes) {
+            if (mv == nullptr || !mv->is_model_part())
+                continue;
+            const std::string &guid = mv->part_guid();
+            if (guid.empty() || asm_guids.count(guid) != 0)
+                continue;
+            // GUID appears in the persisted assembly graph → this is a restore hole, not a new part.
+            if (json.find(guid) != std::string::npos)
+                return true;
+        }
+    }
+    return false;
+}
+
 void Plater::priv::sync_assemble_model_on_enter(const std::vector<size_t>& loaded_idxs)
 {
     if (!m_assemble_model_valid)
@@ -17366,6 +18303,41 @@ void Plater::priv::sync_assemble_model_on_enter(const std::vector<size_t>& loade
                 assembly_obj_by_src_guid.emplace(mv->assembly_src_guid(), ai);
     }
 
+    // STEP re-import: one shared extra assemble offset for every newly appended object.
+    // Computed before the loop from the existing assembly-view bbox, then ADDED onto each
+    // clone's existing assemble_offset (do not replace via set_assembly_pos).
+    Vec3d step_reimport_extra_offset = Vec3d::Zero();
+    if (!loaded_idxs.empty()) {
+        const BoundingBoxf3 existing_box = m_assemble_model.bounding_box_in_assembly_view();
+        if (existing_box.defined) {
+            BoundingBoxf3 incoming_box;
+            for (size_t pi : loaded_idxs) {
+                if (pi >= model.objects.size())
+                    continue;
+                ModelObject *po = model.objects[pi];
+                bool mapped = false;
+                for (ModelVolume *mv : po->volumes) {
+                    if (!mv->is_model_part())
+                        continue;
+                    if (assembly_obj_by_src_guid.count(mv->part_guid())) {
+                        mapped = true;
+                        break;
+                    }
+                }
+                if (mapped)
+                    continue;
+                // Clone keeps prepare assemble_offset, so this bbox predicts the batch layout.
+                incoming_box.merge(po->bounding_box_in_assembly_view());
+            }
+            // Place the whole incoming batch to the right of the existing scene (+10mm gap),
+            // same idea as Model::set_assembly_pos but as a uniform additive delta.
+            if (incoming_box.defined)
+                step_reimport_extra_offset.x() = existing_box.max.x() + 10.0 - incoming_box.min.x();
+            else
+                step_reimport_extra_offset.x() = existing_box.size().x() + 10.0;
+        }
+    }
+
     for (int pi = 0; pi < (int) model.objects.size(); ++pi) {
         if (!loaded_idxs.empty()) {
             auto it = std::find(loaded_idxs.begin(), loaded_idxs.end(), (size_t)pi);
@@ -17389,6 +18361,33 @@ void Plater::priv::sync_assemble_model_on_enter(const std::vector<size_t>& loade
             ModelObject *ao = m_assemble_model.add_object(*po);
             for (ModelVolume *mv : ao->volumes)
                 mv->set_assembly_src_guid(mv->part_guid());
+            // STEP re-import: keep cloned assemble_offset, then apply the shared extra shift.
+            // Otherwise place like a fresh import via set_assembly_pos — but only when the
+            // prepare-side instance never had an assemble pose. ModelInstance's clone ctor
+            // copies offsets yet resets m_assemble_initialized to false, so gating must use
+            // po (not ao); unconditional set_assembly_pos would wipe a restored / edited pose.
+            // Prepare-side po always mirrors ao so the assembly-view thumbnail stays in sync.
+            if (!loaded_idxs.empty()) {
+                for (ModelInstance *inst : ao->instances)
+                    inst->set_assemble_offset(inst->get_assemble_offset() + step_reimport_extra_offset);
+            } else {
+                bool po_assemble_initialized = false;
+                for (ModelInstance *inst : po->instances) {
+                    if (inst->is_assemble_initialized()) {
+                        po_assemble_initialized = true;
+                        break;
+                    }
+                }
+                if (!po_assemble_initialized) {
+                    m_assemble_model.set_assembly_pos(ao);
+                } else {
+                    // Re-flag the clone so later heal paths do not treat it as uninitialized.
+                    for (ModelInstance *inst : ao->instances)
+                        inst->set_assemble_offset(inst->get_assemble_offset());
+                }
+            }
+            for (size_t i = 0; i < ao->instances.size() && i < po->instances.size(); ++i)
+                po->instances[i]->set_assemble_offset(ao->instances[i]->get_assemble_offset());
             // New object added to m_assemble_model: retained assembly snapshots no longer match, reset baseline.
             m_assemble_undo_baseline_dirty = true;
             continue;
@@ -17411,8 +18410,62 @@ void Plater::priv::sync_assemble_model_on_enter(const std::vector<size_t>& loade
         }
     }
 
+    // Prepare-side assemble_offset changed: force assembly-view thumbnail rebuild.
+    if (!loaded_idxs.empty() && step_reimport_extra_offset != Vec3d::Zero())
+        partplate_list.reset_thumbnail_assembly_view_data();
+
     // Reconcile the other direction: drop assembly parts whose prepare counterpart is gone.
     prune_orphan_assemble_parts();
+    // Refresh printable flags from prepare (clone-time copy alone is stale on re-enter).
+    sync_assemble_printable_from_prepare();
+}
+
+void Plater::priv::sync_assemble_printable_from_prepare()
+{
+    if (!m_assemble_model_valid)
+        return;
+
+    // Prepare part_guid -> printable of the owning prepare object/instance.
+    // Prepare-side UI still toggles object/instance printable; assembly greys by volume.
+    std::unordered_map<std::string, bool> prepare_printable_by_guid;
+    for (ModelObject *po : model.objects) {
+        if (!po)
+            continue;
+        bool printable = po->printable;
+        for (const ModelInstance *inst : po->instances) {
+            if (inst && !inst->printable) {
+                printable = false;
+                break;
+            }
+        }
+        for (ModelVolume *mv : po->volumes) {
+            if (mv && mv->is_model_part() && !mv->part_guid().empty())
+                prepare_printable_by_guid[mv->part_guid()] = printable;
+        }
+    }
+
+    for (ModelObject *ao : m_assemble_model.objects) {
+        if (!ao)
+            continue;
+        // Assembly-side printable is ModelVolume-only. Keep object/instance printable true so they
+        // never grey sibling volumes; any older object-level sync residue is cleared here.
+        ao->printable = true;
+        for (ModelInstance *inst : ao->instances)
+            if (inst)
+                inst->printable = true;
+
+        for (ModelVolume *av : ao->volumes) {
+            if (!av || !av->is_model_part())
+                continue;
+            const std::string &src = av->assembly_src_guid();
+            if (src.empty()) {
+                av->set_printable(true);
+                continue;
+            }
+            auto it = prepare_printable_by_guid.find(src);
+            av->set_printable(it == prepare_printable_by_guid.end() ? true : it->second);
+        }
+    }
 }
 
 void Plater::priv::prune_orphan_assemble_parts()
@@ -17482,10 +18535,37 @@ bool Plater::priv::sync_assemble_render_state(bool prepare_to_assemble)
             ModelVolume *from = prepare_to_assemble ? pv : av;
 
             // Filament: compare resolved extruder ids so an object-level assignment on the prepare side is
-            // honored, and write the value into the destination volume config only when it actually differs
-            // (leaves an untouched prepare-side object-level assignment intact).
+            // honored. Assemble→prepare must match prepare ObjectList: a single model_part object stores
+            // filament on ModelObject (and clears part overrides). Count model_parts only — modifiers do
+            // not force the per-volume path. Pure single-volume objects also match 3mf load, which erases
+            // the sole volume's "extruder".
             const int from_extruder = from->extruder_id();
-            if (dst->extruder_id() != from_extruder) {
+            if (!prepare_to_assemble) {
+                ModelObject *dst_obj = dst->get_object();
+                int model_part_count = 0;
+                if (dst_obj != nullptr) {
+                    for (const ModelVolume *mv : dst_obj->volumes)
+                        if (mv && mv->is_model_part() && ++model_part_count > 1)
+                            break;
+                }
+                if (dst_obj != nullptr && model_part_count == 1) {
+                    const ConfigOptionInt *obj_ext =
+                        dynamic_cast<const ConfigOptionInt *>(dst_obj->config.option("extruder"));
+                    const int  obj_extruder     = (obj_ext == nullptr || obj_ext->getInt() == 0) ? 1 : obj_ext->getInt();
+                    const bool vol_has_override = dst->config.has("extruder");
+                    // Normalize even when resolved extruder_id already matches (volume override masking
+                    // a stale object-level value), otherwise save+reload drops the override and restores
+                    // the old object filament.
+                    if (obj_extruder != from_extruder || vol_has_override) {
+                        dst_obj->config.set_key_value("extruder", new ConfigOptionInt(from_extruder));
+                        dst->config.erase("extruder");
+                        changed = true;
+                    }
+                } else if (dst->extruder_id() != from_extruder) {
+                    dst->config.set_key_value("extruder", new ConfigOptionInt(from_extruder));
+                    changed = true;
+                }
+            } else if (dst->extruder_id() != from_extruder) {
                 dst->config.set_key_value("extruder", new ConfigOptionInt(from_extruder));
                 changed = true;
             }
@@ -17708,6 +18788,29 @@ void Plater::priv::sync_assemble_scale_from_prepare()
             if (mv->is_model_part() && !mv->part_guid().empty())
                 prepare_by_guid.emplace(mv->part_guid(), PrepareRef{po, mv});
 
+    // Pass 1: work out every assembly volume's target scale without writing anything yet, and decide
+    // whether the prepare side rescaled the WHOLE model by one uniform factor. That case needs more than
+    // a size update: the assembly poses are authored independently (a STEP import merges the parts into
+    // one prepare object while the assembly splits them over several objects / instances), so they do not
+    // ride along with the prepare instance scale. Resizing the parts alone would leave the old spacing
+    // behind and the assembly would fall apart, so the poses are scaled about a common pivot below.
+    //
+    // When only SOME prepare objects were rescaled (e.g. cube left alone, STEP object scaled), the
+    // whole-model uniformity test fails. Fall back to per-prepare-object groups: each group that shares
+    // one uniform ratio gets its own pose rescale about that group's ground-level centre.
+    struct PendingScale { int oi; int vi; Vec3d target; };
+    struct MatchedPart {
+        int                 oi;
+        int                 vi;
+        const ModelObject  *prepare_obj;
+        double              ratio;        // valid when axes_uniform
+        bool                axes_uniform;
+    };
+    std::vector<PendingScale> pending;
+    std::vector<MatchedPart>  matched;
+    bool   scale_parts_uniformly = true; // every part changes by the same uniform factor
+    double uniform_ratio         = 0.0;  // that factor; 0 = not seen yet
+
     for (int oi = 0; oi < (int) m_assemble_model.objects.size(); ++oi) {
         ModelObject *ao = m_assemble_model.objects[oi];
         // At render the assembly world size = instance.assemble_scale ⊙ volume.assemble_scale. The assembly
@@ -17718,18 +18821,24 @@ void Plater::priv::sync_assemble_scale_from_prepare()
             : ao->instances.front()->get_assemble_transformation().get_scaling_factor();
         for (int vi = 0; vi < (int) ao->volumes.size(); ++vi) {
             ModelVolume *av = ao->volumes[vi];
-            const std::string &src = av->assembly_src_guid();
-            if (src.empty())
+            if (!av->is_model_part())
                 continue;
+            const std::string &src = av->assembly_src_guid();
+            if (src.empty()) {
+                scale_parts_uniformly = false;
+                continue;
+            }
             auto it = prepare_by_guid.find(src);
-            if (it == prepare_by_guid.end())
+            if (it == prepare_by_guid.end()) {
+                scale_parts_uniformly = false;
                 continue; // split / combined on the prepare side: keep the frozen pose
+            }
             const ModelObject *po = it->second.po;
             const ModelVolume *pv = it->second.pv;
 
             // target assembly volume scale = prepare world size / assembly instance scale, so that
             //   asm_inst_scale ⊙ target == prepare_instance_scale ⊙ prepare_volume_scale (the prepare size).
-            // Only the scale is rewritten; the assembly-authored offset / rotation / mirror stay intact
+            // Only the scale is rewritten; the assembly-authored rotation / mirror stay intact
             // (get_assemble_transformation() falls back to the base transform for a not-yet-posed part).
             // (Instance 0; componentwise, matching the codebase's scaling-factor convention.)
             const Vec3d prepare_inst_scale = po->instances.empty() ? Vec3d::Ones()
@@ -17740,39 +18849,189 @@ void Plater::priv::sync_assemble_scale_from_prepare()
 
             // set/get round-trips through matrix decomposition, so compare with a tolerance instead of ==
             // to avoid rewriting (and needlessly resetting the assembly undo baseline) on every entry.
-            if ((av->get_assemble_transformation().get_scaling_factor() - target_volume_scale).cwiseAbs().maxCoeff() > 1e-6) {
-                Geometry::Transformation asm_trafo = av->get_assemble_transformation();
-                asm_trafo.set_scaling_factor(target_volume_scale);
-                av->set_assemble_transformation(asm_trafo);
-                ao->invalidate_bounding_box();
-                // Geometry of m_assemble_model changed outside the assembly stack: reset the undo baseline.
-                m_assemble_undo_baseline_dirty = true;
+            const Vec3d current_volume_scale = av->get_assemble_transformation().get_scaling_factor();
+            if ((current_volume_scale - target_volume_scale).cwiseAbs().maxCoeff() > 1e-6)
+                pending.push_back(PendingScale{oi, vi, target_volume_scale});
 
-                // Mirror the new scale to all keyframe entries that reference this volume,
-                // preserving each keyframe's recorded rotation and translation.
-                auto &steps_tree = m_assemble_model.get_assembly_steps_tree_data();
-                if (!steps_tree.nodes.empty()) {
-                    const std::pair<int, int> vol_key{oi, vi};
-                    std::function<void(int)> update_kf;
-                    update_kf = [&](int nid) {
-                        if (nid < 0 || nid >= (int) steps_tree.nodes.size())
-                            return;
-                        auto &node = steps_tree.nodes[nid];
-                        for (auto &entry : node.kf_data.entries) {
-                            auto kit = entry.data.volume_transformations.find(vol_key);
-                            if (kit != entry.data.volume_transformations.end()) {
-                                kit->second.set_scaling_factor(target_volume_scale);
-                                entry.need_save = true;
-                            }
-                        }
-                        for (int child : node.children)
-                            update_kf(child);
-                    };
-                    for (int root : steps_tree.roots)
-                        update_kf(root);
+            bool   axes_uniform = false;
+            double ratio        = 0.0;
+            if (current_volume_scale.cwiseAbs().minCoeff() >= EPSILON) {
+                const Vec3d r = target_volume_scale.cwiseQuotient(current_volume_scale);
+                if (r.maxCoeff() - r.minCoeff() <= 1e-6) {
+                    axes_uniform = true;
+                    ratio        = r.x();
                 }
             }
+            matched.push_back(MatchedPart{oi, vi, po, ratio, axes_uniform});
+
+            // A part left untouched contributes ratio 1, so a partial (single part / single object)
+            // prepare-side rescale breaks the whole-model uniformity test; the per-prepare-object
+            // fallback below still rescales poses inside each uniformly scaled group.
+            if (!scale_parts_uniformly || !axes_uniform) {
+                scale_parts_uniformly = false;
+                continue;
+            }
+            if (uniform_ratio == 0.0)
+                uniform_ratio = ratio;
+            else if (std::abs(ratio - uniform_ratio) > 1e-6)
+                scale_parts_uniformly = false;
         }
+    }
+
+    if (pending.empty())
+        return;
+
+    const bool rescale_poses_global = scale_parts_uniformly && uniform_ratio > 0.0 && std::abs(uniform_ratio - 1.0) > 1e-6;
+
+    // Ground-level centre of the given assembly volumes: keeps place and footing, mirroring the prepare
+    // side (scaled about the selection box centre by Selection::scale_and_translate(), then dropped
+    // back onto the bed by ensure_on_bed()).
+    auto ground_center_pivot = [&](const std::vector<std::pair<int, int>> &vols) -> Vec3d {
+        BoundingBoxf3 box;
+        for (const auto &key : vols) {
+            if (key.first < 0 || key.first >= (int) m_assemble_model.objects.size())
+                continue;
+            const ModelObject *ao = m_assemble_model.objects[key.first];
+            if (ao->instances.empty() || key.second < 0 || key.second >= (int) ao->volumes.size())
+                continue;
+            const ModelVolume *av = ao->volumes[key.second];
+            if (!av->is_model_part() || av->mesh_ptr() == nullptr)
+                continue;
+            const Transform3d inst_matrix = ao->instances.front()->get_assemble_transformation().get_matrix();
+            box.merge(av->mesh().bounding_box().transformed(inst_matrix * av->get_assemble_transformation().get_matrix()));
+        }
+        if (!box.defined)
+            return Vec3d::Zero();
+        return Vec3d(box.center().x(), box.center().y(), box.min.z());
+    };
+
+    // volume key -> ratio used to scale that volume's assemble offset (pose rescale only).
+    std::map<std::pair<int, int>, double> volume_offset_ratios;
+    // assembly object index -> (ratio, pivot) for instance assemble-offset rescale.
+    std::map<int, std::pair<double, Vec3d>> instance_rescales;
+
+    if (rescale_poses_global) {
+        std::vector<std::pair<int, int>> all_vols;
+        for (const MatchedPart &mp : matched)
+            all_vols.emplace_back(mp.oi, mp.vi);
+        const Vec3d pivot = ground_center_pivot(all_vols);
+        for (const PendingScale &ps : pending)
+            volume_offset_ratios.emplace(std::pair<int, int>{ps.oi, ps.vi}, uniform_ratio);
+        for (int oi = 0; oi < (int) m_assemble_model.objects.size(); ++oi)
+            instance_rescales.emplace(oi, std::make_pair(uniform_ratio, pivot));
+    } else {
+        // Group matched assembly parts by their prepare-side owning object.
+        std::unordered_map<const ModelObject *, std::vector<size_t>> by_prepare;
+        for (size_t i = 0; i < matched.size(); ++i)
+            by_prepare[matched[i].prepare_obj].push_back(i);
+
+        for (auto &kv : by_prepare) {
+            const std::vector<size_t> &idxs = kv.second;
+            bool   group_uniform = true;
+            double group_ratio   = 0.0;
+            for (size_t i : idxs) {
+                const MatchedPart &mp = matched[i];
+                if (!mp.axes_uniform) {
+                    group_uniform = false;
+                    break;
+                }
+                if (group_ratio == 0.0)
+                    group_ratio = mp.ratio;
+                else if (std::abs(mp.ratio - group_ratio) > 1e-6) {
+                    group_uniform = false;
+                    break;
+                }
+            }
+            if (!group_uniform || group_ratio <= 0.0 || std::abs(group_ratio - 1.0) <= 1e-6)
+                continue; // size-only for this prepare object
+
+            std::vector<std::pair<int, int>> group_vols;
+            group_vols.reserve(idxs.size());
+            for (size_t i : idxs)
+                group_vols.emplace_back(matched[i].oi, matched[i].vi);
+            const Vec3d pivot = ground_center_pivot(group_vols);
+            for (size_t i : idxs) {
+                const MatchedPart &mp = matched[i];
+                volume_offset_ratios.emplace(std::pair<int, int>{mp.oi, mp.vi}, group_ratio);
+                instance_rescales.emplace(mp.oi, std::make_pair(group_ratio, pivot));
+            }
+        }
+    }
+
+    // Pass 2: write the part scales. A volume's assemble offset lives in object space and reaches the
+    // world through the (unchanged) instance matrix, so scaling it by the same factor moves the part
+    // exactly as far as the instance below.
+    std::map<std::pair<int, int>, Vec3d> new_volume_scales;
+    for (const PendingScale &ps : pending) {
+        ModelObject *ao = m_assemble_model.objects[ps.oi];
+        ModelVolume *av = ao->volumes[ps.vi];
+        Geometry::Transformation asm_trafo = av->get_assemble_transformation();
+        asm_trafo.set_scaling_factor(ps.target);
+        const auto key = std::pair<int, int>{ps.oi, ps.vi};
+        auto       rit = volume_offset_ratios.find(key);
+        if (rit != volume_offset_ratios.end())
+            asm_trafo.set_offset(asm_trafo.get_offset() * rit->second);
+        av->set_assemble_transformation(asm_trafo);
+        ao->invalidate_bounding_box();
+        new_volume_scales.emplace(key, ps.target);
+    }
+    // Geometry of m_assemble_model changed outside the assembly stack: reset the undo baseline.
+    m_assemble_undo_baseline_dirty = true;
+
+    for (const auto &kv : instance_rescales) {
+        const int     oi    = kv.first;
+        const double  ratio = kv.second.first;
+        const Vec3d  &pivot = kv.second.second;
+        if (oi < 0 || oi >= (int) m_assemble_model.objects.size())
+            continue;
+        ModelObject *ao = m_assemble_model.objects[oi];
+        for (ModelInstance *inst : ao->instances) {
+            Geometry::Transformation inst_trafo = inst->get_assemble_transformation();
+            inst_trafo.set_offset(pivot + ratio * (inst_trafo.get_offset() - pivot));
+            inst->set_assemble_transformation(inst_trafo);
+        }
+        ao->invalidate_bounding_box();
+    }
+
+    // Mirror the new scale (and, for a whole-model / per-object rescale, the moved poses) to every
+    // keyframe entry, preserving each keyframe's recorded rotation. Explode offsets scale along with
+    // the model.
+    auto &steps_tree = m_assemble_model.get_assembly_steps_tree_data();
+    if (!steps_tree.nodes.empty()) {
+        std::function<void(int)> update_kf;
+        update_kf = [&](int nid) {
+            if (nid < 0 || nid >= (int) steps_tree.nodes.size())
+                return;
+            auto &node = steps_tree.nodes[nid];
+            for (auto &entry : node.kf_data.entries) {
+                bool touched = false;
+                for (auto &ot : entry.data.object_transformations) {
+                    auto iit = instance_rescales.find(ot.first);
+                    if (iit == instance_rescales.end())
+                        continue;
+                    const double ratio = iit->second.first;
+                    const Vec3d &pivot = iit->second.second;
+                    ot.second.set_offset(pivot + ratio * (ot.second.get_offset() - pivot));
+                    touched = true;
+                }
+                for (auto &vt : entry.data.volume_transformations) {
+                    auto sit = new_volume_scales.find(vt.first);
+                    if (sit == new_volume_scales.end())
+                        continue;
+                    vt.second.set_scaling_factor(sit->second);
+                    auto rit = volume_offset_ratios.find(vt.first);
+                    if (rit != volume_offset_ratios.end())
+                        vt.second.set_offset(vt.second.get_offset() * rit->second);
+                    touched = true;
+                }
+                if (touched)
+                    entry.need_save = true;
+            }
+            for (int child : node.children)
+                update_kf(child);
+        };
+        for (int root : steps_tree.roots)
+            update_kf(root);
     }
 }
 
@@ -17797,8 +19056,14 @@ void Plater::priv::sync_assemble_steps_to_main_model()
     // This function also runs from export_3mf() on ordinary prepare-view saves; doing the write-back there
     // would clobber a fresh prepare-view edit (e.g. painting a stroke, then saving / slicing) with the
     // assembly model's stale data. The prepare->assembly direction is refreshed on assembly-view entry.
-    if (m_undo_redo_stack_active == &m_undo_redo_stack_assemble)
-        sync_assemble_render_state(/*prepare_to_assemble*/ false);
+    if (m_undo_redo_stack_active == &m_undo_redo_stack_assemble) {
+        // Filament / painting write-back updates the prepare Model, but ObjectList caches
+        // its own extruder strings. Refresh the filament column so Prepare view matches.
+        if (sync_assemble_render_state(/*prepare_to_assemble*/ false)) {
+            if (ObjectList *ol = wxGetApp().obj_list())
+                ol->sync_filament_from_model();
+        }
+    }
 }
 
 void Plater::priv::enter_assemble_stack()
@@ -17813,12 +19078,20 @@ void Plater::priv::enter_assemble_stack()
         // snapshots would no longer match m_assemble_model). Otherwise leave the stack untouched so the
         // user can keep undoing edits made in earlier assembly-view sessions.
         if (m_undo_redo_stack_assemble.empty() || m_assemble_undo_baseline_dirty) {
+            // Preserve unsaved assembly edits across a forced baseline rebuild (prepare-side
+            // structural sync). The new baseline already contains those edits, so the stack tip
+            // looks "clean" — keep the dirty flag so close/new-project still prompts to save.
+            const bool keep_assemble_dirty = m_assemble_project_dirty;
             m_undo_redo_stack_assemble.clear();
+            clear_assemble_guide_ui_snapshots();
             // The trailing '!' marks a non-project-modifying baseline snapshot (see snapshot_modifies_project),
             // so can_undo() reports false until the user actually edits something here -> the toolbar Undo
             // icon stays greyed out at the baseline. Not localized on purpose, never shown to the user.
             this->take_snapshot(std::string("Assemble-Initial!"));
             m_assemble_undo_baseline_dirty = false;
+            // Establish a known saved tip so project_modified() works for undo/redo dirty refresh.
+            m_undo_redo_stack_assemble.mark_current_as_saved();
+            m_assemble_project_dirty = keep_assemble_dirty;
         }
     }
 }
@@ -17840,6 +19113,40 @@ bool Plater::priv::leave_assemble_stack()
     return changed;
 }
 
+void Plater::priv::remember_assemble_guide_ui(size_t snapshot_timestamp)
+{
+    if (!assemble_view)
+        return;
+    AssemblyGuideUiSnapshot ui;
+    assemble_view->get_canvas3d()->capture_assembly_guide_ui_for_snapshot(ui.selected_folder_id, ui.keyframe_selected);
+    m_assemble_guide_ui_by_time[snapshot_timestamp] = ui;
+}
+
+void Plater::priv::remember_assemble_guide_ui_for_latest_action_snapshot()
+{
+    // take_snapshot() appends: [..., action_snapshot, topmost]. Key the UI to the action snapshot.
+    const auto &ss = m_undo_redo_stack_assemble.snapshots();
+    if (ss.size() < 2)
+        return;
+    remember_assemble_guide_ui(ss[ss.size() - 2].timestamp);
+    // Also tag the live topmost so leaving/re-entering that time (redo after undo-capture) finds UI.
+    remember_assemble_guide_ui(ss.back().timestamp);
+}
+
+void Plater::priv::prune_assemble_guide_ui_snapshots()
+{
+    std::unordered_set<size_t> live;
+    live.reserve(m_undo_redo_stack_assemble.snapshots().size());
+    for (const auto &s : m_undo_redo_stack_assemble.snapshots())
+        live.insert(s.timestamp);
+    for (auto it = m_assemble_guide_ui_by_time.begin(); it != m_assemble_guide_ui_by_time.end();) {
+        if (live.count(it->first) == 0)
+            it = m_assemble_guide_ui_by_time.erase(it);
+        else
+            ++it;
+    }
+}
+
 void Plater::priv::assemble_undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator it_snapshot)
 {
     // Slim, self-contained jump that only touches the assembly model + assembly canvas.
@@ -17850,11 +19157,29 @@ void Plater::priv::assemble_undo_redo_to(std::vector<UndoRedo::Snapshot>::const_
     UndoRedo::SnapshotData top_snapshot_data;
     top_snapshot_data.printer_technology = this->printer_technology;
 
+    // Preserve the UI cursor of the state we are leaving so redo can find it. StackImpl::undo may
+    // capture an uncaptured topmost via its own take_snapshot (bypassing Plater::take_snapshot).
+    remember_assemble_guide_ui(m_undo_redo_stack_assemble.active_snapshot_time());
+
     const UndoRedo::Snapshot snapshot_copy = *it_snapshot;
     const bool jumped = it_snapshot->timestamp < m_undo_redo_stack_assemble.active_snapshot_time() ?
         m_undo_redo_stack_assemble.undo(m_assemble_model, assemble_canvas->get_selection(), assemble_canvas->get_gizmos_manager(), this->partplate_list, top_snapshot_data, it_snapshot->timestamp) :
         m_undo_redo_stack_assemble.redo(m_assemble_model, assemble_canvas->get_gizmos_manager(), this->partplate_list, it_snapshot->timestamp);
     if (jumped) {
+        prune_assemble_guide_ui_snapshots();
+        if (!m_assemble_model.get_assembly_tree_json_str().empty()) {
+            std::string tree_error;
+            if (!AssemblyTreeData::from_json_string(m_assemble_model.get_assembly_tree_json_str(), m_assemble_model.get_assembly_tree_data(), &tree_error))
+                BOOST_LOG_TRIVIAL(warning) << "assemble_undo_redo_to: restore assembly tree failed: " << tree_error;
+        }
+        if (!m_assemble_model.get_assembly_steps_json_str().empty()) {
+            std::string steps_error;
+            float steps_font_size = 0.0f;
+            if (!AssemblyStepsTreeData::from_json_string(m_assemble_model.get_assembly_steps_json_str(), m_assemble_model.get_assembly_steps_tree_data(), m_assemble_model, &steps_error, &steps_font_size))
+                BOOST_LOG_TRIVIAL(warning) << "assemble_undo_redo_to: restore assembly steps failed: " << steps_error;
+        } else {
+            m_assemble_model.get_assembly_steps_tree_data() = AssemblyStepsTreeData();
+        }
         assemble_canvas->get_selection().clear();
         assemble_canvas->reload_scene(true);
         // Restore the selection captured in the target snapshot. The main stack does this in
@@ -17870,7 +19195,21 @@ void Plater::priv::assemble_undo_redo_to(std::vector<UndoRedo::Snapshot>::const_
         // reset_all_states()/exit_gizmo turn into no-ops -> the Move gizmo can no longer be closed on playback
         // or step switch. Prefer update_after_undo_redo() over a bare update_data() for exactly this reset.
         assemble_canvas->get_gizmos_manager().update_after_undo_redo(snapshot_copy);
+        // Restore guide UI cursor from the side map (not SnapshotData). Do NOT call active_view().
+        int restore_folder_id = -1;
+        int restore_kf        = -1;
+        if (auto it_ui = m_assemble_guide_ui_by_time.find(snapshot_copy.timestamp);
+            it_ui != m_assemble_guide_ui_by_time.end()) {
+            restore_folder_id = it_ui->second.selected_folder_id;
+            restore_kf        = it_ui->second.keyframe_selected;
+        }
+        assemble_canvas->restore_assembly_guide_ui_after_undo(restore_folder_id, restore_kf);
         assemble_canvas->set_as_dirty();
+        // Refresh assembly dirty from the stack tip vs last mark_current_as_saved so undoing
+        // all the way back to the saved tip clears the unsaved-project prompt.
+        m_assemble_project_dirty = m_undo_redo_stack_assemble.project_modified();
+        if (m_assemble_project_dirty)
+            set_plater_dirty(true);
     }
 }
 
@@ -17895,7 +19234,15 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
         assemble_snapshot_data.printer_technology = this->printer_technology;
         GLCanvas3D* assemble_canvas = assemble_view->get_canvas3d();
         m_undo_redo_stack_assemble.take_snapshot(snapshot_name, m_assemble_model, assemble_canvas->get_selection(), assemble_canvas->get_gizmos_manager(), this->partplate_list, assemble_snapshot_data);
+        remember_assemble_guide_ui_for_latest_action_snapshot();
         m_undo_redo_stack_assemble.release_least_recently_used();
+        prune_assemble_guide_ui_snapshots();
+        // Assembly edits live on an independent stack; the main-stack up_to_date() check cannot
+        // see them. Mark the project dirty so close / new-project prompts still ask to save.
+        if (snapshot_modifies_project(snapshot_type) && (snapshot_name.empty() || snapshot_name.back() != '!')) {
+            m_assemble_project_dirty = true;
+            set_plater_dirty(true);
+        }
         BOOST_LOG_TRIVIAL(info) << "Assemble Undo / Redo snapshot taken: " << snapshot_name;
         return;
     }
@@ -18022,12 +19369,25 @@ bool Plater::priv::up_to_date(bool saved, bool backup)
     size_t& last_time = backup ? m_backup_timestamp : m_saved_timestamp;
     if (saved) {
         last_time = undo_redo_stack_main().active_snapshot_time();
-        if (!backup)
+        if (!backup) {
             undo_redo_stack_main().mark_current_as_saved();
+            // Assembly-only edits are tracked separately from the main undo stack. A successful
+            // project save (or "don't save" continue) clears that tip so the next close prompt
+            // does not keep asking for already-handled assembly changes.
+            m_assemble_project_dirty = false;
+            if (!m_undo_redo_stack_assemble.empty())
+                m_undo_redo_stack_assemble.mark_current_as_saved();
+        }
         return true;
     }
     else {
-        return !undo_redo_stack_main().has_real_change_from(last_time);
+        if (undo_redo_stack_main().has_real_change_from(last_time))
+            return false;
+        // Independent assembly stack may hold unsaved guide / pose edits while the prepare
+        // stack stays clean — still treat the project as dirty for close / new-project.
+        if (m_assemble_project_dirty)
+            return false;
+        return true;
     }
 }
 
@@ -18104,6 +19464,8 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
             //FIXME Why are we reloading the whole preset bundle here? Please document. This is fishy and it is unnecessarily expensive.
             // Anyways, don't report any config value substitutions, they have been already reported to the user at application start up.
             wxGetApp().preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::EnableSilent);
+            // AppConfig-restored filament colors may predate the JSON primary-color alignment.
+            Slic3r::align_project_filament_primary_colors_with_json(wxGetApp().preset_bundle);
             // load_current_presets() calls Tab::load_current_preset() -> TabPrint::update() -> Object_list::update_and_show_object_settings_item(),
             // but the Object list still keeps pointer to the old Model. Avoid a crash by removing selection first.
             this->sidebar->obj_list()->unselect_objects();
@@ -18741,6 +20103,12 @@ int Plater::load_project(wxString const &filename2,
         return wx_dlg_id;
     }
 
+    // Same as new_project: stop playback / clear assembly runtime before the
+    // incoming 3mf replaces the model, otherwise play-mode chrome can linger.
+    if (auto *assemble_canvas = get_assmeble_canvas3D()) {
+        assemble_canvas->new_project_clear_assembly_steps_tree_view(true);
+    }
+
     //BBS: add only gcode mode
     bool previous_gcode = m_only_gcode;
 
@@ -18756,14 +20124,9 @@ int Plater::load_project(wxString const &filename2,
 
     m_only_gcode = false;
     m_exported_file = false;
-    get_notification_manager()->bbl_close_plateinfo_notification();
-    get_notification_manager()->bbl_close_preview_only_notification();
-    get_notification_manager()->bbl_close_3mf_warn_notification();
-    get_notification_manager()->close_notification_of_type(NotificationType::PlaterError);
-    get_notification_manager()->close_notification_of_type(NotificationType::PlaterWarning);
-    get_notification_manager()->close_notification_of_type(NotificationType::SlicingError);
-    get_notification_manager()->close_notification_of_type(NotificationType::SlicingSeriousWarning);
-    get_notification_manager()->close_notification_of_type(NotificationType::SlicingWarning);
+    // Same as new_project: the incoming 3mf replaces the current document, so
+    // leftover toasts (simplify, slice errors, plate info, ...) must not linger.
+    get_notification_manager()->clear_all();
 
     auto path     = into_path(filename);
 
@@ -19267,8 +20630,11 @@ bool Plater::up_to_date(bool saved, bool backup)
         Slic3r::clear_other_changes(backup);
         return p->up_to_date(saved, backup);
     }
-    return p->model.objects.empty() || (p->up_to_date(saved, backup) &&
-                                        !Slic3r::has_other_changes(backup));
+    // Assembly dirty is already consulted inside priv::up_to_date (return false when
+    // m_assemble_project_dirty). Do NOT OR !m_assemble_project_dirty here: that short-circuits
+    // to true whenever the assembly side is clean and would swallow prepare-only unsaved edits.
+    return p->model.objects.empty()
+         || (p->up_to_date(saved, backup) && !Slic3r::has_other_changes(backup));
 }
 
 void Plater::add_model(bool imperial_units, std::string fname)
@@ -21087,7 +22453,7 @@ void Plater::reset_with_confirm()
 }
 
 // BBS: save logic
-int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check)
+int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check, bool allow_cancel)
 {
     auto restore_assemble_sidebar = [this]() {
         if (p->m_pre_assemble_sidebar_collapsed.has_value()) {
@@ -21103,11 +22469,20 @@ int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check)
         return wxID_NO;
     }
 
+    // A caller that must close no matter what (a version blocked at startup)
+    // passes allow_cancel = false: the user may only save or discard, never keep
+    // an unusable app open.
+    long style = wxYES_NO | wxYES_DEFAULT | wxCENTRE;
+    if (allow_cancel) style |= wxCANCEL;
     MessageDialog dlg(static_cast<wxWindow*>(this), _L("The current project has unsaved changes, save it before continue?"),
-        wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Save"), wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxCENTRE);
+        wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Save"), style);
     dlg.show_dsa_button(_L("Remember my choice."));
-    auto choise = wxGetApp().app_config->get("save_project_choise");
-    auto result = choise.empty() ? dlg.ShowModal() : choise == "yes" ? wxID_YES : wxID_NO;
+    auto choice = wxGetApp().app_config->get("save_project_choise");
+    auto result = choice.empty() ? dlg.ShowModal() : choice == "yes" ? wxID_YES : wxID_NO;
+    // With no Cancel offered, closing the dialog (Esc / window close) means discard.
+    if (!allow_cancel && result == wxID_CANCEL)
+        result = wxID_NO;
+
     if (result == wxID_CANCEL)
         return result;
     else {
@@ -21117,7 +22492,7 @@ int GUI::Plater::close_with_confirm(std::function<bool(bool)> second_check)
             restore_assemble_sidebar();
             result = save_project();
             if (result == wxID_CANCEL) {
-                if (choise.empty())
+                if (choice.empty())
                     return result;
                 else
                     result = wxID_NO;
@@ -23502,6 +24877,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
         }
         //BBS: add bed_exclude_area
         else if (opt_key == "printable_area" || opt_key == "bed_exclude_area"
+            || opt_key == "bed_heat_soak_area"
             || opt_key == "extruder_clearance_height_to_lid"
             || opt_key == "extruder_clearance_height_to_rod") {
             bed_shape_changed = true;
@@ -23663,6 +25039,51 @@ void Plater::set_bed_shape() const
 void Plater::set_bed_shape(const Pointfs& shape, const Pointfs& exclude_area, const Pointfs& wrapping_exclude_area, const double printable_height, std::vector<Pointfs> extruder_areas, std::vector<double> extruder_heights, const std::string& custom_texture, const std::string& custom_model, bool force_as_custom) const
 {
     p->set_bed_shape(shape, exclude_area, wrapping_exclude_area, printable_height, extruder_areas, extruder_heights, custom_texture, custom_model, force_as_custom);
+}
+
+void Plater::on_plate_layout_changed()
+{
+    update_bed_heat_soak_notification();
+    if (GLCanvas3D *canvas = p->get_current_canvas3D())
+        canvas->schedule_extra_frame(0);
+}
+
+void Plater::on_show_bed_heat_soak_area_changed()
+{
+    update_bed_heat_soak_notification();
+}
+
+void Plater::update_bed_heat_soak_notification()
+{
+    GLCanvas3D *canvas = p->get_current_canvas3D();
+    if (!canvas || (canvas->get_canvas_type() != GLCanvas3D::CanvasView3D &&
+                    canvas->get_canvas_type() != GLCanvas3D::CanvasPreview))
+        return;
+
+    NotificationManager *notify = get_notification_manager();
+    if (!notify)
+        return;
+
+    const bool enabled = wxGetApp().app_config->get("show_bed_heat_soak_area") != "false";
+    const bool show = enabled && p->partplate_list.get_cur_plate_soak_level() > 0;
+    if (show == p->partplate_list.is_heat_soak_visible())
+        return;
+
+    if (show)
+    {
+        notify->push_bed_heat_soak_notification(
+            _u8L("When thermal preconditioning is enabled, duration auto-adjusts to the model's "
+                 "position for optimal first-layer quality; the farther from the center, the longer "
+                 "it takes. White boxes mark the boundary lines. To disable the guidelines and this "
+                 "warning, go to Preferences > 3D."));
+    }
+    else
+    {
+        notify->close_bed_heat_soak_notification();
+    }
+
+    p->partplate_list.set_heat_soak_visible(show);
+    canvas->schedule_extra_frame(0);
 }
 
 void Plater::force_filament_colors_update()
@@ -24032,6 +25453,51 @@ void Plater::set_current_canvas_as_dirty()
     p->set_current_canvas_as_dirty();
 }
 
+void Plater::schedule_extra_frame(int miliseconds)
+{
+    if (GLCanvas3D *canvas = p->get_current_canvas3D())
+        canvas->schedule_extra_frame(miliseconds);
+}
+
+void Plater::highlight_toolbar_item(const std::string &item_name)
+{
+    if (GLCanvas3D *canvas = canvas3D())
+        canvas->highlight_toolbar_item(item_name);
+}
+
+void Plater::highlight_gizmo(const std::string &gizmo_name)
+{
+    if (GLCanvas3D *canvas = canvas3D())
+        canvas->highlight_gizmo(gizmo_name);
+}
+
+void Plater::deselect_current_canvas()
+{
+    if (GLCanvas3D *canvas = canvas3D())
+        canvas->deselect_all();
+}
+
+wxWindow *Plater::get_assemble_wxglcanvas()
+{
+    if (GLCanvas3D *canvas = get_assmeble_canvas3D())
+        return canvas->get_wxglcanvas();
+    return nullptr;
+}
+
+bool Plater::is_allow_x_ray_in_assembly()
+{
+    if (GLCanvas3D *canvas = get_assmeble_canvas3D())
+        return canvas->get_gizmos_manager().is_allow_x_ray_in_assembly();
+    return true;
+}
+
+bool Plater::get_orient_min_area()
+{
+    if (GLCanvas3D *canvas = canvas3D())
+        return canvas->get_orient_settings().min_area;
+    return true;
+}
+
 void Plater::unbind_canvas_event_handlers()
 {
     p->unbind_canvas_event_handlers();
@@ -24272,6 +25738,18 @@ void Plater::show_seqprintinfo_notification(bool has_error)
 void Plater::mirror(Axis axis)      { p->mirror(axis); }
 void Plater::split_object(ModelObject *mo, bool ignore_warning) { p->split_object(mo, ignore_warning); }
 void Plater::set_suppress_assemble_delete_propagation(bool suppress) { p->set_suppress_assemble_delete_propagation(suppress); }
+void Plater::ensure_model_object_volume_assemble_initialized(ModelObject *object)
+{
+    if (object == nullptr)
+        return;
+    for (ModelVolume *mv : object->volumes) {
+        if (mv == nullptr || !mv->is_model_part())
+            continue;
+        mv->ensure_part_guid();
+        if (!mv->is_assemble_initialized())
+            mv->set_assemble_transformation(mv->get_transformation());
+    }
+}
 void Plater::propagate_volume_delete_to_assemble(const ModelVolume &prepare_volume) { p->propagate_volume_delete_to_assemble(prepare_volume); }
 void Plater::sync_assemble_volume_name(const std::string &part_guid, const std::string &new_name) { p->sync_assemble_volume_name(part_guid, new_name); }
 void Plater::change_extruder_for_assemble_selection(int extruder) { p->change_extruder_for_assemble_selection(extruder); }
@@ -24560,6 +26038,11 @@ void Plater::mark_assemble_view_requires_zoom_to_volumes()
             p_camera->requires_zoom_to_volumes = true;
         }
     }
+}
+
+bool Plater::is_assemble_undo_stack_active() const
+{
+    return p->m_undo_redo_stack_active == &p->m_undo_redo_stack_assemble;
 }
 
 const Camera& Plater::get_picking_camera() const
@@ -26080,6 +27563,8 @@ wxMenu* Plater::default_menu()          { return p->menus.default_menu();       
 wxMenu* Plater::instance_menu()         { return p->menus.instance_menu();          }
 wxMenu* Plater::layer_menu()            { return p->menus.layer_menu();             }
 wxMenu* Plater::multi_selection_menu()  { return p->menus.multi_selection_menu();   }
+wxMenu *Plater::assemble_object_menu() { return p->menus.assemble_object_menu(); }
+wxMenu *Plater::assemble_part_menu() { return p->menus.assemble_part_menu(); }
 wxMenu *Plater::assemble_multi_selection_menu() { return p->menus.assemble_multi_selection_menu(); }
 wxMenu *Plater::filament_action_menu(int active_filament_menu_id) { return p->menus.filament_action_menu(active_filament_menu_id); }
 int     Plater::GetPlateIndexByRightMenuInLeftUI() { return p->m_is_RightClickInLeftUI; }

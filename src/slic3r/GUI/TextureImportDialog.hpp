@@ -198,7 +198,8 @@ public:
                         const Slic3r::TexturedMesh&      textured_mesh,
                         const std::vector<TextureFilamentEntry>& filament_entries,
                         std::function<bool()>            initial_cancel_callback = {},
-                        std::function<bool(int)>         initial_progress_callback = {});
+                        std::function<bool(int)>         initial_progress_callback = {},
+                        std::function<void(bool)>        initial_progress_visibility_callback = {});
     ~TextureImportDialog();
 
     int ShowModal() override;
@@ -275,6 +276,14 @@ private:
     void update_drop_warning_visibility();
     void compact_used_virtual_filaments();
     int  find_closest_filament_index(const std::array<std::size_t, 3>& color) const;
+    // Returns a vector indexed by dialog_index whose value is the 1-based
+    // display number that mirrors the final sidebar ordering produced by
+    // apply_textured_mesh_import_result (Plater.cpp): ExistingPhysical,
+    // NewPhysical, ExistingMixed, NewMixed. Used so the dialog shows the
+    // same IDs the sidebar will show after OK, instead of the raw
+    // dialog_index + 1 (which interleaves physicals and mixeds).
+    // MUST mirror ordering in apply_textured_mesh_import_result (Plater.cpp:9896).
+    std::vector<int> compute_display_numbers() const;
 
     void on_color_preset_clicked(wxCommandEvent& evt);
     void on_color_slider_changed(wxCommandEvent& evt);
@@ -334,6 +343,7 @@ private:
     Slic3r::PaintedMesh               m_pending_result;
     std::function<bool()>              m_initial_cancel_callback;
     std::function<bool(int)>           m_initial_progress_callback;
+    std::function<void(bool)>          m_initial_progress_visibility_callback;
     bool                               m_current_computation_initial = false;
     bool                               m_initial_computation_pending = false;
     bool                               m_initial_computation_cancelled = false;

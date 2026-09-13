@@ -134,6 +134,7 @@ src/slic3r/GUI/ExtrusionCalibration.cpp
 src/slic3r/GUI/AMSMappingPopup.cpp
 src/slic3r/GUI/AMSMappingPopupUpdate.cpp
 src/slic3r/GUI/AMSSetting.cpp
+src/slic3r/GUI/AMSRFIDMaterialView.cpp
 src/slic3r/GUI/BBLTopbar.cpp
 src/slic3r/GUI/DownloadProgressDialog.cpp
 src/slic3r/GUI/RecenterDialog.cpp
@@ -174,6 +175,7 @@ src/slic3r/GUI/OpenGLManager.cpp
 src/slic3r/GUI/OptionsGroup.cpp
 src/slic3r/GUI/PrintOptionsDialog.cpp
 src/slic3r/GUI/SafetyOptionsDialog.cpp
+src/slic3r/GUI/ParamTooltip.cpp
 src/slic3r/GUI/ParamsPanel.cpp
 src/slic3r/GUI/PartPlate.cpp
 src/slic3r/GUI/Plater.cpp
@@ -237,6 +239,7 @@ src/libslic3r/PrintObjectSlice.cpp
 src/libslic3r/PlaceholderParser.cpp
 src/libslic3r/Support/TreeSupport.cpp
 src/libslic3r/Model.cpp
+src/libslic3r/PaintReproject.cpp
 src/libslic3r/Format/OBJ.cpp
 src/slic3r/GUI/CalibrationWizardPage.cpp
 src/slic3r/GUI/CalibrationPanel.cpp
@@ -281,6 +284,7 @@ src/slic3r/GUI/FilamentBitmapUtils.cpp
 src/slic3r/GUI/FilamentBitmapUtils.hpp
 src/slic3r/GUI/FilamentPickerDialog.cpp
 src/slic3r/GUI/FilamentPickerDialog.hpp
+src/slic3r/GUI/FilamentSelectDialog.cpp
 src/slic3r/GUI/Widgets/MultiNozzleSync.cpp
 src/slic3r/GUI/Widgets/MultiNozzleSync.hpp
 src/slic3r/GUI/PurgeModeDialog.cpp
@@ -297,3 +301,6 @@ src/slic3r/GUI/ColorDecomposeDialog.cpp
 src/slic3r/GUI/ColorDecomposeSupport.cpp
 src/slic3r/GUI/GradientCurveEditor.cpp
 src/slic3r/GUI/GradientCurveEditor.hpp
+src/slic3r/GUI/AuxiliaryDialog.cpp
+src/slic3r/GUI/Jobs/PlaterWorker.hpp
+src/slic3r/GUI/CreateFilamentWebDialog.cpp

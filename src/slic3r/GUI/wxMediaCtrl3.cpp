@@ -6,6 +6,8 @@
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>
 #include <wx/graphics.h>
+#include "nanosvg/nanosvg.h"
+#include "nanosvg/nanosvgrast.h"
 #ifdef __WIN32__
 #include <versionhelpers.h>
 #include <wx/msw/registry.h>
@@ -35,6 +37,30 @@ wxMediaCtrl3::wxMediaCtrl3(wxWindow *parent)
     SetBackgroundColour("#000001ff");
     m_render_timer.SetOwner(this);
     Bind(wxEVT_TIMER, &wxMediaCtrl3::OnRenderTimer, this);
+    Bind(wxEVT_MOUSEWHEEL, &wxMediaCtrl3::mouseWheelEvent, this);
+}
+
+void wxMediaCtrl3::mouseWheelEvent(wxMouseEvent &evt)
+{
+    const int rotation = evt.GetWheelRotation();
+    if (rotation == 0) {
+        evt.Skip();
+        return;
+    }
+
+    // Digital zoom of the live view, 1x (fit) up to 5x, centred on the view.
+    const double factor = rotation > 0 ? 1.1 : 1.0 / 1.1;
+    double zoom = m_zoom * factor;
+
+    if (zoom < 1.0)
+        zoom = 1.0;
+    if (zoom > 5.0)
+        zoom = 5.0;
+
+    if (zoom != m_zoom) {
+        m_zoom = zoom;
+        Refresh();
+    }
 }
 
 wxMediaCtrl3::~wxMediaCtrl3()
@@ -42,6 +68,7 @@ wxMediaCtrl3::~wxMediaCtrl3()
     {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         m_frame = wxImage(m_idle_image);
+        m_frame_is_default_bg = !m_idle_image.empty();
     }
     {
         std::unique_lock<std::mutex> lk(m_mutex);
@@ -78,6 +105,7 @@ void wxMediaCtrl3::Stop()
     {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         m_frame = wxImage(m_idle_image);
+        m_frame_is_default_bg = !m_idle_image.empty();
     }
     std::unique_lock<std::mutex> lk(m_mutex);
     m_url.reset();
@@ -95,6 +123,7 @@ void wxMediaCtrl3::SetIdleImage(wxString const &image, wxString const &watermark
     if (m_url == nullptr) {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         m_frame = wxImage(m_idle_image);
+        m_frame_is_default_bg = true;
         assert(m_frame.IsOk());
         Refresh();
     }
@@ -109,6 +138,7 @@ void wxMediaCtrl3::SetIdleImage(const wxImage &image, wxString const &watermark_
     if (m_url == nullptr) {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         m_frame = image;
+        m_frame_is_default_bg = false;
         assert(m_frame.IsOk());
         Refresh();
     }
@@ -152,12 +182,14 @@ void wxMediaCtrl3::paintEvent(wxPaintEvent &evt)
     if (size.x <= 0 || size.y <= 0)
         return;
     PlayFrame current_frame;
+    bool      current_is_default_bg;
     {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         if (!m_frame.IsOk()) {
             return;
         }
-        current_frame = m_frame;
+        current_frame         = m_frame;
+        current_is_default_bg = m_frame_is_default_bg;
     }
     wxSize frame_size;
     {
@@ -168,7 +200,9 @@ void wxMediaCtrl3::paintEvent(wxPaintEvent &evt)
     if (size2.x != frame_size.x && size2.y == frame_size.y)
         size2.x = frame_size.x;
 
-    const bool is_idle = (m_url == nullptr);
+    // Treat the default background as idle content so the bg and its logo are always
+    // drawn together, even if m_url flips to playing before the first video frame arrives.
+    const bool is_idle = (m_url == nullptr) || current_is_default_bg;
     if (is_idle) {
         // Draw the static idle image through wxGraphicsContext with high-quality
         // interpolation. wxDC::SetUserScale + DrawBitmap uses GDI StretchBlt
@@ -193,23 +227,31 @@ void wxMediaCtrl3::paintEvent(wxPaintEvent &evt)
             gc->SetInterpolationQuality(wxINTERPOLATION_BEST);
             wxBitmap bmp(current_frame);
             gc->DrawBitmap(bmp, dst_x, dst_y, dst_w, dst_h);
+
+            // Logo is bound to the default background frame so they appear/disappear together.
+            if (current_is_default_bg) {
+                DrawLiveviewLogo(gc, dst_x, dst_y, dst_w, dst_h);
+            }
             delete gc;
         }
     } else {
-        auto size3 = (size - size2) / 2;
-        if (size2.x != size.x && size2.y != size.y) {
-            double scale = 1.;
-            if (size.x * size2.y > size.y * size2.x) {
-                size3 = {size.x * size2.y / size.y, size2.y};
-                scale = double(size.y) / size2.y;
-            } else {
-                size3 = {size2.x, size.y * size2.x / size.x};
-                scale = double(size.x) / size2.x;
-            }
-            dc.SetUserScale(scale, scale);
-            size3 = (size3 - size2) / 2;
-        }
-        dc.DrawBitmap(current_frame, size3.x, size3.y);
+        // Base "contain" fit scale, then apply the digital zoom factor.
+        // At m_zoom == 1 this is identical to the normal fitted rendering.
+        double scale = 1.0;
+        if (size2.x != size.x || size2.y != size.y)
+            scale = (size.x * size2.y > size.y * size2.x)
+                ? double(size.y) / size2.y
+                : double(size.x) / size2.x;
+
+        const double effective_scale = scale * m_zoom;
+        dc.SetUserScale(effective_scale, effective_scale);
+
+        const int offset_x =
+            wxRound(size.x / 2.0 / effective_scale - size2.x / 2.0);
+        const int offset_y =
+            wxRound(size.y / 2.0 / effective_scale - size2.y / 2.0);
+
+        dc.DrawBitmap(current_frame, offset_x, offset_y);
     }
 
     // Draw watermark overlay when showing device preview image
@@ -248,6 +290,60 @@ void wxMediaCtrl3::paintEvent(wxPaintEvent &evt)
         int ty = wm_y + (wm_h - text_size.GetHeight()) / 2;
         gcdc.DrawText(watermark_text, tx, ty);
     }
+}
+
+void wxMediaCtrl3::DrawLiveviewLogo(wxGraphicsContext *gc, double bg_x, double bg_y, double bg_w, double bg_h)
+{
+    if (gc == nullptr || bg_w <= 0 || bg_h <= 0)
+        return;
+
+    // Logo is 448x128 centered in the original 1920x1080 artwork.
+    constexpr double logo_aspect      = 448.0 / 128.0;
+    constexpr double logo_width_ratio = 448.0 / 1920.0;
+    const double     logo_w           = bg_w * logo_width_ratio;
+    const double     logo_h           = logo_w / logo_aspect;
+    const double     logo_x           = bg_x + (bg_w - logo_w) / 2.0;
+    const double     logo_y           = bg_y + (bg_h - logo_h) / 2.0;
+
+    // Rasterize at exact pixel size (cached) to avoid aliasing.
+    const wxSize target_px(std::lround(logo_w), std::lround(logo_h));
+    if (target_px.x <= 0 || target_px.y <= 0)
+        return;
+
+    if (!m_logo_bitmap.IsOk() || m_logo_bitmap_size != target_px) {
+        const std::string logo_path = Slic3r::resources_dir() + "/images/liveview_logo.svg";
+        NSVGimage *image = ::nsvgParseFromFile(logo_path.c_str(), "px", 96.0f);
+        if (image == nullptr)
+            return;
+
+        const float scale = (image->height > 0.f) ? float(target_px.y) / image->height : 1.f;
+        NSVGrasterizer *rast = ::nsvgCreateRasterizer();
+        if (rast == nullptr) {
+            ::nsvgDelete(image);
+            return;
+        }
+        std::vector<unsigned char> rgba(size_t(target_px.x) * target_px.y * 4, 0);
+        ::nsvgRasterize(rast, image, 0, 0, scale, rgba.data(), target_px.x, target_px.y, target_px.x * 4);
+        ::nsvgDeleteRasterizer(rast);
+        ::nsvgDelete(image);
+
+        // NanoSVG emits non-premultiplied RGBA; split into wxImage RGB + alpha.
+        wxImage wx_image(target_px.x, target_px.y);
+        wx_image.InitAlpha();
+        unsigned char *rgb   = wx_image.GetData();
+        unsigned char *alpha = wx_image.GetAlpha();
+        for (int i = 0; i < target_px.x * target_px.y; ++i) {
+            rgb[i * 3 + 0] = rgba[i * 4 + 0];
+            rgb[i * 3 + 1] = rgba[i * 4 + 1];
+            rgb[i * 3 + 2] = rgba[i * 4 + 2];
+            alpha[i]       = rgba[i * 4 + 3];
+        }
+        m_logo_bitmap      = wxBitmap(wx_image);
+        m_logo_bitmap_size = target_px;
+    }
+
+    if (m_logo_bitmap.IsOk())
+        gc->DrawBitmap(m_logo_bitmap, logo_x, logo_y, logo_w, logo_h);
 }
 
 void wxMediaCtrl3::DoSetSize(int x, int y, int width, int height, int sizeFlags)
@@ -643,6 +739,7 @@ void wxMediaCtrl3::GetFrameThread(int frame_rate)
             {
                 std::unique_lock<std::mutex> lk(m_ui_mutex);
                 m_frame = temp_frame;
+                m_frame_is_default_bg = false;
                 m_need_refresh.store(true);
             }
             if (pop_success == false) {
@@ -684,6 +781,7 @@ void wxMediaCtrl3::GetFrameThread(int frame_rate)
     {
         std::unique_lock<std::mutex> lk(m_ui_mutex);
         m_frame = wxImage(m_idle_image);
+        m_frame_is_default_bg = !m_idle_image.empty();
         m_need_refresh.store(true);
         CallAfter([this] { Refresh(false); });
     }
