@@ -1,6 +1,7 @@
 #include "BambuConnectBridge.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <atomic>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -24,6 +25,25 @@ bool process_running(pid_t pid) {
     proc_bsdinfo info{};
     return pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) && info.pbi_status != SZOMB;
 }
+
+// A directly spawned app registers with Launch Services before its first
+// window is ready. Hide it at that point, instead of waiting for the renderer
+// to load. Keep it hidden through startup activation and window restoration.
+class StartupHider {
+    std::atomic<bool> stopped{false};
+    std::thread worker;
+public:
+    explicit StartupHider(pid_t pid) : worker([this, pid] {
+        while (!stopped.load()) {
+            @autoreleasepool {
+                NSRunningApplication* app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+                if (app && ![app isHidden]) [app hide];
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }) {}
+    ~StartupHider() { stopped = true; worker.join(); }
+};
 
 class Pipe {
     int input = -1, output = -1, sequence = 0;
@@ -179,6 +199,7 @@ public:
         posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes);
         close(descriptors[0]); close(descriptors[3]);
         if (error) throw std::runtime_error("Could not launch Bambu Connect.");
+        StartupHider startup_hider(child);
         auto version = call("Browser.getVersion", json::object(), false);
         if (version.value("userAgent", "").find("BambuConnect/2.5.0-beta.15") == std::string::npos)
             throw std::runtime_error("This Connect version needs an updated bridge adapter.");

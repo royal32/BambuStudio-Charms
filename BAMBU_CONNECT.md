@@ -38,7 +38,9 @@ by firmware.
 
 The first direct handoff gracefully restarts an already-running Connect so the
 signed executable can inherit two private debugging pipes. Subsequent handoffs
-reuse that process. This does not modify Connect's app bundle, persist debugging
+reuse that process. Studio now starts hiding that process as soon as it registers
+with macOS, and maintains the hidden state throughout initialization, instead of
+waiting for the renderer to finish loading. This does not modify Connect's app bundle, persist debugging
 settings, or open a TCP listener. The pipe connection belongs to the Studio
 session; closing Studio can also close that Connect instance. Printer-side jobs
 already started continue independently.
@@ -114,6 +116,12 @@ Baseline verified September 13, 2026, committed as `7cedc3d7c`:
 Direct-bridge validation:
 
 - The final arm64 build passed with the same `BuildMac.sh` command above.
+- The startup-hiding change passed the arm64 build. A fresh native launch
+  completed with macOS reporting Connect hidden; explicitly opening it afterward
+  worked. A subsequent prepare-only handoff opened the final review dialog with
+  plate 2, A1 Four and the requested options/mapping intact. No print was sent
+  during these startup checks. The user confirmed a brief flash remains but
+  is fast enough to be insignificant.
 - Nine adapter tests pass with
   `node --experimental-vm-modules --test tests/bambu_connect_bridge.test.cjs`.
   They cover exact selections, changed/absent mappings, normalized options,
