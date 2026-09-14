@@ -2005,7 +2005,7 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_slice_btn = new SideButton(slice_panel, _L("Slice plate"), "");
     m_slice_option_btn = new SideButton(slice_panel, "", "sidebutton_dropdown", 0, FromDIP(14));
     m_print_btn = new SideButton(print_panel, _L("Print plate"), "");
-    m_print_btn->SetToolTip(_L("Open the sliced job in Bambu Connect, then select your printer and send the print."));
+    m_print_btn->SetToolTip(_L("Choose print options and send the sliced job using Bambu Connect."));
     m_print_option_btn = new SideButton(print_panel, "", "sidebutton_dropdown", 0, FromDIP(14));
 
     auto slice_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -2384,11 +2384,17 @@ wxBoxSizer* MainFrame::create_side_tools()
                 }
 
 
+#ifdef __APPLE__
+                {
+                    const wxString connect_label = _L("Print in Connect");
+#else
                 if (enable_multi_machine) {
-                    SideButton* print_multi_machine_btn = new SideButton(p, _L("Send to Multi-device"), "");
+                    const wxString connect_label = _L("Send to Multi-device");
+#endif
+                    SideButton* print_multi_machine_btn = new SideButton(p, connect_label, "");
                     print_multi_machine_btn->SetCornerRadius(0);
-                    print_multi_machine_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                        m_print_btn->SetLabel(_L("Send to Multi-device"));
+                    print_multi_machine_btn->Bind(wxEVT_BUTTON, [this, p, connect_label](wxCommandEvent&) {
+                        m_print_btn->SetLabel(connect_label);
                         m_print_select = ePrintMultiMachine;
                         m_print_enable = get_enable_print_status();
                         m_print_btn->Enable(m_print_enable);

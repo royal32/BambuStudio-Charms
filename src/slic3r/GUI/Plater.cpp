@@ -1,5 +1,9 @@
 #include "Plater.hpp"
 #include "BambuConnect.hpp"
+#ifdef __APPLE__
+#include "BambuConnectBridge.hpp"
+#endif
+#include <wx/progdlg.h>
 #include "PerfTrace.hpp"
 #include <array>
 #include <boost/format/format_fwd.hpp>
@@ -15684,7 +15688,14 @@ void Plater::priv::on_action_publish(wxCommandEvent &event)
 
 void Plater::priv::on_action_print_plate(SimpleEvent&)
 {
+#ifdef __APPLE__
+    if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
+    m_select_machine_dlg->set_print_type(PrintFromType::FROM_NORMAL);
+    m_select_machine_dlg->prepare(partplate_list.get_curr_plate_index());
+    m_select_machine_dlg->ShowModal();
+#else
     if (q) q->print_with_bambu_connect();
+#endif
 }
 
 void Plater::priv::on_action_send_to_multi_machine(SimpleEvent&)
@@ -22896,7 +22907,7 @@ void Plater::export_gcode(bool prefer_removable)
     }
 }
 
-void Plater::print_with_bambu_connect(bool all_plates)
+bool Plater::print_with_bambu_connect(bool all_plates, const std::string& options_json)
 {
     auto& plates = get_partplate_list();
     auto* plate = plates.get_curr_plate();
@@ -22904,7 +22915,7 @@ void Plater::print_with_bambu_connect(bool all_plates)
         !(all_plates ? plates.is_all_slice_results_ready_for_print() : plate->is_slice_result_ready_for_print())) {
         MessageDialog(this, _L("Slice the plate and resolve any slicing errors before opening it in Bambu Connect."),
                       _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
-        return;
+        return false;
     }
 
     fs::path output_path;
@@ -22919,7 +22930,7 @@ void Plater::print_with_bambu_connect(bool all_plates)
                 !std::ifstream(gcode_path.string(), std::ios::binary)) {
                 MessageDialog(this, _L("The sliced data is missing or unreadable. Slice the plate again before opening it in Bambu Connect."),
                               _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
-                return;
+                return false;
             }
         }
         // Connect imports asynchronously. Keep a unique snapshot independent of the
@@ -22945,16 +22956,42 @@ void Plater::print_with_bambu_connect(bool all_plates)
             fs::remove(output_path, ec);
             MessageDialog(this, _L("Could not prepare the sliced file for Bambu Connect. Check available disk space and try again."),
                           _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
-            return;
+            return false;
         }
-        const auto name = get_export_gcode_filename(".gcode.3mf", true, all_plates).utf8_string();
+        auto name = get_export_gcode_filename(".gcode.3mf", true, all_plates).utf8_string();
+        if (boost::ends_with(name, ".gcode.gcode.3mf")) name.erase(name.size() - 16, 6);
+#ifdef __APPLE__
+        json request = options_json.empty() ? json::object() : json::parse(options_json);
+        request["path"] = into_u8(from_path(output_path));
+        request["name"] = name;
+        request["id"] = output_path.stem().string();
+        if (!all_plates) request["plateIndex"] = plates.get_curr_plate_index() + 1;
+        const auto adapter = Slic3r::resources_dir() + "/scripts/bambu_connect_bridge.js";
+        auto pending = std::async(std::launch::async, [request, adapter]() {
+            return BambuConnect::direct_handoff(request.dump(), adapter);
+        });
+        wxProgressDialog progress(_L("Bambu Connect"), _L("Preparing your print in Bambu Connect…"),
+                                  100, this, wxPD_APP_MODAL | wxPD_AUTO_HIDE);
+        while (pending.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) progress.Pulse();
+        const auto result = json::parse(pending.get());
+        progress.Hide();
+        if (result.value("status", "") != "unavailable") {
+            if (result.contains("error"))
+                MessageDialog(this, _L("Check Bambu Connect before retrying. The handoff could not be confirmed.\n\n") +
+                    wxString::FromUTF8(result.at("error").get<std::string>()), _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+            return true;
+        }
+        MessageDialog(this, _L("The direct Connect bridge is unavailable. The sliced job will open using the standard import flow.\n\n") +
+            wxString::FromUTF8(result.value("error", "")), _L("Bambu Connect"), wxOK | wxICON_INFORMATION).ShowModal();
+#endif
         const auto url = BambuConnect::import_url(into_u8(from_path(output_path)), name, true);
-        wxGetApp().open_bambu_connect(wxString::FromUTF8(url));
+        return wxGetApp().open_bambu_connect(wxString::FromUTF8(url));
     } catch (const std::exception& ex) {
         BOOST_LOG_TRIVIAL(error) << "Bambu Connect handoff failed: " << ex.what();
         MessageDialog(this, _L("Could not prepare the sliced file for Bambu Connect. Check available disk space and try again."),
                       _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
     }
+    return false;
 }
 
 void Plater::send_to_printer(bool isall)

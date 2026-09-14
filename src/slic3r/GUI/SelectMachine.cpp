@@ -828,7 +828,19 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     m_button_ensure->Bind(wxEVT_BUTTON, &SelectMachineDialog::on_ok_btn, this);
 
     m_sizer_pcont->Add(0, 0, 1, wxEXPAND, 0);
-    m_sizer_pcont->Add(m_button_ensure, 0,wxALIGN_CENTER, 0);
+    auto* send_actions = new wxBoxSizer(wxHORIZONTAL);
+    send_actions->Add(m_button_ensure, 0, wxALIGN_CENTER_VERTICAL, 0);
+    m_sizer_pcont->Add(send_actions, 0, wxALIGN_CENTER, 0);
+#ifdef __APPLE__
+    auto* connect_setup = new Button(m_panel_prepare, _L("Open in Bambu Connect"));
+    connect_setup->SetMinSize(wxSize(FromDIP(190), FromDIP(32)));
+    connect_setup->SetToolTip(_L("Review this job in Bambu Connect, including when Studio cannot load the printer's options."));
+    connect_setup->Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& event) { event.Show(m_print_type == PrintFromType::FROM_NORMAL); });
+    connect_setup->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if (m_print_type == PrintFromType::FROM_NORMAL && send_via_bambu_connect(false)) EndModal(wxID_OK);
+    });
+    send_actions->Add(connect_setup, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+#endif
 
     m_sizer_prepare->Add(0, 0, 1, wxTOP, FromDIP(12));
     m_sizer_prepare->Add(m_sizer_pcont, 0, wxALIGN_CENTER, 0);
@@ -3183,8 +3195,55 @@ void SelectMachineDialog::Enable_Auto_Refill(bool enable)
     m_ams_backup_tip->Refresh();
 }
 
+bool SelectMachineDialog::send_via_bambu_connect(bool submit)
+{
+    json request = {{"submit", submit}};
+    if (!m_printer_last_select.empty()) {
+        request["deviceId"] = m_printer_last_select;
+        request["options"] = {
+            {"timelapse", m_checkbox_list["timelapse"]->IsShown() && m_checkbox_list["timelapse"]->getValue() == "on"},
+            {"bedLeveling", m_checkbox_list["bed_leveling"]->getValue() == "on"},
+            {"flowCali", m_checkbox_list["flow_cali"]->getValue() == "on"},
+            {"autoBedLeveling", m_checkbox_list["bed_leveling"]->getValueInt()},
+            {"extrudeCaliFlag", m_checkbox_list["flow_cali"]->getValueInt()},
+            {"nozzleOffsetCali", m_checkbox_list["nozzle_offset_cali"]->getValueInt()},
+            {"samePaFlag", !m_pa_value_switch->GetValue()}
+        };
+        request["useAms"] = _HasAms(m_ams_mapping_result);
+        request["mappings"] = json::array();
+        for (const auto& mapping : m_ams_mapping_result) {
+            const bool external = mapping.tray_id == VIRTUAL_TRAY_MAIN_ID || mapping.tray_id == VIRTUAL_TRAY_DEPUTY_ID;
+            try {
+                request["mappings"].push_back({{"filamentId", mapping.id + 1}, {"external", external},
+                    {"extruderId", mapping.tray_id == VIRTUAL_TRAY_DEPUTY_ID ? 1 : 0},
+                    {"amsId", external ? 0 : std::stoi(mapping.ams_id)},
+                    {"slotId", external ? 0 : std::stoi(mapping.slot_id)}});
+            } catch (...) { request["requireReview"] = true; }
+        }
+        // Manual-change assistance and multi-nozzle mappings need Connect review
+        // until their semantics have been verified against that version's UI.
+        DeviceManager* devices = wxGetApp().getDeviceManager();
+        auto* printer = devices ? devices->get_selected_machine() : nullptr;
+        if (printer && printer->is_support_internal_timelapse && request["options"]["timelapse"].get<bool>())
+            request["options"]["timelapseStorage"] = m_timelapse_storage;
+        if (m_ext_change_assist || (printer && printer->is_multi_extruders()))
+            request["requireReview"] = true;
+    } else if (submit) {
+        return false;
+    }
+    return m_plater->print_with_bambu_connect(m_print_plate_idx == PLATE_ALL_IDX, request.dump());
+}
+
 void SelectMachineDialog::on_send_print()
 {
+#ifdef __APPLE__
+    if (m_print_type == PrintFromType::FROM_NORMAL) {
+        Enable_Send_Button(false);
+        if (send_via_bambu_connect(true)) EndModal(wxID_OK);
+        else Enable_Send_Button(true);
+        return;
+    }
+#endif
     BOOST_LOG_TRIVIAL(info) << "print_job: on_ok to send";
     m_is_canceled = false;
     Enable_Send_Button(false);

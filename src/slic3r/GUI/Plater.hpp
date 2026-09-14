@@ -510,7 +510,7 @@ public:
     void merge(size_t obj_idx, std::vector<int> &vol_indeces);
 
     void send_to_printer(bool isall = false);
-    void print_with_bambu_connect(bool all_plates = false);
+    bool print_with_bambu_connect(bool all_plates = false, const std::string& options_json = "");
     void export_gcode(bool prefer_removable);
     void export_gcode_3mf(bool export_all = false);
     void send_gcode_finish(wxString name);
