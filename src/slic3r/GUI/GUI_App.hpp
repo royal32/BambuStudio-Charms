@@ -650,6 +650,7 @@ public:
      *         chose to continue through a warning. A block always returns false.
      */
     bool            check_send_print_version_policy();
+    bool            open_bambu_connect(const wxString& import_url = wxEmptyString);
 
     static bool     catch_error(std::function<void()> cb, const std::string& err);
 

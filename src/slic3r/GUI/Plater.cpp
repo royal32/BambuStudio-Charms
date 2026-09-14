@@ -1,9 +1,11 @@
 #include "Plater.hpp"
+#include "BambuConnect.hpp"
 #include "PerfTrace.hpp"
 #include <array>
 #include <boost/format/format_fwd.hpp>
 #include <cstddef>
 #include <cstdio>
+#include <ctime>
 #include <cctype>
 #include <cmath>
 #include <limits>
@@ -15682,26 +15684,12 @@ void Plater::priv::on_action_publish(wxCommandEvent &event)
 
 void Plater::priv::on_action_print_plate(SimpleEvent&)
 {
-    if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print plate event\n" ;
-    }
-
-    if (!wxGetApp().check_send_print_version_policy()) return;
-
-    //BBS
-    if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
-    m_select_machine_dlg->set_print_type(PrintFromType::FROM_NORMAL);
-    m_select_machine_dlg->prepare(partplate_list.get_curr_plate_index());
-    m_select_machine_dlg->ShowModal();
-    record_start_print_preset("print_plate");
+    if (q) q->print_with_bambu_connect();
 }
 
 void Plater::priv::on_action_send_to_multi_machine(SimpleEvent&)
 {
-    if (!m_send_multi_dlg)
-        m_send_multi_dlg = new SendMultiMachinePage(q);
-    m_send_multi_dlg->prepare(partplate_list.get_curr_plate_index());
-    m_send_multi_dlg->ShowModal();
+    if (q) q->print_with_bambu_connect();
 }
 
 void Plater::priv::on_action_send_to_multi_app(SimpleEvent &)
@@ -15806,18 +15794,7 @@ void Plater::priv::on_action_select_sliced_plate(wxCommandEvent &evt)
 
 void Plater::priv::on_action_print_all(SimpleEvent&)
 {
-    if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print all event\n" ;
-    }
-
-    if (!wxGetApp().check_send_print_version_policy()) return;
-
-    //BBS
-    if (!m_select_machine_dlg) m_select_machine_dlg = new SelectMachineDialog(q);
-    m_select_machine_dlg->set_print_type(PrintFromType::FROM_NORMAL);
-    m_select_machine_dlg->prepare(PLATE_ALL_IDX);
-    m_select_machine_dlg->ShowModal();
-    record_start_print_preset("print_all");
+    if (q) q->print_with_bambu_connect(true);
 }
 
 void Plater::priv::on_action_export_gcode(SimpleEvent&)
@@ -22916,6 +22893,67 @@ void Plater::export_gcode(bool prefer_removable)
             if (agent) agent->track_event("printer_export_gcode", j.dump());
         } catch (...) {}
 
+    }
+}
+
+void Plater::print_with_bambu_connect(bool all_plates)
+{
+    auto& plates = get_partplate_list();
+    auto* plate = plates.get_curr_plate();
+    if (!plate || is_export_gcode_scheduled() || is_background_process_slicing() ||
+        !(all_plates ? plates.is_all_slice_results_ready_for_print() : plate->is_slice_result_ready_for_print())) {
+        MessageDialog(this, _L("Slice the plate and resolve any slicing errors before opening it in Bambu Connect."),
+                      _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    fs::path output_path;
+    try {
+        // The archive writer skips missing G-code files. Reject those here rather
+        // than handing Connect an apparently successful, but unprintable, archive.
+        for (int i = 0; i < plates.get_plate_count(); ++i) {
+            auto* candidate = plates.get_plate(i);
+            if ((!all_plates && candidate != plate) || !candidate->is_slice_result_ready_for_print()) continue;
+            const fs::path gcode_path(candidate->get_gcode_filename());
+            if (!fs::is_regular_file(gcode_path) || fs::file_size(gcode_path) == 0 ||
+                !std::ifstream(gcode_path.string(), std::ios::binary)) {
+                MessageDialog(this, _L("The sliced data is missing or unreadable. Slice the plate again before opening it in Bambu Connect."),
+                              _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+                return;
+            }
+        }
+        // Connect imports asynchronously. Keep a unique snapshot independent of the
+        // slicing temp files, so reslicing, another handoff or closing Studio is safe.
+        const fs::path spool_dir = fs::path(Slic3r::data_dir()) / "bambu-connect";
+        fs::create_directories(spool_dir);
+        const auto cutoff = std::time(nullptr) - 7 * 24 * 60 * 60;
+        for (const auto& entry : fs::directory_iterator(spool_dir)) {
+            boost::system::error_code ec;
+            const auto filename = entry.path().filename().string();
+            if (!fs::is_regular_file(entry.symlink_status()) ||
+                !boost::starts_with(filename, "handoff-") || !boost::ends_with(filename, ".gcode.3mf")) continue;
+            const auto modified = fs::last_write_time(entry.path(), ec);
+            if (!ec && modified < cutoff) fs::remove(entry.path(), ec);
+        }
+        output_path = fs::absolute(spool_dir / ("handoff-" +
+            boost::uuids::to_string(boost::uuids::random_generator()()) + ".gcode.3mf"));
+        const int plate_idx = all_plates ? PLATE_ALL_IDX : plates.get_curr_plate_index();
+        const auto strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel;
+        if (export_3mf(output_path, strategy, plate_idx) < 0 ||
+            !fs::is_regular_file(output_path) || fs::file_size(output_path) == 0) {
+            boost::system::error_code ec;
+            fs::remove(output_path, ec);
+            MessageDialog(this, _L("Could not prepare the sliced file for Bambu Connect. Check available disk space and try again."),
+                          _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+        const auto name = get_export_gcode_filename(".gcode.3mf", true, all_plates).utf8_string();
+        const auto url = BambuConnect::import_url(into_u8(from_path(output_path)), name, true);
+        wxGetApp().open_bambu_connect(wxString::FromUTF8(url));
+    } catch (const std::exception& ex) {
+        BOOST_LOG_TRIVIAL(error) << "Bambu Connect handoff failed: " << ex.what();
+        MessageDialog(this, _L("Could not prepare the sliced file for Bambu Connect. Check available disk space and try again."),
+                      _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
     }
 }
 

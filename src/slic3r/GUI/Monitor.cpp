@@ -169,6 +169,10 @@ void MonitorPanel::init_tabpanel()
     m_side_tools = new SideTools(this, wxID_ANY);
     wxBoxSizer* sizer_side_tools = new wxBoxSizer(wxVERTICAL);
     sizer_side_tools->Add(m_side_tools, 1, wxEXPAND, 0);
+    auto* connect_button = new wxButton(this, wxID_ANY, _L("Open Bambu Connect"));
+    connect_button->SetToolTip(_L("Select your printer in Bambu Connect to move axes, change temperatures, and control printing."));
+    connect_button->Bind(wxEVT_BUTTON, [](wxCommandEvent&) { wxGetApp().open_bambu_connect(); });
+    sizer_side_tools->Add(connect_button, 0, wxEXPAND | wxALL, FromDIP(6));
     m_tabpanel             = new Tabbook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, sizer_side_tools, wxNB_LEFT | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME);
     m_side_tools->set_table_panel(m_tabpanel);
     m_tabpanel->SetBackgroundColour(wxColour("#FEFFFF"));

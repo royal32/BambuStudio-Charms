@@ -6050,6 +6050,25 @@ void GUI_App::check_cert()
     BOOST_LOG_TRIVIAL(info) << "check_cert";
 }
 
+bool GUI_App::open_bambu_connect(const wxString& import_url)
+{
+    bool launched = false;
+#ifdef __APPLE__
+    // Pass argv directly; never interpolate paths or names into a shell command.
+    const wchar_t* args[] = { L"/usr/bin/open", L"-b", L"com.bambulab.bambu-connect",
+                             import_url.empty() ? nullptr : import_url.wc_str(), nullptr };
+    launched = wxExecute(args, wxEXEC_SYNC) == 0;
+#else
+    launched = wxLaunchDefaultBrowser(import_url.empty() ? wxString("bambu-connect://") : import_url);
+#endif
+    if (!launched) {
+        MessageDialog(nullptr,
+            _L("Could not open Bambu Connect. Install and open Bambu Connect, sign in to your printer account, then try again.\n\nDownload: https://wiki.bambulab.com/en/software/bambu-connect"),
+            _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+    }
+    return launched;
+}
+
 // return true if handled
 bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
 {
@@ -6128,10 +6147,17 @@ bool GUI_App::process_network_msg(std::string dev_id, std::string msg)
         }
         else if (msg == "unsigned_studio") {
             BOOST_LOG_TRIVIAL(info) << "process_network_msg, unsigned_studio";
-            MessageDialog msg_dlg(nullptr, _L("Your software is not signed, and some printing functions have been restricted. Please use the officially signed software version."), "", wxAPPLY | wxOK);
+            if (m_show_error_msgdlg) return true;
+            MessageDialog msg_dlg(nullptr,
+                _L("This printer requires Bambu Connect for controls. The requested action was not performed.\n\nOpen Bambu Connect, select your printer, and use its controls. To print a sliced plate, use Print plate in this app."),
+                _L("Printer controls"), wxYES_NO);
+            msg_dlg.SetButtonLabel(wxID_YES, _L("Open Bambu Connect"));
+            msg_dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
+            msg_dlg.Fit();
             m_show_error_msgdlg = true;
             auto modal_result = msg_dlg.ShowModal();
             m_show_error_msgdlg = false;
+            if (modal_result == wxID_YES) open_bambu_connect();
 
             return true;
         }
