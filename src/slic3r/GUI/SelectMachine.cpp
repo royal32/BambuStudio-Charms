@@ -2391,17 +2391,17 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
     if (has_slice_warnings)
     {
+        bool confirmed = false;
         ConfirmBeforeSendDialog confirm_dlg(this, wxID_ANY, _L("Warning"));
         if (is_printing_block)
         {
             confirm_dlg.hide_button_ok();
             confirm_dlg.edit_cancel_button_txt(_L("Close"), true);
         }
-        confirm_dlg.Bind(EVT_SECONDARY_CHECK_CONFIRM, [this, &confirm_dlg](wxCommandEvent& e)
+        confirm_dlg.Bind(EVT_SECONDARY_CHECK_CONFIRM, [&confirmed](wxCommandEvent&)
             {
-                confirm_dlg.on_hide();
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": confirm_dlg to send print job after warnings.";
-                this->on_send_print();
+                // The confirmation button closes its own modal after this event.
+                confirmed = true;
             });
 
         // STUDIO-9580
@@ -2464,6 +2464,12 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         confirm_dlg.on_show();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": confirm_dlg on_show.";
+        if (confirmed && !is_printing_block) {
+            // Finish unwinding/destroying the warning dialog before sending.
+            // Connect completes synchronously here and ends our parent modal;
+            // doing that inside the child modal can leave the parent visible.
+            CallAfter(&SelectMachineDialog::on_send_print);
+        }
     }
     else
     {

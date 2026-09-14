@@ -4,6 +4,8 @@ On macOS, **Print plate** opens Studio's printer/options dialog. Choose the
 printer, print options and filament mapping, then **Send**. Studio exports the
 job and passes those selections to Connect's internal print state. Connect runs
 hidden during a normal send. Its existing Send handler performs submission.
+Studio's print dialog closes after the handoff completes, including when a
+**Continue printing** warning was confirmed first.
 
 **Open in Bambu Connect** in the Studio dialog is the review/fallback path. It
 opens Connect directly at **Send to print**, skipping both **Import Gcode 3MF**
@@ -132,8 +134,9 @@ Direct-bridge validation:
 - A requested timelapse setting that Connect normalized was detected and marked
   for review. The A1/A1-mini compatibility check remained active.
 - The user verified a live silent submission from Studio: the job arrived and
-  started on the printer successfully. The Studio print dialog remained open
-  afterward; closing it on completion is the next UI fix.
+  started on the printer successfully. The subsequent dialog-close fix defers
+  sending until the confirmed warning's modal loop has unwound; the user
+  confirmed the lingering dialog occurred after **Continue printing**.
 - The native dialog fallback is verified end to end. The custom toolbar
   dropdown's **Print in Connect** selection still needs a manual UI check.
 
