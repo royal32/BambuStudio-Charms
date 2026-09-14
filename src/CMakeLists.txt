@@ -223,7 +223,7 @@ if (APPLE AND NOT XCODE)
         set(_bbl_dsym_out "$<TARGET_FILE:BambuStudio>.dSYM")
     endif ()
     add_custom_command(TARGET BambuStudio POST_BUILD
-        COMMAND dsymutil "$<TARGET_FILE:BambuStudio>" -o "${_bbl_dsym_out}"
+        COMMAND /usr/bin/xcrun dsymutil "$<TARGET_FILE:BambuStudio>" -o "${_bbl_dsym_out}"
         COMMENT "Generating standalone dSYM"
         VERBATIM)
 endif()

@@ -31,6 +31,7 @@ public:
 
     bool initialize(std::string *error = nullptr);
     bool available() const { return m_available; }
+    bool has_pending_switch() const { return !m_pending_profile_id.empty(); }
 
     // Promotes a pending switch, returns the selected data directory and reports
     // whether the new profile should open the normal sign-in dialog.

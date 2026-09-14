@@ -651,6 +651,8 @@ public:
      */
     bool            check_send_print_version_policy();
     bool            open_bambu_connect(const wxString& import_url = wxEmptyString);
+    std::string     bambu_connect_account_session();
+    bool            sync_bambu_connect_account(bool show = false);
 
     static bool     catch_error(std::function<void()> cb, const std::string& err);
 
@@ -884,6 +886,8 @@ private:
     std::unique_ptr<Slic3r::AccountProfileStore> m_account_profile_store;
     bool                    m_account_switch_relaunch { false };
     bool                    m_account_prompt_login { false };
+    bool                    m_account_sync_connect_on_start { false };
+    bool                    m_connect_account_syncing { false };
     std::string             m_older_data_dir_path;
     boost::optional<Semver> m_last_config_version;
     std::string             m_open_method;

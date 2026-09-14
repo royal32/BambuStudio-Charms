@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <thread>
 #include <cerrno>
+#include <array>
+#include <cstring>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <sys/proc.h>
@@ -14,6 +17,8 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <mach/mach_vm.h>
+#include <mach-o/loader.h>
 #import <Cocoa/Cocoa.h>
 
 extern char **environ;
@@ -21,6 +26,65 @@ namespace Slic3r { namespace GUI { namespace BambuConnect {
 namespace {
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+
+bool read_own_memory(uintptr_t address, void* destination, size_t size) {
+    if (!address || !size) return false;
+    mach_vm_size_t copied = 0;
+    return mach_vm_read_overwrite(mach_task_self(), address, size,
+        reinterpret_cast<mach_vm_address_t>(destination), &copied) == KERN_SUCCESS && copied == size;
+}
+
+bool supported_session_layout(void* identity_function) {
+#if defined(__arm64__)
+    Dl_info image{};
+    if (!identity_function || !dladdr(identity_function, &image)) return false;
+    const auto base = reinterpret_cast<uintptr_t>(image.dli_fbase);
+    mach_header_64 header{};
+    if (!read_own_memory(base, &header, sizeof(header)) || header.magic != MH_MAGIC_64 ||
+        header.ncmds > 1024 || header.sizeofcmds > 1024 * 1024) return false;
+    // LC_UUID of the installed networking plugin, not its marketing version.
+    // Re-verify the account/string layout before adding any other binary UUID.
+    const std::array<unsigned char, 16> expected = {
+        0x22,0x25,0x30,0x83,0x62,0x32,0x32,0x5a,0x87,0xfb,0xed,0x90,0x92,0x62,0x5f,0x5e};
+    size_t offset = sizeof(header);
+    for (uint32_t i = 0; i < header.ncmds; ++i) {
+        load_command command{};
+        if (offset + sizeof(command) > sizeof(header) + header.sizeofcmds ||
+            !read_own_memory(base + offset, &command, sizeof(command)) || command.cmdsize < sizeof(command) ||
+            command.cmdsize > sizeof(header) + header.sizeofcmds - offset) return false;
+        if (command.cmd == LC_UUID) {
+            uuid_command uuid{};
+            return command.cmdsize == sizeof(uuid) && read_own_memory(base + offset, &uuid, sizeof(uuid)) &&
+                std::memcmp(uuid.uuid, expected.data(), expected.size()) == 0;
+        }
+        offset += command.cmdsize;
+    }
+#endif
+    return false;
+}
+
+std::string read_session_string(uintptr_t address) {
+    // This pinned arm64 build uses libc++'s 24-byte alternate string layout.
+    // Read via Mach so an expired pointer returns failure instead of crashing.
+    std::array<unsigned char, 24> before{}, after{};
+    if (!read_own_memory(address, before.data(), before.size())) return {};
+    size_t length = before[23];
+    std::string result;
+    if (length & 0x80) {
+        uintptr_t pointer = 0;
+        std::memcpy(&pointer, before.data(), sizeof(pointer));
+        std::memcpy(&length, before.data() + 8, sizeof(length));
+        if (!length || length > 8192) return {};
+        result.resize(length);
+        if (!read_own_memory(pointer, result.data(), length)) return {};
+    } else {
+        if (length > 22) return {};
+        result.assign(reinterpret_cast<const char*>(before.data()), length);
+    }
+    if (!read_own_memory(address, after.data(), after.size()) || before != after) return {};
+    return result;
+}
+
 bool process_running(pid_t pid) {
     proc_bsdinfo info{};
     return pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) && info.pbi_status != SZOMB;
@@ -48,7 +112,7 @@ public:
 class Pipe {
     int input = -1, output = -1, sequence = 0;
     pid_t child = -1;
-    std::string buffer, session, facade;
+    std::string buffer, session, facade, account_facade;
 public:
     std::mutex mutex;
     ~Pipe() { close_pipe(); }
@@ -56,7 +120,7 @@ public:
         if (input >= 0) close(input);
         if (output >= 0) close(output);
         input = output = -1;
-        session.clear(); facade.clear(); buffer.clear();
+        session.clear(); facade.clear(); account_facade.clear(); buffer.clear();
         if (child > 0) waitpid(child, nullptr, WNOHANG);
         child = -1;
     }
@@ -228,6 +292,12 @@ public:
         const auto function = component.at("result").at("objectId").get<std::string>();
         const auto print = scope_binding(function, "tk");
         const auto devices = scope_binding(function, "T_");
+        const auto auth = scope_binding(function, "Ro");
+        const auto save_token = scope_binding(function, "xGe");
+        const auto get_token = scope_binding(function, "Qp");
+        const auto environment = scope_binding(function, "Yi");
+        account_facade = invoke(auth, "function(p,s,t,e){return {auth:this,print:p,save:s,token:t,environment:e};}",
+            {{{"objectId", print}}, {{"objectId", save_token}}, {{"objectId", get_token}}, {{"objectId", environment}}}, false).at("objectId");
         const auto setter_method = invoke(print, "function(){return this().setPrintOptions;}", json::array(), false).at("objectId").get<std::string>();
         const auto setter = scope_binding(setter_method, "n");
         std::ifstream stream(adapter_path);
@@ -235,8 +305,43 @@ public:
         const std::string script((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
         auto factory = call("Runtime.evaluate", {{"expression", script}});
         if (factory.contains("exceptionDetails")) throw std::runtime_error("Could not load the Connect adapter.");
-        facade = invoke(factory.at("result").at("objectId"), "function(p,d,s){return this(p,d,s);}",
-            {{{"objectId", print}}, {{"objectId", devices}}, {{"objectId", setter}}}, false).at("objectId");
+        facade = invoke(factory.at("result").at("objectId"), "function(p,d,s,a){return this(p,d,s,a);}",
+            {{{"objectId", print}}, {{"objectId", devices}}, {{"objectId", setter}}, {{"objectId", auth}}}, false).at("objectId");
+    }
+    void sync_account(const json& account, const std::string& adapter_path) {
+        // Always check before importing: a job must never reach another account's
+        // printer picker merely because Connect was signed in independently.
+        auto result = invoke(account_facade, R"JS(async function(a) {
+            if (this.print().state.sending) throw Error('Connect is sending a job. Wait before switching accounts.');
+            const user = this.auth().user;
+            const current = user ? String(user.uid) : '';
+            if (a.userId && (this.environment().key === 'mainland') !== (a.countryCode === 'CN'))
+                throw Error('Studio and Connect use different regions. Set the same region in Connect first.');
+            // Also refresh an expiring Connect session when Studio renewed its
+            // token, and clear a persisted token even if user info is not loaded.
+            if (current === a.userId && (a.userId
+                ? (!a.token || this.token() === a.token) : !this.token())) return {restart:false};
+            if (!a.userId) {
+                if (!await this.auth().logout()) throw Error('Connect could not sign out securely.');
+            } else {
+                if (!a.token) throw Error('Sign in to this account in Studio again.');
+                if (!await this.save(a.token)) throw Error('Connect could not securely save the selected account.');
+            }
+            return {restart:true};
+        })JS", {{{"value", account}}}).at("value");
+        if (result.value("restart", false)) {
+            // A fresh process drops every old MQTT connection and cached printer.
+            facade.clear();
+            start(adapter_path);
+        }
+        auto identity = invoke(account_facade, R"JS(async function(expected) {
+            const current = () => this.auth().user ? String(this.auth().user.uid) : '';
+            for (const deadline = Date.now() + 10000; expected && current() !== expected && Date.now() < deadline;)
+                await new Promise(resolve => setTimeout(resolve, 100));
+            return current();
+        })JS", {{{"value", account.at("userId")}}}).at("value");
+        if (identity != account.at("userId"))
+            throw std::runtime_error("Connect could not verify the selected Studio account. Sign in to Studio again before printing.");
     }
     json handoff(const json& request) {
         invoke(facade, "function(){this.beginBackground();}");
@@ -267,12 +372,52 @@ std::string direct_handoff(const std::string& request, const std::string& adapte
     try {
         bridge.start(adapter_path);
         prepared = true;
-        return bridge.handoff(json::parse(request)).dump();
+        auto data = json::parse(request);
+        if (!data.contains("account")) throw std::runtime_error("Sign in to Studio before printing with Connect.");
+        try {
+            bridge.sync_account(data.at("account"), adapter_path);
+        } catch (...) {
+            // Session-bearing protocol exceptions must not enter print logs.
+            throw std::runtime_error("Could not synchronize the Studio account with Bambu Connect. Sign in to Studio again or update the account adapter before printing.");
+        }
+        data["accountUserId"] = data.at("account").at("userId");
+        data.erase("account");
+        return bridge.handoff(data).dump();
     } catch (const std::exception& error) {
         bridge.show();
         // After entering handoff, submission may have happened: never retry or
         // switch to the URL importer automatically on an ambiguous outcome.
         return json({{"status", prepared ? "attention" : "unavailable"}, {"error", error.what()}}).dump();
     }
+}
+
+std::string synchronize_account(const std::string& session, const std::string& adapter_path, bool show)
+{
+    std::unique_lock<std::mutex> guard(bridge.mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return json({{"status", "attention"}, {"error", "A Connect handoff is in progress."}}).dump();
+    try {
+        bridge.start(adapter_path);
+        bridge.sync_account(json::parse(session), adapter_path);
+        if (show) bridge.show();
+        return json({{"status", "account_ready"}}).dump();
+    } catch (...) {
+        // Never propagate session-bearing protocol/JSON errors into GUI logs.
+        return json({{"status", "attention"}, {"error", "Could not synchronize the Studio account with Bambu Connect. Sign in to Studio again and check that both apps use the same region."}}).dump();
+    }
+}
+
+std::string studio_access_token(void* agent, void* identity_function, const std::string& user_id)
+{
+    if (!agent || user_id.empty() || !supported_session_layout(identity_function)) return {};
+    uintptr_t implementation = 0, account = 0, current = 0;
+    if (!read_own_memory(reinterpret_cast<uintptr_t>(agent), &implementation, sizeof(implementation)) ||
+        !implementation || !read_own_memory(implementation + 0x20, &account, sizeof(account)) || !account) return {};
+    // Verified against get_user_id and the plugin's account serializer:
+    // shared account pointer at impl+0x20, UID at +0x48, access token at +0x80.
+    if (read_session_string(account + 0x48) != user_id) return {};
+    auto token = read_session_string(account + 0x80);
+    if (!read_own_memory(implementation + 0x20, &current, sizeof(current)) || current != account ||
+        read_session_string(account + 0x48) != user_id) return {};
+    return token;
 }
 }}}

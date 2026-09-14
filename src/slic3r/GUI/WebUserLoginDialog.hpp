@@ -67,8 +67,15 @@ public:
 
     bool run();
 
+    int ShowModal() override;
+    bool IsLoginModalRunning() const { return m_login_modal_running; }
+    void CompleteLogin(int online_login);
+    int CompletedLogin() const { return m_completed_login; }
+
     static int web_sequence_id;
 private:
+    bool m_login_modal_running { false };
+    int m_completed_login { -1 };
     wxTimer *m_timer { nullptr };
     void     OnTimer(wxTimerEvent &event);
 

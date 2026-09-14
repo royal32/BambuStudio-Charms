@@ -1,6 +1,6 @@
 // Adapter for Connect 2.5.0-beta.15. Evaluated as a factory in its own renderer.
 // Keep imports and store symbols in sync with BambuConnectBridge.mm when updating.
-(function (getPrint, getDevices, setPrintState) {
+(function (getPrint, getDevices, setPrintState, getAuth) {
     let requestId;
     let submitted = false;
     let needsReview = false;
@@ -35,7 +35,8 @@
     }
     function intentMatches() {
         const state = getPrint().state;
-        return (!expected.deviceId || state.deviceId === expected.deviceId) &&
+        return (!expected.accountUserId || String(getAuth?.().user?.uid ?? '') === expected.accountUserId) &&
+            (!expected.deviceId || state.deviceId === expected.deviceId) &&
             (expected.plateIndex === undefined || Number(state.activePlate?.sliceInfoConfig.index) === expected.plateIndex) &&
             Object.entries(expected.options ?? {}).every(([key, value]) => state.printOptions[key] === value) &&
             (expected.useAms === undefined || state.useAms === expected.useAms) &&
@@ -71,6 +72,8 @@
         beginBackground() { backgroundFrames = true; },
         endBackground() { backgroundFrames = false; },
         async prepare(request) {
+            if (request.accountUserId && String(getAuth?.().user?.uid ?? '') !== request.accountUserId)
+                throw Error('The Connect account changed. Reopen this job from Studio.');
             if (getPrint().state.sending) throw Error('Connect is already sending a print job.');
             if (requestId === request.id && submitted) throw Error('This job was already submitted.');
             requestId = undefined;

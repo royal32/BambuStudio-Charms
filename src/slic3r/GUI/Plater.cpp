@@ -22962,6 +22962,12 @@ bool Plater::print_with_bambu_connect(bool all_plates, const std::string& option
         if (boost::ends_with(name, ".gcode.gcode.3mf")) name.erase(name.size() - 16, 6);
 #ifdef __APPLE__
         json request = options_json.empty() ? json::object() : json::parse(options_json);
+        request["account"] = json::parse(wxGetApp().bambu_connect_account_session());
+        if (request["account"].value("userId", "").empty()) {
+            MessageDialog(this, _L("Sign in to Studio before printing with Bambu Connect."),
+                          _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+            return false;
+        }
         request["path"] = into_u8(from_path(output_path));
         request["name"] = name;
         request["id"] = output_path.stem().string();

@@ -25,8 +25,10 @@ function OnInit()
 			$("#DropdownWrapper").css("visibility", "hidden");
 		}
 	});
-	$('#Login2').on('blur', function() {
-		$("#DropdownWrapper").css("visibility", "hidden");
+	$('#Login2').on('focusout', function(event) {
+		// Keep the menu open when focus moves to a saved-account button.
+		if(!this.contains(event.relatedTarget))
+			$("#DropdownWrapper").css("visibility", "hidden");
 	});
 	OnUpdatePluginInstalltip();
 }
@@ -317,7 +319,7 @@ function RenderAccountProfiles()
 	list.empty();
 	for(let i=0;i<m_AccountProfiles.length;i++) {
 		let account=m_AccountProfiles[i];
-		let row=$("<div>").addClass("AccountRow");
+		let row=$("<div>").addClass("AccountRow").attr({role:'button', tabindex:0});
 		if(account['id']===m_ActiveProfileId)
 			row.addClass("AccountRowActive");
 		let avatar=$("<div>").addClass("AccountRowAvatar");
@@ -325,6 +327,7 @@ function RenderAccountProfiles()
 		if(avatarUrl)
 			avatar.css("background-image", "url('"+avatarUrl+"')");
 		let name=$("<div>").addClass("AccountRowName").text(account['name'] || account['user_name'] || 'Bambu account');
+		row.attr('title', name.text() + (account['id']===m_ActiveProfileId ? '' : ' — Restart Studio to switch to this account'));
 		let check=$("<div>").addClass("AccountRowCheck").text(account['id']===m_ActiveProfileId ? "✓" : "");
 		row.append(avatar, name, check);
 		row.on('click', function(event) {
@@ -334,6 +337,9 @@ function RenderAccountProfiles()
 				return;
 			}
 			OnSwitchAccount(account['id']);
+		});
+		row.on('keydown', function(event) {
+			if(event.key==='Enter' || event.key===' ') { event.preventDefault(); row.trigger('click'); }
 		});
 		list.append(row);
 	}

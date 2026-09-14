@@ -375,7 +375,9 @@ void session::handle_login()
                 BOOST_LOG_TRIVIAL(info) << "third_party_login: after applying the login information, the application remains unlogged, login failed";
                 do_write_302(*login_params, false);
             }
-            GUI::wxGetApp().CallAfter([this] { wxGetApp().ShowUserLogin(false); });
+            // on_user_login closes the login modal before scheduling privacy,
+            // preset synchronization or Connect UI. Closing it independently
+            // here can target a suspended loop beneath one of those dialogs.
         }
     }
     else {

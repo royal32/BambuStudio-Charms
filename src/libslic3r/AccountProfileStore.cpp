@@ -79,7 +79,9 @@ bool copy_tree(const fs::path &source, const fs::path &target, std::string *erro
 
         fs::create_directories(target);
         for (fs::recursive_directory_iterator it(source), end; it != end; ++it) {
-            const fs::path relative = fs::relative(it->path(), source);
+            // Keep framework symlink names intact; relative() resolves them to
+            // their targets and would copy aliases over the real directories.
+            const fs::path relative = it->path().lexically_relative(source);
             const fs::path dest     = target / relative;
             if (fs::is_directory(it->symlink_status())) {
                 fs::create_directories(dest);
@@ -351,7 +353,32 @@ bool AccountProfileStore::copy_plugins(const fs::path &source_data_dir,
                                        const fs::path &target_data_dir,
                                        std::string *error) const
 {
-    return copy_tree(source_data_dir / "plugins", target_data_dir / "plugins", error);
+    if (!copy_tree(source_data_dir / "plugins", target_data_dir / "plugins", error))
+        return false;
+    // Reuse this installation's basic setup, but never the network-engine
+    // session, printer access codes, recent projects, or account-specific presets.
+    try {
+        boost::nowide::ifstream input((source_data_dir / "BambuStudio.conf").string());
+        if (!input) return true;
+        json source;
+        input >> source;
+        json target = json::object();
+        for (const char* key : {"header", "firstguide", "models", "filaments", "print", "nozzle_volume_types"})
+            if (source.contains(key)) target[key] = source.at(key);
+        if (source.contains("app") && source.at("app").is_object()) {
+            for (const char* key : {"language", "region", "installed_networking", "single_instance",
+                                   "dark_color_mode", "sync_user_preset", "sync_system_preset"})
+                if (source.at("app").contains(key)) target["app"][key] = source.at("app").at(key);
+        }
+        boost::nowide::ofstream output((target_data_dir / "BambuStudio.conf").string());
+        output << target.dump(2);
+        output.close();
+        if (!output) throw std::runtime_error("Unable to initialize account preferences");
+        return true;
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
 }
 
 bool AccountProfileStore::request_switch(const std::string &profile_id, bool prompt_login,

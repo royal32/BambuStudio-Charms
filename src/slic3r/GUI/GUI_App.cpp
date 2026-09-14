@@ -52,6 +52,10 @@
 #include <wx/menuitem.h>
 #include <wx/filedlg.h>
 #include <wx/progdlg.h>
+#include <future>
+#ifdef __APPLE__
+#include "BambuConnectBridge.hpp"
+#endif
 #include <wx/dir.h>
 #include <wx/wupdlock.h>
 #include <wx/filefn.h>
@@ -1398,6 +1402,10 @@ void GUI_App::post_init()
             mainframe->refresh_plugin_tips();
         });
 
+    if (m_account_sync_connect_on_start) {
+        m_account_sync_connect_on_start = false;
+        CallAfter([this] { if (mainframe) sync_bambu_connect_account(); });
+    }
     if (m_account_prompt_login) {
         m_account_prompt_login = false;
         CallAfter([this] {
@@ -2597,6 +2605,7 @@ void GUI_App::init_app_config()
             std::string account_error;
             m_account_profile_store = std::make_unique<Slic3r::AccountProfileStore>(default_data_dir);
             if (m_account_profile_store->initialize(&account_error)) {
+                m_account_sync_connect_on_start = m_account_profile_store->has_pending_switch();
                 selected_data_dir = m_account_profile_store
                     ->activate_startup_profile(&m_account_prompt_login, &account_error).string();
             } else {
@@ -4470,6 +4479,10 @@ void GUI_App::ShowUserLogin(bool show)
     // BBS: User Login Dialog
     if (show) {
         try {
+            if (login_dlg && login_dlg->IsLoginModalRunning()) {
+                login_dlg->Raise();
+                return;
+            }
             if (!login_dlg)
                 login_dlg = new ZUserLogin();
             else {
@@ -4477,6 +4490,10 @@ void GUI_App::ShowUserLogin(bool show)
                 login_dlg = new ZUserLogin();
             }
             login_dlg->ShowModal();
+            // Privacy, preset-sync and Connect dialogs may now safely start.
+            // A CallAfter from inside ShowModal can still run in its nested loop.
+            if (login_dlg->CompletedLogin() >= 0)
+                request_user_login(login_dlg->CompletedLogin());
         } catch (std::exception &) {
             ;
         }
@@ -4868,7 +4885,7 @@ void GUI_App::request_add_account()
 
     const wxString suggested = wxString::Format(_L("Account %d"),
         static_cast<int>(m_account_profile_store->profiles().size() + 1));
-    wxTextEntryDialog dialog(mainframe, _L("Enter a name for this Bambu account."),
+    wxTextEntryDialog dialog(mainframe, _L("Enter a name for this Bambu account. Studio will restart so you can sign in."),
                              _L("Add Bambu account"), suggested);
     if (dialog.ShowModal() != wxID_OK)
         return;
@@ -4972,6 +4989,7 @@ void GUI_App::request_user_logout()
                 BOOST_LOG_TRIVIAL(warning) << "Account profile logout update failed: " << error;
         }
         send_account_profiles();
+        CallAfter([this] { sync_bambu_connect_account(); });
     }
 }
 
@@ -5687,11 +5705,16 @@ void GUI_App::on_user_login(wxCommandEvent &evt)
 {
     if (!m_agent) { return; }
     int online_login = evt.GetInt();
+    if (login_dlg && login_dlg->IsLoginModalRunning()) {
+        login_dlg->CompleteLogin(online_login);
+        return;
+    }
     refresh_active_account_profile();
     send_account_profiles();
     // check privacy before handle
     check_privacy_version(online_login);
     check_track_enable();
+    CallAfter([this] { sync_bambu_connect_account(); });
 }
 
 bool GUI_App::is_studio_active()
@@ -6050,10 +6073,53 @@ void GUI_App::check_cert()
     BOOST_LOG_TRIVIAL(info) << "check_cert";
 }
 
+std::string GUI_App::bambu_connect_account_session()
+{
+    json session = {{"userId", ""}, {"token", ""},
+                    {"countryCode", app_config ? app_config->get_country_code() : "US"}};
+    if (m_agent && m_agent->is_user_login()) {
+        session["userId"] = m_agent->get_user_id();
+#ifdef __APPLE__
+        session["token"] = BambuConnect::studio_access_token(m_agent->get_network_agent(),
+            NetworkAgent::get_network_function("bambu_network_get_user_id"), m_agent->get_user_id());
+#endif
+    }
+    return session.dump();
+}
+
+bool GUI_App::sync_bambu_connect_account(bool show)
+{
+#ifdef __APPLE__
+    if (m_connect_account_syncing) return false;
+    m_connect_account_syncing = true;
+    bool ok = false;
+    try {
+        const auto session = bambu_connect_account_session();
+        const auto adapter = resources_dir() + "/scripts/bambu_connect_bridge.js";
+        auto pending = std::async(std::launch::async, [session, adapter, show] {
+            return BambuConnect::synchronize_account(session, adapter, show);
+        });
+        wxProgressDialog progress(_L("Bambu Connect"), _L("Synchronizing your account with Bambu Connect…"),
+                                  100, mainframe, wxPD_APP_MODAL | wxPD_AUTO_HIDE);
+        while (pending.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) progress.Pulse();
+        ok = json::parse(pending.get()).value("status", "") == "account_ready";
+    } catch (...) {}
+    m_connect_account_syncing = false;
+    if (!ok) MessageDialog(mainframe,
+        _L("Could not synchronize this account with Bambu Connect. Sign in to Studio again and check that both apps use the same region. Printing through Connect is blocked until the accounts match."),
+        _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+    return ok;
+#else
+    return true;
+#endif
+}
+
 bool GUI_App::open_bambu_connect(const wxString& import_url)
 {
     bool launched = false;
 #ifdef __APPLE__
+    if (!sync_bambu_connect_account(import_url.empty())) return false;
+    if (import_url.empty()) return true;
     // Pass argv directly; never interpolate paths or names into a shell command.
     const wchar_t* args[] = { L"/usr/bin/open", L"-b", L"com.bambulab.bambu-connect",
                              import_url.empty() ? nullptr : import_url.wc_str(), nullptr };

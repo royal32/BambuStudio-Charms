@@ -59,12 +59,13 @@ async function fixture({ disabled = false, warning = false, cancelled = false, n
     const module = new vm.SourceTextModule('export default ' + source, { context,
         importModuleDynamically: specifier => specifier.includes('router-') ? router : io });
     await module.link(() => {}); await module.evaluate();
-    const adapter = module.namespace.default(() => store, () => ({ devices: [device] }), update => update({ state }));
+    const auth = { user: { uid: 'account-one' } };
+    const adapter = module.namespace.default(() => store, () => ({ devices: [device] }), update => update({ state }), () => auth);
     const request = { id: 'job-1', path: '/tmp/a.gcode.3mf', name: 'café & #1.gcode.3mf',
         deviceId: 'desk', plateIndex: 2, useAms: true,
         options: { timelapse: false, bedLeveling: true, flowCali: false },
         mappings: [{ filamentId: 1, amsId: 0, slotId: 2, external: false }] };
-    return { adapter, request, state, store, modal, context,
+    return { adapter, request, state, store, modal, context, auth,
         counts: () => ({ sends, imports, navigations, nativeFrames, nativeCancellations }) };
 }
 
@@ -88,6 +89,18 @@ test('supplies cancellable frames only during a hidden handoff', async () => {
     f.context.document.visibilityState = 'hidden';
     f.adapter.endBackground();
     assert.equal(w.requestAnimationFrame(() => {}), 3);
+});
+
+test('rejects a different account before import and rechecks it before sending', async () => {
+    const f = await fixture();
+    f.request.accountUserId = 'account-two';
+    await assert.rejects(f.adapter.prepare(f.request), /account changed/);
+    assert.equal(f.counts().imports, 0);
+    f.request.accountUserId = 'account-one';
+    await f.adapter.prepare(f.request);
+    f.auth.user = { uid: 'account-two' };
+    assert.equal((await f.adapter.submit(f.request.id)).status, 'attention');
+    assert.equal(f.counts().sends, 0);
 });
 
 test('prepares the exact plate, printer, options and AMS slot without sending', async () => {

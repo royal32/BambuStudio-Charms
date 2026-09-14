@@ -165,6 +165,28 @@ bool ZUserLogin::run() {
     }
 }
 
+int ZUserLogin::ShowModal()
+{
+    m_login_modal_running = true;
+    m_completed_login = -1;
+    try {
+        const int result = wxDialog::ShowModal();
+        m_login_modal_running = false;
+        return result;
+    } catch (...) {
+        m_login_modal_running = false;
+        throw;
+    }
+}
+
+void ZUserLogin::CompleteLogin(int online_login)
+{
+    // Keep the completion until ShowModal actually returns, including duplicate
+    // notifications between EndModal and the modal loop unwinding.
+    m_completed_login = online_login;
+    if (IsModal()) EndModal(wxID_OK);
+}
+
 
 void ZUserLogin::load_url(wxString &url)
 {

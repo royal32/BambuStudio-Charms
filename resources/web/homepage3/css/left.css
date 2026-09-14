@@ -408,7 +408,7 @@ body
 	transition: background 0.15s;
 }
 
-.AccountRow:hover, .AccountRowActive {
+.AccountRow:hover, .AccountRow:focus-visible, .AccountRowActive {
 	background: rgba(0, 174, 66, 0.10);
 }
 
@@ -425,9 +425,9 @@ body
 	min-width: 0;
 	flex: 1;
 	font-size: 12px;
-	overflow: hidden;
-	white-space: nowrap;
-	text-overflow: ellipsis;
+	white-space: normal;
+	word-break: break-word;
+	line-height: 1.4;
 }
 
 .AccountRowCheck {
