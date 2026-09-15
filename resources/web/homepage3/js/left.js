@@ -239,6 +239,7 @@ function SetLoginInfo( strAvatar, strName )
 
 	$("#UserName").text(strName);
 	$("#DropdownUserName").text(strName);
+	$("#UserName, #DropdownUserName").attr('title', strName);
 
 	let safeAvatar=SafeAvatarUrl(strAvatar);
 	let OriginAvatar=$("#UserAvatarIcon").prop("src");
@@ -263,6 +264,7 @@ function SetUserOffline()
 	$("#DropdownAvatar").css("background-image","url('../img/left_home_account.svg')");
 	$("#UserName").text('');
 	$("#DropdownUserName").text('');
+	$("#UserName, #DropdownUserName").removeAttr('title');
 	UpdateAccountEntryVisibility();
 }
 
@@ -297,8 +299,8 @@ function UpdateAccountEntryVisibility()
 	let hasSavedAccount=active && ((active['user_name'] || '').length>0 || m_AccountProfiles.length>1);
 	if(m_IsUserLogin || hasSavedAccount) {
 		if(active) {
-			$("#UserName").text(active['name'] || active['user_name'] || 'Bambu account');
-			$("#DropdownUserName").text(active['name'] || active['user_name'] || 'Bambu account');
+			let displayName=active['name'] || active['user_name'] || 'Bambu account';
+			$("#UserName, #DropdownUserName").text(displayName).attr('title', displayName);
 			let avatar=SafeAvatarUrl(active['avatar']);
 			$("#UserAvatarIcon").prop("src", avatar || "img/left_home_account.svg");
 			$("#DropdownAvatar").css("background-image", avatar ? "url('"+avatar+"')" : "url('../img/left_home_account.svg')");
@@ -326,7 +328,7 @@ function RenderAccountProfiles()
 		let avatarUrl=SafeAvatarUrl(account['avatar']);
 		if(avatarUrl)
 			avatar.css("background-image", "url('"+avatarUrl+"')");
-		let name=$("<div>").addClass("AccountRowName").text(account['name'] || account['user_name'] || 'Bambu account');
+		let name=$("<div>").addClass("AccountRowName TextS1").text(account['name'] || account['user_name'] || 'Bambu account');
 		row.attr('title', name.text() + (account['id']===m_ActiveProfileId ? '' : ' — Restart Studio to switch to this account'));
 		let check=$("<div>").addClass("AccountRowCheck").text(account['id']===m_ActiveProfileId ? "✓" : "");
 		row.append(avatar, name, check);

@@ -186,27 +186,32 @@ body
 	text-align: center;
 	justify-content: center;
 	width: 95%;
+	min-width: 0;
 	cursor: pointer;
 }
 
 #UserAvatarIcon
 {
+	width: 36px;
 	height: 36px;
+	border-radius: 50%;
+	object-fit: cover;
 }
 
 #UserName
 {
-	white-space: normal;
+	min-width: 0;
+	white-space: nowrap;
 	text-overflow: ellipsis;
 	text-align: left;
-	overflow: hidden; 
+	overflow: hidden;
 	margin-left: 12px;
-	word-wrap: break-word;
-  line-height: 1.2;
+	line-height: 1.2;
 }
 
 .PullBtn
 {
+	flex: none;
 	margin-left: 10px;
 	width: 16px;
 	height: 16px;
@@ -342,7 +347,8 @@ body
 /*dropdown*/
 #DropdownWrapper {
 	visibility: hidden;
-	width: 95%;
+	box-sizing: border-box;
+	width: calc(100% - 6px);
 	border-radius: 8px;
 	overflow: hidden;
 	box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
@@ -354,13 +360,15 @@ body
 .dropdown-header {
 	display: flex;
 	align-items: center;
-	padding: 12px;
+	min-width: 0;
+	padding: 10px;
 }
 .avatar {
-	width: 38px;
-	height: 38px;
-	min-width: 38px;
-	margin-right: 16px;
+	width: 32px;
+	height: 32px;
+	flex: none;
+	margin-right: 10px;
+	border-radius: 50%;
 	background-image: url('../img/left_home_account.svg');
 	background-size: cover;
 	background-position: center center;
@@ -370,20 +378,27 @@ body
 	display: flex;
 	flex-direction: column;
 	justify-content: center;
+	min-width: 0;
+	flex: 1;
 }
 .UserName {
 	font-size: 15px;
 	font-weight: bold;
 	text-align: left;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
 }
 .UserEmail {
 	font-size: 10px;
-	white-space: normal;
-	word-break: break-word;
+	white-space: nowrap;
+	text-overflow: ellipsis;
 	overflow: hidden;
-	max-width: 92%;
 	text-align: left;
 	line-height: 1.4;
+}
+.UserEmail:empty {
+	display: none;
 }
 .DropdownFooter {
 	padding: 10px;
@@ -403,6 +418,7 @@ body
 .AccountRow {
 	display: flex;
 	align-items: center;
+	min-width: 0;
 	padding: 8px 10px;
 	cursor: pointer;
 	transition: background 0.15s;
@@ -415,7 +431,7 @@ body
 .AccountRowAvatar {
 	width: 26px;
 	height: 26px;
-	min-width: 26px;
+	flex: none;
 	margin-right: 9px;
 	border-radius: 50%;
 	background: url('../img/left_home_account.svg') center/cover no-repeat;
@@ -424,14 +440,16 @@ body
 .AccountRowName {
 	min-width: 0;
 	flex: 1;
-	font-size: 12px;
-	white-space: normal;
-	word-break: break-word;
+	font-size: 13px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	line-height: 1.4;
 }
 
 .AccountRowCheck {
 	width: 16px;
+	flex: none;
 	color: #00AE42;
 	font-weight: bold;
 	text-align: right;
@@ -443,6 +461,7 @@ body
 	font-size: 18px;
 	line-height: 15px;
 	text-align: center;
+	color: #00AE42;
 }
 
 .SignInIcon {
