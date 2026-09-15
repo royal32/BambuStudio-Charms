@@ -7354,7 +7354,12 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 						BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("print is null!");
 					}
 					//parse filament info
-					plate_data_item->parse_filament_info(m_plate_list[i]->get_slice_result());
+                    // Reopened sliced archives have no live slicer filament
+                    // statistics. Preserve their metadata for export and Connect.
+                    if (wxGetApp().plater()->is_gcode_3mf())
+                        plate_data_item->slice_filaments_info = m_plate_list[i]->slice_filaments_info;
+                    else
+                        plate_data_item->parse_filament_info(m_plate_list[i]->get_slice_result());
 
 					// Record mixed (virtual) filaments actually used on this plate.
 					// Source is ToolOrdering::used_mixed_filaments (slots that appeared in

@@ -10,6 +10,7 @@ function OnHomeInit()
 {
 	//-----Official-----
     TranslatePage();
+    if (window.SlicedLibrary) SlicedLibrary.init();
 
 	SendMsg_GetRecentFile();
 	SendMsg_GetStaffPick();
@@ -138,6 +139,7 @@ function Set_RecentFile_MouseRightBtn_Event()
 function HandleStudio( pVal )
 {
 	let strCmd = pVal['command'];
+	if (window.SlicedLibrary && SlicedLibrary.handle(pVal)) return;
 	//alert(strCmd);
 	
 	if(strCmd=='get_recent_projects')

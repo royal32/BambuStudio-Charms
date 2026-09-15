@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 
 namespace Slic3r {
 
@@ -35,6 +36,7 @@ class NetworkAgent;
 
 namespace GUI {
 
+struct SlicedLibraryState;
 
 class WebViewPanel : public wxPanel
 {
@@ -127,6 +129,15 @@ public:
 
     //Recent File
     void SendRecentList(int images);
+
+    // Folder-backed sliced jobs on the local home page.
+    bool HandleSlicedLibraryMessage(const std::string& message);
+    void StartSlicedLibraryScan(const std::string& folder);
+    void PollSlicedLibrary();
+    void StopSlicedLibrary();
+    std::shared_ptr<SlicedLibraryState> m_sliced_library;
+    wxTimer* m_sliced_library_timer{nullptr};
+    bool m_sliced_library_opening{false};
 
     //Online
     bool     m_onlinefirst;    // Online Page First Load

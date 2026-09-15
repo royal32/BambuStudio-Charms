@@ -343,6 +343,7 @@ public:
     int          get_current_filament_id(){return m_current_filament_id;};
     bool         is_match_material(std::string material) const;
     void         on_left_down(wxMouseEvent &evt);
+    bool         Show(bool show = true) override;
     virtual void OnDismiss() wxOVERRIDE;
     virtual bool ProcessLeftDown(wxMouseEvent &event) wxOVERRIDE;
     void         paintEvent(wxPaintEvent &evt);

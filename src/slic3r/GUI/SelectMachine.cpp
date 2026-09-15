@@ -4941,13 +4941,25 @@ void SelectMachineDialog::clone_thumbnail_data() {
         int           id   = iter->first;
         Material *    item = iter->second;
         MaterialItem *m    = item->item;
+        // A plate may use only a later filament slot, so its IDs are not
+        // necessarily dense in m_materialList.
+        if (id >= m_preview_colors_in_thumbnail.size())
+            m_preview_colors_in_thumbnail.resize(id + 1);
         m_preview_colors_in_thumbnail[id] = m->m_material_coloul;
+        // Grey in an unmapped material control is a status placeholder, not
+        // the color of the print. Keep the sliced color until a real mapping
+        // (including a legitimately grey spool) supplies a known color.
+        const bool has_mapped_color = m->m_ams_coloul.IsOk() &&
+            std::any_of(m_ams_mapping_result.begin(), m_ams_mapping_result.end(), [item](const FilamentInfo& mapping) {
+                return mapping.id == item->id && mapping.tray_id >= 0 && !mapping.color.empty();
+            });
+        const wxColour preview_color = has_mapped_color ? m->m_ams_coloul : m->m_material_coloul;
         if (item->id < m_cur_colors_in_thumbnail.size()) {
-            m_cur_colors_in_thumbnail[item->id] = m->m_ams_coloul;
+            m_cur_colors_in_thumbnail[item->id] = preview_color;
         }
         else {//exist empty or unrecognized type ams in machine
             m_cur_colors_in_thumbnail.resize(item->id + 1);
-            m_cur_colors_in_thumbnail[item->id] = m->m_ams_coloul;
+            m_cur_colors_in_thumbnail[item->id] = preview_color;
         }
         iter++;
     }

@@ -4859,6 +4859,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             filament_info.group_id = parse_int_list(group_id);
             filament_info.nozzle_diameter = string_to_double_decimal_point(nozzle_diameter);
             filament_info.nozzle_volume_type = volume_type;
+            const auto used_for_object = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_FOR_OBJECT);
+            const auto used_for_support = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_FOR_SUPPORT);
+            filament_info.used_for_object = used_for_object == "true" || used_for_object == "1";
+            filament_info.used_for_support = used_for_support == "true" || used_for_support == "1";
             std::string total_load_time   = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_TOTAL_LOAD_TIME_TAG);
             std::string total_unload_time = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_TOTAL_UNLOAD_TIME_TAG);
             filament_info.total_load_time   = total_load_time.empty() ? 0.0 : atof(total_load_time.c_str());

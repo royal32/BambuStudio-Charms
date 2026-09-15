@@ -11,6 +11,7 @@
 <link rel="stylesheet" type="text/css" href="./css/online.css" />
 <link rel="stylesheet" type="text/css" href="./css/manual.css" />	
 <link rel="stylesheet" type="text/css" href="./css/home.css" />
+<link rel="stylesheet" type="text/css" href="./css/sliced-library.css" />
 <link rel="stylesheet" type="text/css" href="./css/dark.css" />	
 
 <script type="text/javascript" src="../include/jquery-2.1.1.min.js"></script>
@@ -20,6 +21,7 @@
 
 <script type="text/javascript" src="../data/text.js"></script>		
 <script type="text/javascript" src="js/home.js"></script>
+<script type="text/javascript" src="js/sliced-library.js"></script>
 <!--<script type="text/javascript" src="js/test.js"></script>-->
 	
 </head>
@@ -47,6 +49,27 @@
 	
 	
 	<div id="HomeFullArea">
+
+    <section id="SlicedLibrary" aria-label="Sliced print library">
+        <div class="SlicedLibraryHeading">
+            <div>
+                <h2 class="TextS1">Sliced library</h2>
+                <p class="TextS2">Ready-to-print plates from your folder</p>
+            </div>
+            <div class="SlicedLibraryActions">
+                <button id="SlicedLibraryRefresh" type="button" onclick="SlicedLibrary.refresh()">Refresh</button>
+                <button type="button" onclick="SlicedLibrary.choose()">Choose folder</button>
+            </div>
+        </div>
+        <div id="SlicedLibraryFolder" class="TextS2"></div>
+        <div class="SlicedLibrarySearchRow">
+            <input id="SlicedLibrarySearch" type="search" placeholder="Search your sliced plates…" aria-label="Search sliced plates" autocomplete="off" />
+            <span id="SlicedLibraryCount" class="TextS2" aria-live="polite"></span>
+        </div>
+        <div id="SlicedLibraryStatus" class="TextS2" role="status">Choose a folder containing .gcode.3mf files to get started.</div>
+        <div id="SlicedLibraryGrid"></div>
+        <button id="SlicedLibraryMore" type="button" onclick="SlicedLibrary.more()" hidden>Show more</button>
+    </section>
 	
 	<!----------Recent open---------->
 	<div id="MiniRecentFileArea">
@@ -632,7 +655,6 @@
 	
 </body>
 </html>
-
 
 
 

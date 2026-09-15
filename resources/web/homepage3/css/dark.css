@@ -3,6 +3,10 @@ html,body
 	background-color:#242428;
 }
 
+#SlicedLibrary { color: #efeff0; border-color: #3e3e45; }
+#SlicedLibrary .SlicedLibraryCard { border-color: #3e3e45; }
+#SlicedLibrary button, #SlicedLibrarySearch { border-color: #626267; }
+
 *
 {
 	border-color: #3E3E45;

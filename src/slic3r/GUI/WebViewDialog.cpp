@@ -416,6 +416,9 @@ WebViewPanel::WebViewPanel(wxWindow *parent)
         if (e.IsShown() && m_has_pending_staff_pick) {
             SendDesignStaffpick(true);
         }
+        if (e.IsShown() && m_sliced_library) {
+            CallAfter([this] { HandleSlicedLibraryMessage(R"({"command":"sliced_library_refresh"})"); });
+        }
     });
  }
 
@@ -423,6 +426,7 @@ WebViewPanel::~WebViewPanel()
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " Start";
     SetEvtHandlerEnabled(false);
+    StopSlicedLibrary();
 
     delete m_tools_menu;
 
@@ -1877,6 +1881,10 @@ void WebViewPanel::OnScriptMessage(wxWebViewEvent& evt)
         wxLogMessage("Script message received; value = %s, handler = %s", evt.GetString(), evt.GetMessageHandler());
 
     if (!IsAllowedScriptCommand(evt))
+        return;
+
+    if (m_browser && evt.GetId() == m_browser->GetId() &&
+        HandleSlicedLibraryMessage(evt.GetString().ToUTF8().data()))
         return;
 
     std::string response = wxGetApp().handle_web_request(evt.GetString().ToUTF8().data());

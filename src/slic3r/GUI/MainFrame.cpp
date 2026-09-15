@@ -2407,10 +2407,10 @@ wxBoxSizer* MainFrame::create_side_tools()
                 }
             }
 
-            SideButton* export_plate_gcodes_btn = new SideButton(p, _L("Export sliced plates as G-code files"), "");
+            SideButton* export_plate_gcodes_btn = new SideButton(p, _L("Export sliced plates individually"), "");
             export_plate_gcodes_btn->SetCornerRadius(0);
             export_plate_gcodes_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export sliced plates as G-code files"));
+                m_print_btn->SetLabel(_L("Export sliced plates individually"));
                 m_print_select = eExportPlateGcodes;
                 m_print_enable = get_enable_print_status();
                 m_print_btn->Enable(m_print_enable);
@@ -3074,8 +3074,8 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_gcode(false); }, "menu_export_gcode", nullptr,
             [this]() {return can_export_gcode(); }, this);
 
-        append_menu_item(export_menu, wxID_ANY, _L("Export sliced plates as G-code files") + dots,
-            _L("Export each sliced plate as a separate G-code file into a folder"),
+        append_menu_item(export_menu, wxID_ANY, _L("Export sliced plates individually") + dots,
+            _L("Export each sliced plate as a separate .gcode.3mf file into a folder"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_sliced_plate_gcodes(); }, "menu_export_gcode", nullptr,
             [this]() { return m_plater && m_plater->can_export_sliced_plate_gcodes(); }, this);
 

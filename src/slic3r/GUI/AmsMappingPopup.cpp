@@ -35,6 +35,10 @@
 #include "DeviceTab/wgtMsgPanel.h"
 
 namespace Slic3r { namespace GUI {
+#ifdef __APPLE__
+void mac_set_popup_visible(void* nsview, bool shown); // WindowShadowMac.mm
+#endif
+
 #define MATERIAL_ITEM_SIZE wxSize(FromDIP(65), FromDIP(50))
 #define MATERIAL_REC_WHEEL_SIZE wxSize(FromDIP(17), FromDIP(16))
 #define MAPPING_ITEM_REAL_SIZE wxSize(FromDIP(48), FromDIP(60))
@@ -1179,7 +1183,9 @@ void AmsMapingPopup::on_left_down(wxMouseEvent &evt)
                 m_show_type == ShowType::LEFT_AND_RIGHT_DYNAMIC) {
                 item->send_event(m_current_filament_id);
                 Dismiss();
-                break;
+                // Do not forward the selection click into the hidden popup's
+                // controls after dismissing it.
+                return;
             }
         }
     }
@@ -1189,6 +1195,8 @@ void AmsMapingPopup::on_left_down(wxMouseEvent &evt)
 #ifdef  __APPLE__
 void AmsMapingPopup::on_mouse_move(wxMouseEvent &evt)
 {
+    if (!IsShown())
+        return;
 
     auto pos = ClientToScreen(evt.GetPosition());
     wxString tip_text;
@@ -1247,12 +1255,19 @@ void AmsMapingPopup::on_mouse_move(wxMouseEvent &evt)
 #endif
 
 
+bool AmsMapingPopup::Show(bool show)
+{
+    const bool changed = PopupWindow::Show(show);
+#ifdef __APPLE__
+    if (!show && m_tip_popup)
+        m_tip_popup->Hide();
+    mac_set_popup_visible(GetHandle(), show);
+#endif
+    return changed;
+}
+
 void AmsMapingPopup::OnDismiss()
 {
-#ifdef __APPLE__
-    if (m_tip_popup && m_tip_popup->IsShown ())
-        m_tip_popup->Hide();
-#endif
 }
 
 bool AmsMapingPopup::ProcessLeftDown(wxMouseEvent &event)

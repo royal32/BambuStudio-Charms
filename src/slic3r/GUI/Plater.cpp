@@ -22823,7 +22823,7 @@ void Plater::export_sliced_plate_gcodes()
         return;
 
     AppConfig& appconfig = *wxGetApp().app_config;
-    wxDirDialog dlg(this, _L("Choose a folder for the G-code files"),
+    wxDirDialog dlg(this, _L("Choose a folder for the sliced .gcode.3mf files"),
         from_u8(appconfig.get_last_output_dir(appconfig.get_last_dir(), false)),
         wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK)
@@ -22833,7 +22833,7 @@ void Plater::export_sliced_plate_gcodes()
         return;
 
     const fs::path directory = into_path(dlg.GetPath());
-    struct PlateFile { fs::path source; fs::path destination; };
+    struct PlateFile { int plate_index; fs::path destination; };
     std::vector<PlateFile> files;
     size_t completed = 0;
     fs::path temporary;
@@ -22844,42 +22844,51 @@ void Plater::export_sliced_plate_gcodes()
             clean.erase(std::remove_if(clean.begin(), clean.end(), [](unsigned char ch) { return ch < 32; }), clean.end());
             return into_u8(from_u8(clean).Left(24));
         };
-        std::string project = filename_component(into_u8(p->m_project_name));
+        std::string project = into_u8(p->m_project_name);
+        if (using_exported_file() && boost::iends_with(project, ".gcode"))
+            project.resize(project.size() - 6);
+        project = filename_component(project);
         if (project.empty()) project = "Untitled";
         size_t existing = 0;
         for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
             PartPlate* plate = p->partplate_list.get_plate(i);
             if (!plate->is_slice_result_valid())
                 continue;
-            const fs::path source(plate->get_tmp_gcode_path());
+            if (!plate->is_slice_result_ready_for_print())
+                throw std::runtime_error(into_u8(format_wxstr(_L("Resolve the slicing errors on plate %d before exporting."), i + 1)));
+            const fs::path source(plate->get_gcode_filename());
             if (!fs::is_regular_file(source) || fs::file_size(source) == 0)
                 throw std::runtime_error(into_u8(format_wxstr(_L("G-code for plate %d is missing. Slice that plate again."), i + 1)));
             std::string name = project + (boost::format("_plate_%02d") % (i + 1)).str();
             const std::string plate_name = filename_component(plate->get_plate_name());
             if (!plate_name.empty()) name += "_" + plate_name;
-            const fs::path destination = directory / (name + ".gcode");
+            const fs::path destination = directory / (name + ".gcode.3mf");
             if (fs::exists(destination)) {
                 if (!fs::is_regular_file(destination))
                     throw std::runtime_error(into_u8(_L("The export path is not a regular file:")) + "\n" + destination.string());
                 ++existing;
             }
-            files.push_back({source, destination});
+            files.push_back({i, destination});
         }
         if (files.empty()) return;
         if (existing > 0) {
             MessageDialog confirm(this,
-                format_wxstr(_L("%d G-code file(s) already exist in this folder. Replace them?"), int(existing)),
-                _L("Export G-code files"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+                format_wxstr(_L("%d sliced .gcode.3mf file(s) already exist in this folder. Replace them?"), int(existing)),
+                _L("Export sliced plates"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
             if (confirm.ShowModal() != wxID_YES)
                 return;
         }
 
         wxBusyCursor busy;
         for (const auto& file : files) {
-            // Copy to a unique sibling first, so a failed copy leaves an existing
-            // export intact and cannot overwrite an unrelated .tmp file.
-            temporary = directory / fs::unique_path(".gcode-export-%%%%-%%%%-%%%%.tmp");
-            fs::copy_file(file.source, temporary);
+            // Use the same single-plate archive writer as the Connect handoff,
+            // retaining thumbnails, print settings, and filament metadata.
+            // Finish a unique sibling before replacing any existing export.
+            temporary = directory / fs::unique_path(".plate-export-%%%%-%%%%-%%%%.gcode.3mf");
+            const auto strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel;
+            if (export_3mf(temporary, strategy, file.plate_index) < 0 ||
+                !fs::is_regular_file(temporary) || fs::file_size(temporary) == 0)
+                throw std::runtime_error(into_u8(format_wxstr(_L("Could not export plate %d."), file.plate_index + 1)));
             fs::rename(temporary, file.destination);
             temporary.clear();
             ++completed;
@@ -22887,7 +22896,7 @@ void Plater::export_sliced_plate_gcodes()
         appconfig.update_last_output_dir(directory.string(), false);
         p->notification_manager->push_notification(NotificationType::CustomNotification,
             NotificationManager::NotificationLevel::RegularNotificationLevel,
-            format(_L("Exported %d G-code file(s) to:\n%s"), int(completed), directory.string()));
+            format(_L("Exported %d sliced .gcode.3mf file(s) to:\n%s"), int(completed), directory.string()));
     } catch (const std::exception& ex) {
         if (!temporary.empty()) {
             boost::system::error_code ignored;
