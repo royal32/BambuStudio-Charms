@@ -512,6 +512,8 @@ public:
     void send_to_printer(bool isall = false);
     bool print_with_bambu_connect(bool all_plates = false, const std::string& options_json = "");
     void export_gcode(bool prefer_removable);
+    bool can_export_sliced_plate_gcodes() const;
+    void export_sliced_plate_gcodes();
     void export_gcode_3mf(bool export_all = false);
     void send_gcode_finish(wxString name);
     void export_core_3mf();

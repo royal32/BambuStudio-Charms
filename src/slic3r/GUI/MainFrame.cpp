@@ -2190,6 +2190,8 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE));
             else if (m_print_select == eExportAllSlicedFile)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_ALL_SLICED_FILE));
+            else if (m_print_select == eExportPlateGcodes)
+                m_plater->export_sliced_plate_gcodes();
             else if (m_print_select == eSendToPrinter)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER));
             else if (m_print_select == eSendToPrinterAll)
@@ -2405,6 +2407,18 @@ wxBoxSizer* MainFrame::create_side_tools()
                 }
             }
 
+            SideButton* export_plate_gcodes_btn = new SideButton(p, _L("Export sliced plates as G-code files"), "");
+            export_plate_gcodes_btn->SetCornerRadius(0);
+            export_plate_gcodes_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                m_print_btn->SetLabel(_L("Export sliced plates as G-code files"));
+                m_print_select = eExportPlateGcodes;
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                this->Layout();
+                p->Dismiss();
+            });
+            p->append_button(export_plate_gcodes_btn);
+
             p->Popup(m_print_btn);
         }
     );
@@ -2551,6 +2565,10 @@ bool MainFrame::get_enable_print_status()
             enable = false;
         }
     }
+    else if (m_print_select == eExportPlateGcodes)
+    {
+        enable = m_plater->can_export_sliced_plate_gcodes();
+    }
     else if (m_print_select == ePrintMultiMachine)
     {
         if (!current_plate->is_slice_result_ready_for_print())
@@ -2618,7 +2636,7 @@ void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_sl
 
 
     //process print logic
-    if (enable_print)
+    if (enable_print || m_print_select == eExportPlateGcodes)
     {
         enable_print = get_enable_print_status();
     }
@@ -3055,6 +3073,11 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(export_menu, wxID_ANY, _L("Export G-code") + dots/* + "\tCtrl+G"*/, _L("Export current plate as G-code"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_gcode(false); }, "menu_export_gcode", nullptr,
             [this]() {return can_export_gcode(); }, this);
+
+        append_menu_item(export_menu, wxID_ANY, _L("Export sliced plates as G-code files") + dots,
+            _L("Export each sliced plate as a separate G-code file into a folder"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->export_sliced_plate_gcodes(); }, "menu_export_gcode", nullptr,
+            [this]() { return m_plater && m_plater->can_export_sliced_plate_gcodes(); }, this);
 
         append_menu_item(export_menu, wxID_ANY, _L("Export toolpaths as OBJ") + dots, _L("Export toolpaths as OBJ"),
             [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->export_toolpaths_to_obj(); }, "menu_export_toolpaths", nullptr,
