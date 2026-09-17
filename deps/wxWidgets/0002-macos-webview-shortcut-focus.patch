@@ -1,0 +1,19 @@
+diff --git a/src/osx/webview_webkit.mm b/src/osx/webview_webkit.mm
+--- a/src/osx/webview_webkit.mm
++++ b/src/osx/webview_webkit.mm
+@@ -760,6 +760,15 @@
+ 
+ - (BOOL)performKeyEquivalent:(NSEvent *)event
+ {
++    // AppKit offers key equivalents to every view, including an unfocused
++    // sidebar webview. Only the view containing the first responder may
++    // consume editing shortcuts; otherwise it steals them from text inputs
++    // in another webview (or from native controls).
++    NSResponder *responder = [[self window] firstResponder];
++    if (![responder isKindOfClass:[NSView class]] ||
++        ![(NSView *)responder isDescendantOf:self])
++        return NO;
++
+     if ([event modifierFlags] & NSCommandKeyMask)
+     {
+         switch ([event.characters characterAtIndex:0])

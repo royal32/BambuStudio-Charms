@@ -17,17 +17,6 @@ function OnHomeInit()
     SendMsg_GetMakerlabList();
 	SendMsg_GetPrintHistory();	    
 	
-    document.getElementById('HotModel_Search_Input').onkeydown = function (event) {
-		if (event.key === 'Enter') {
-			OnSearchOnline();
-		}
-		
-		event.defaultPrevented();
-    };
-	
-	let ModelSearchTip=GetCurrentTextByKey('t122');
-	$('#HotModel_Search_Input').prop('placeholder', ModelSearchTip);
-	
 	//Test
 	//ShowMakerlabList(Test_MakerlabList['list']);
 	
@@ -277,6 +266,7 @@ function OnBoardChange( strMenu )
 	if( strMenu=='home' )
 	{
 		$('#MenuArea').css('display','flex');	
+		$('#SlicedLibraryTitle').show();
 		$('#HomeFullArea').css('display','inline');	
 		$('#RecentFileArea').css('display','none');		
 		$('#WikiGuideBoard').css('display','none');
@@ -293,6 +283,7 @@ function OnBoardChange( strMenu )
 	else if(strMenu=='recent')
 	{
 		$('#MenuArea').css('display','flex');			
+		$('#SlicedLibraryTitle').hide();
 		$('#HomeFullArea').css('display','none');		
 		$('#RecentFileArea').css('display','flex');		
 		$('#WikiGuideBoard').css('display','none');		
@@ -760,7 +751,6 @@ function ShowStaffPick( ModelList )
 	$('#HotModelList').html(strPickHtml);
 	InitStaffPick();
 	$('#HotModelArea').show();
-	$('#HotModel_Search_Bar').css('display','flex');
 }
 
 function Show4UPick( ModelList )
@@ -819,7 +809,6 @@ function Show4UPick( ModelList )
 	$('#HotModelList').html(strPickHtml);
 	InitStaffPick();
 	$('#HotModelArea').show();
-	$('#HotModel_Search_Bar').css('display','flex');
 }
 
 function OpenOneStaffPickModel( ModelID )
@@ -834,20 +823,6 @@ function OpenOneStaffPickModel( ModelID )
 	SendWXMessage( JSON.stringify(tSend) );		
 }
 
-
-function OnSearchOnline(event)
-{		
-	let strKW=$('#HotModel_Search_Input').val().trim();
-	if(strKW=='' )
-		return;
-	
-	var tSend={};
-	tSend['sequence_id']=Math.round(new Date() / 1000);
-	tSend['command']="homepage_online_search";
-	tSend['keyword']=strKW;
-	
-	SendWXMessage( JSON.stringify(tSend) );	
-}
 
 //----------MakerLab------------
 function IsChinese()

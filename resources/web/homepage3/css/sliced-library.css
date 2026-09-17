@@ -1,15 +1,18 @@
-#SlicedLibrary { margin: 16px 0 36px; padding: 0 10px 24px; border-bottom: 1px solid #dedede; }
-.SlicedLibraryHeading, .SlicedLibrarySearchRow, .SlicedLibraryActions { display: flex; align-items: center; gap: 12px; }
-.SlicedLibraryHeading { justify-content: space-between; flex-wrap: wrap; }
-.SlicedLibraryHeading h2 { margin: 0; font-size: 21px; font-weight: 700; }
-.SlicedLibraryHeading p { margin: 6px 0 0; font-size: 13px; opacity: .75; }
+#MenuArea { flex-direction: row; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 10px 20px; }
+#MenuBtnBlock { margin-left: auto; gap: 10px; }
+#MenuBtnBlock .Menu_Btn { margin-right: 0; }
+#SlicedLibraryTitle h2 { margin: 0; font-size: 21px; font-weight: 700; }
+#SlicedLibraryTitle p { margin: 6px 0 0; font-size: 13px; opacity: .75; }
+#SlicedLibrary { margin: 0 0 28px; padding: 0 10px 24px; border-bottom: 1px solid #dedede; }
+.SlicedLibrarySearchRow, .SlicedLibraryInfoRow, .SlicedLibraryActions { display: flex; align-items: center; gap: 12px; }
+.SlicedLibraryActions { flex-shrink: 0; }
 #SlicedLibrary button { border: 1px solid #aaa; border-radius: 6px; padding: 8px 12px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 13px; }
 #SlicedLibrary button:hover { border-color: #00ae42; color: #00ae42; }
 #SlicedLibrary button:focus-visible, #SlicedLibrarySearch:focus-visible { outline: 2px solid #00ae42; outline-offset: 2px; }
 #SlicedLibrary button:disabled { opacity: .5; cursor: default; }
-#SlicedLibraryFolder { margin: 14px 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; }
-.SlicedLibrarySearchRow { margin-bottom: 16px; }
-#SlicedLibrarySearch { box-sizing: border-box; width: 100%; max-width: 540px; padding: 11px 14px; font-size: 14px; border: 1px solid #aaa; border-radius: 7px; color: inherit; background: transparent; }
+.SlicedLibraryInfoRow { justify-content: space-between; margin: 10px 0 16px; }
+#SlicedLibraryFolder { min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; }
+#SlicedLibrarySearch { box-sizing: border-box; flex: 1; min-width: 0; padding: 11px 14px; font-size: 14px; border: 1px solid #aaa; border-radius: 7px; color: inherit; background: transparent; -webkit-user-select: text; user-select: text; }
 #SlicedLibraryCount { white-space: nowrap; font-size: 12px; }
 #SlicedLibraryStatus { padding: 12px 0; font-size: 14px; line-height: 1.5; }
 #SlicedLibraryGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 16px; }
