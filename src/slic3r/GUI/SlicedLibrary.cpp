@@ -275,13 +275,21 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                     if (valid == 1) {
                         if (selected != plates.get_curr_plate_index()) plates.select_plate(selected);
                         // Let loading events unwind, then reuse the normal dialog.
-                        // Return to the library after it closes for the next farm job.
+                        // Library jobs are temporary: unload them after the dialog
+                        // closes so Home does not retain a read-only preview document.
                         wxWeakRef<Plater> weak_plater(plater);
                         weak->CallAfter([weak, weak_plater, path] {
                             if (!weak || !weak_plater) return;
                             if (weak_plater->get_3mf_filename() == path && weak_plater->is_gcode_3mf()) {
                                 SimpleEvent print_event(EVT_GLTOOLBAR_PRINT_PLATE);
                                 weak_plater->GetEventHandler()->ProcessEvent(print_event);
+                                // The modal loop can process other document actions.
+                                // Clear only the library job we opened, never a replacement.
+                                // Connect has its own exported archive by the time a
+                                // successful handoff returns, so this also applies to Send.
+                                if (weak_plater && weak_plater->is_gcode_3mf() &&
+                                    weak_plater->get_3mf_filename() == path)
+                                    weak_plater->new_project(/*skip_confirm=*/true, /*silent=*/true);
                                 if (weak && wxGetApp().mainframe)
                                     wxGetApp().mainframe->select_tab(MainFrame::tpHome);
                             }
