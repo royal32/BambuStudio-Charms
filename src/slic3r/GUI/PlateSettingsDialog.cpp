@@ -786,7 +786,7 @@ wxString PlateNameEditDialog::get_plate_name() const { return m_ti_plate_name->G
 void PlateNameEditDialog::set_plate_name(const wxString &name) {
     m_ti_plate_name->GetTextCtrl()->SetValue(name);
     m_ti_plate_name->GetTextCtrl()->SetFocus();
-    m_ti_plate_name->GetTextCtrl()->SetInsertionPointEnd();
+    m_ti_plate_name->GetTextCtrl()->SelectAll();
 }
 
 

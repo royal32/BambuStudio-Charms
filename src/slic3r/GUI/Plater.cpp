@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "PlateJobName.hpp"
 #include "BambuConnect.hpp"
 #ifdef __APPLE__
 #include "BambuConnectBridge.hpp"
@@ -7180,7 +7181,7 @@ public:
     // returns the path to project file with the given extension (none if extension == wxEmptyString)
     // extension should contain the leading dot, i.e.: ".3mf"
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
-    wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) ;
+    wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false, int plate_index = -1);
     void set_project_filename(const wxString& filename);
 
     //BBS store bbs project name
@@ -16268,47 +16269,24 @@ wxString Plater::priv::get_project_filename(const wxString& extension) const
     }
 }
 
-wxString Plater::priv::get_export_gcode_filename(const wxString& extension, bool only_filename, bool export_all)
+wxString Plater::priv::get_export_gcode_filename(const wxString& extension, bool only_filename, bool export_all, int plate_index)
 {
-    wxString curr_project_name = m_project_name;
-
-    std::string plate_index_str = "";
-    std::string plate_name = partplate_list.get_curr_plate()->get_plate_name();
-
-    // remove unsupported characters in filename
-    curr_project_name = from_u8(filter_characters(curr_project_name.ToUTF8().data(), "<>[]:/\\|?*\""));
-    plate_name = filter_characters(plate_name, "<>[]:/\\|?*\"");
-
-    if (!plate_name.empty())
-        plate_index_str = (boost::format("_%1%") % plate_name).str();
-    else if (partplate_list.get_plate_count() > 1)
-        plate_index_str = (boost::format("_plate_%1%") % std::to_string(partplate_list.get_curr_plate_index() + 1)).str();
-
-    if (!m_project_folder.empty()) {
-        if (!only_filename) {
-            if (export_all) {
-                auto full_filename = m_project_folder / std::string((curr_project_name + extension).mb_str(wxConvUTF8));
-                return from_path(full_filename);
-            } else {
-                auto full_filename = m_project_folder / std::string((curr_project_name + from_u8(plate_index_str) + extension).mb_str(wxConvUTF8));
-                return from_path(full_filename);
-            }
-        } else {
-            if (export_all)
-                return curr_project_name + extension;
-            else
-                return curr_project_name + from_u8(plate_index_str) + extension;
-        }
-    } else {
-        if (only_filename) {
-            if (export_all)
-                return curr_project_name + extension;
-            else
-                return curr_project_name + from_u8(plate_index_str) + extension;
-        }
-        else
-            return "";
+    if (plate_index < 0) plate_index = partplate_list.get_curr_plate_index();
+    const auto* plate = partplate_list.get_plate(plate_index);
+    std::string project = into_u8(m_project_name);
+    int plate_count = partplate_list.get_plate_count();
+    if (q->using_exported_file()) {
+        if (boost::iends_with(project, ".gcode")) project.resize(project.size() - 6);
+        // Individual archives can retain their original plate index and empty
+        // placeholder plates. Don't number an already named library file again.
+        plate_count = 0;
+        for (const auto* candidate : partplate_list.get_plate_list())
+            if (candidate->is_slice_result_valid()) ++plate_count;
     }
+    const wxString filename = from_u8(plate_job_name(project, plate ? plate->get_plate_name() : "",
+        plate_index, plate_count, export_all)) + extension;
+    if (only_filename) return filename;
+    return m_project_folder.empty() ? wxString() : from_path(m_project_folder / into_u8(filename));
 }
 
 wxString Plater::priv::get_project_name()
@@ -22838,17 +22816,7 @@ void Plater::export_sliced_plate_gcodes()
     size_t completed = 0;
     fs::path temporary;
     try {
-        // Keep names portable, bounded in UTF-8, and within the chosen folder.
-        auto filename_component = [](const std::string& name) {
-            std::string clean = filter_characters(name, "<>[]:/\\|?*\"");
-            clean.erase(std::remove_if(clean.begin(), clean.end(), [](unsigned char ch) { return ch < 32; }), clean.end());
-            return into_u8(from_u8(clean).Left(24));
-        };
-        std::string project = into_u8(p->m_project_name);
-        if (using_exported_file() && boost::iends_with(project, ".gcode"))
-            project.resize(project.size() - 6);
-        project = filename_component(project);
-        if (project.empty()) project = "Untitled";
+        std::set<wxString> filenames;
         size_t existing = 0;
         for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
             PartPlate* plate = p->partplate_list.get_plate(i);
@@ -22859,10 +22827,10 @@ void Plater::export_sliced_plate_gcodes()
             const fs::path source(plate->get_gcode_filename());
             if (!fs::is_regular_file(source) || fs::file_size(source) == 0)
                 throw std::runtime_error(into_u8(format_wxstr(_L("G-code for plate %d is missing. Slice that plate again."), i + 1)));
-            std::string name = project + (boost::format("_plate_%02d") % (i + 1)).str();
-            const std::string plate_name = filename_component(plate->get_plate_name());
-            if (!plate_name.empty()) name += "_" + plate_name;
-            const fs::path destination = directory / (name + ".gcode.3mf");
+            const wxString name = p->get_export_gcode_filename(".gcode.3mf", true, false, i);
+            if (!filenames.insert(name.Lower()).second)
+                throw std::runtime_error(into_u8(_L("Two plates have the same export filename. Give each plate a unique name before exporting:")) + "\n" + into_u8(name));
+            const fs::path destination = directory / into_u8(name);
             if (fs::exists(destination)) {
                 if (!fs::is_regular_file(destination))
                     throw std::runtime_error(into_u8(_L("The export path is not a regular file:")) + "\n" + destination.string());
@@ -22936,6 +22904,8 @@ void Plater::export_gcode(bool prefer_removable)
         return;
     }
     default_output_file = fs::path(Slic3r::fold_utf8_to_ascii(default_output_file.string()));
+    if (printer_technology() == ptFFF)
+        default_output_file = default_output_file.parent_path() / into_u8(get_export_gcode_filename(".gcode", true));
     AppConfig 				&appconfig 				 = *wxGetApp().app_config;
     RemovableDriveManager 	&removable_drive_manager = *wxGetApp().removable_drive_manager();
     // Get a last save path, either to removable media or to an internal media.
@@ -26914,9 +26884,20 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
             PartPlate *         curr_plate = p->partplate_list.get_curr_plate();
 
             wxString curr_plate_name = from_u8(curr_plate->get_plate_name());
+            if (curr_plate_name.empty()) {
+                curr_plate_name = p->m_project_name;
+                if (using_exported_file() && curr_plate_name.Lower().EndsWith(".gcode"))
+                    curr_plate_name.RemoveLast(6);
+                if (curr_plate_name.empty()) curr_plate_name = _L("Untitled");
+            }
             dlg.set_plate_name(curr_plate_name);
 
             int result=dlg.ShowModal();
+            // Closing the modal can restore the sidebar's inline name editor.
+            // Its stale value must not overwrite the name accepted here later
+            // when focus moves to Print or Export.
+            auto* name_renderer = wxGetApp().obj_list()->GetColumn(0)->GetRenderer();
+            if (name_renderer->GetEditorCtrl()) name_renderer->CancelEditing();
             if (result == wxID_YES) {
                 wxString dlg_plate_name = dlg.get_plate_name();
                 curr_plate->set_plate_name(dlg_plate_name.ToUTF8().data());

@@ -4586,7 +4586,8 @@ void SelectMachineDialog::set_default()
 
     fs::path filename_path(filename.c_str());
     std::string file_name  = filename_path.filename().string();
-    if (from_u8(file_name).find(_L("Untitled")) != wxString::npos) {
+    if (from_u8(file_name) == _L("Untitled") &&
+        m_plater->get_partplate_list().get_curr_plate()->get_plate_name().empty()) {
         PartPlate *part_plate = m_plater->get_partplate_list().get_plate(m_print_plate_idx);
         if (part_plate) {
             if (std::vector<ModelObject *> objects = part_plate->get_objects_on_this_plate(); objects.size() > 0) {
