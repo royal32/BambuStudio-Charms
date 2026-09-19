@@ -366,6 +366,7 @@ class GLCanvas3D
         bool ignore_right_up;
         bool rotating{ false };
         bool panning{ false };
+        int plate_name_pressed_id{ -1 };
 
         Mouse();
 

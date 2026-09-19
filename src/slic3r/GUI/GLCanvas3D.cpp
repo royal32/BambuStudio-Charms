@@ -5566,6 +5566,16 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     }
 #endif
 
+    // A click can arrive before the next idle render updates the hover target.
+    // Pick at the event position before either the gizmos or plate controls use it.
+    if ((evt.LeftDown() || evt.LeftDClick() || evt.LeftUp()) &&
+        m_canvas_type == CanvasView3D && m_picking_enabled &&
+        !m_mouse.dragging && !m_mouse.rotating && !m_mouse.panning &&
+        !is_layers_editing_enabled()) {
+        m_mouse.position = pos.cast<double>();
+        render();
+    }
+
     for (GLVolume* volume : m_volumes.volumes) {
         volume->force_sinking_contours = false;
     }
@@ -5683,6 +5693,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_dirty = true;
     }
     else if (evt.LeftDClick()) {
+        // The second release of a double-click must not reopen the name dialog.
+        m_mouse.plate_name_pressed_id = -1;
         // Double-clicking a blank area deselects everything in both the assembly
         // and prepare views. Exiting the assembly-step editing state is now done
         // through the dedicated exit button in the assembly structure panel, so
@@ -5704,6 +5716,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             post_event(SimpleEvent(EVT_GLCANVAS_SWITCH_TO_GLOBAL));
     }
     else if (evt.LeftDown() || evt.RightDown() || evt.MiddleDown()) {
+        m_mouse.plate_name_pressed_id = evt.LeftDown() && !m_hover_plate_idxs.empty() &&
+            m_hover_plate_idxs.front() % PartPlate::GRABBER_COUNT == PartPlate::PLATE_NAME_ID
+            ? m_hover_plate_idxs.front() : -1;
         m_show_assembly_view_preview_menu = false;
         //BBS: add orient deactivate logic
         if (!m_gizmos.on_mouse(evt)) {
@@ -6061,6 +6076,19 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         else if (evt.LeftUp() && !m_mouse.rotating && !m_mouse.panning && m_picking_enabled && !m_hover_plate_idxs.empty() && (m_canvas_type == CanvasView3D) && !is_layers_editing_enabled())
         {
                 int hover_idx = m_hover_plate_idxs.front();
+                if (hover_idx % PartPlate::GRABBER_COUNT == PartPlate::PLATE_NAME_ID) {
+                    const bool edit_name = !m_mouse.ignore_left_up &&
+                        m_mouse.plate_name_pressed_id == hover_idx;
+                    // Finish this gesture before ShowModal starts a nested event
+                    // loop. In particular, release capture and consume the press.
+                    mouse_up_cleanup();
+                    if (edit_name) {
+                        if (m_gizmos.get_current_type() != GLGizmosManager::MeshBoolean && m_hover_volume_idxs.empty())
+                            deselect_all();
+                        wxGetApp().plater()->select_plate_by_hover_id(hover_idx);
+                    }
+                    return;
+                }
                 wxGetApp().plater()->select_plate_by_hover_id(hover_idx);
                 //wxGetApp().plater()->get_partplate_list().select_plate_view();
                 //deselect all the objects
@@ -6951,6 +6979,7 @@ void GLCanvas3D::export_toolpaths_to_obj(const char* filename) const
 
 void GLCanvas3D::mouse_up_cleanup()
 {
+    m_mouse.plate_name_pressed_id = -1;
     m_moving = false;
     m_mouse.drag.move_volume_idx = -1;
     m_mouse.set_start_position_3D_as_invalid();
