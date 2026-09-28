@@ -779,6 +779,7 @@ struct Sidebar::priv
     ScalableButton *  m_bpButton_del_filament;
     ScalableButton *  m_bpButton_ams_filament;
     ScalableButton *  m_bpButton_set_filament;
+    ScalableButton *  m_bpButton_copy_filament;
     int m_menu_filament_id = -1;
     wxPanel*          m_panel_filament_subtitle{nullptr};  // "Filament" subtitle row with +/-/AMS/set buttons
     wxPanel*          m_filament_area_wrapper{nullptr};   // Wrapper panel for collapse/expand
@@ -2985,6 +2986,51 @@ Sidebar::Sidebar(Plater *parent)
         p->m_bpButton_del_filament = del_btn;
         subtitle_sizer->Add(del_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(12));
 
+        // Copy the first physical slot's preset without changing slot colors.
+        auto* copy_btn = new ScalableButton(p->m_panel_filament_subtitle, wxID_ANY, "tree_copy");
+        copy_btn->SetToolTip(_L("Apply first filament preset to all slots"));
+        copy_btn->Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& e) {
+            e.Enable(p->combos_filament.size() > 1 && !is_new_project_in_gcode3mf());
+        });
+        copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            if (p->combos_filament.size() < 2 || is_new_project_in_gcode3mf()) return;
+            auto& bundle = *wxGetApp().preset_bundle;
+            const size_t source = p->combos_filament.front()->get_filament_idx();
+            if (source >= bundle.filament_presets.size()) return;
+            const std::string preset_name = bundle.filament_presets[source];
+            if (!p->plater->on_filament_change(source)) return;
+
+            // Use the normal preset switch so unsaved preset edits are handled
+            // before changing any of the other slots.
+            const int previous_editing = p->editing_filament;
+            p->editing_filament = -1;
+            if (bundle.filaments.get_selected_preset_name() != preset_name &&
+                !wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(preset_name, false, "", false, true)) {
+                p->editing_filament = previous_editing;
+                return;
+            }
+            p->editing_filament = static_cast<int>(source);
+            bool support_changed = false;
+            for (auto* combo : p->combos_filament) {
+                const size_t idx = combo->get_filament_idx();
+                if (idx == source || idx >= bundle.filament_presets.size()) continue;
+                const bool was_support = is_support_filament(idx);
+                bundle.set_filament_preset(idx, preset_name);
+                support_changed |= was_support != is_support_filament(idx);
+                combo->update();
+                combo->ShowBadge(false);
+            }
+            update_mixed_filament_list();
+            if (support_changed && wxGetApp().app_config->get("auto_calculate_flush") == "all")
+                auto_calc_flushing_volumes();
+            dynamic_filament_list.update();
+            p->plater->on_config_change(bundle.full_config());
+            p->plater->update_project_dirty_from_presets();
+            bundle.export_selections(*wxGetApp().app_config);
+        });
+        p->m_bpButton_copy_filament = copy_btn;
+        subtitle_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(12));
+
         // AMS sync button
         ams_btn = new ScalableButton(p->m_panel_filament_subtitle, wxID_ANY, "ams_fila_sync", wxEmptyString, wxDefaultSize, wxDefaultPosition,
                                      wxBU_EXACTFIT | wxNO_BORDER, false, 18);
@@ -3906,6 +3952,7 @@ void Sidebar::msw_rescale()
     p->m_bpButton_del_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
+    p->m_bpButton_copy_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
     p->m_purge_mode_btn->Rescale();
     //BBS
@@ -3986,6 +4033,7 @@ void Sidebar::sys_color_changed()
     p->m_bpButton_del_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
+    p->m_bpButton_copy_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
     p->m_purge_mode_btn->Rescale();
 
