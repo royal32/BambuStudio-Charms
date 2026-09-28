@@ -1085,8 +1085,10 @@ bool GLGizmosManager::on_mouse(wxMouseEvent& evt)
         processed = true;
     }
     else if (evt.RightUp() && m_current != EType::Undefined && !m_parent.is_mouse_dragging()) {
-        gizmo_event(SLAGizmoEventType::RightUp, mouse_pos, evt.ShiftDown(), evt.AltDown(), control_down);
-        processed = true;
+        const bool handled = gizmo_event(SLAGizmoEventType::RightUp, mouse_pos, evt.ShiftDown(), evt.AltDown(), control_down);
+        // Transform tools support normal object selection and context menus.
+        // Specialized tools still own right-clicks while they are active.
+        processed = handled || !is_allow_multi_select_parts_or_objects();
     }
     else if (evt.LeftUp()) {
         selection.stop_dragging();
