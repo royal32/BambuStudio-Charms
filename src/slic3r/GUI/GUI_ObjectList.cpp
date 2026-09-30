@@ -224,8 +224,7 @@ ObjectList::ObjectList(wxWindow* parent) :
 //    Bind(wxEVT_KEY_DOWN, &ObjectList::OnChar, this);
     {
         // Accelerators
-        // 	wxAcceleratorEntry entries[25];
-        wxAcceleratorEntry entries[27];
+        wxAcceleratorEntry entries[9];
         int index = 0;
         entries[index++].Set(wxACCEL_CTRL, (int)'C', wxID_COPY);
         entries[index++].Set(wxACCEL_CTRL, (int)'X', wxID_CUT);
@@ -242,14 +241,7 @@ ObjectList::ObjectList(wxWindow* parent) :
         //entries[index++].Set(wxACCEL_NORMAL, WXK_NUMPAD_SUBTRACT, wxID_REMOVE);
         //entries[index++].Set(wxACCEL_NORMAL, int('p'), wxID_PRINT);
 
-        int numbers_cnt = 0;
-        for (auto char_number : { '1', '2', '3', '4', '5', '6', '7', '8', '9' }) {
-            entries[index + numbers_cnt].Set(wxACCEL_NORMAL, int(char_number), wxID_LAST + numbers_cnt+1);
-            entries[index + 9 + numbers_cnt].Set(wxACCEL_NORMAL, WXK_NUMPAD0 + numbers_cnt - 1, wxID_LAST + numbers_cnt+1);
-            numbers_cnt++;
-            // index++;
-        }
-        wxAcceleratorTable accel(27, entries);
+        wxAcceleratorTable accel(index, entries);
         SetAcceleratorTable(accel);
 
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->copy();                      }, wxID_COPY);
@@ -264,19 +256,44 @@ ObjectList::ObjectList(wxWindow* parent) :
         //this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->decrease_instances();        }, wxID_REMOVE);
         //this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->toggle_printable_state();    }, wxID_PRINT);
 
-        for (int i = 1; i < 10; i++)
-            this->Bind(wxEVT_MENU, [this, i](wxCommandEvent &evt) {
-                if (filaments_count() > 1 && i <= filaments_count())
-                    this->set_extruder_for_selected_items(i);
-            }, wxID_LAST+i);
-
         m_accel = accel;
     }
+
+    // Handle digits before the native macOS outline's type-to-select logic,
+    // independently of the accelerator table disabled during name editing.
+    // Inline name/filament editors must retain ordinary text input.
+    Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
+        int key = event.GetKeyCode();
+        if (key >= WXK_NUMPAD0 && key <= WXK_NUMPAD9)
+            key = key - WXK_NUMPAD0 + '0';
+        bool editing = false;
+        for (unsigned int col = 0; col < GetColumnCount(); ++col)
+            editing |= GetColumn(col)->GetRenderer()->GetEditorCtrl() != nullptr;
+        if (event.HasAnyModifiers() || key < '0' || key > '9' ||
+            wxWindow::FindFocus() != this || editing) {
+            event.Skip();
+            return;
+        }
+
+        const int digit = key - '0';
+        const bool starting = m_extruder_input_value < 0 || !m_timer_set_extruder.IsRunning();
+        if (starting && digit == 0) {
+            m_timer_set_extruder.Stop();
+            m_extruder_input_value = -1;
+            if (filaments_count() >= 10)
+                set_extruder_for_selected_items(10);
+        } else {
+            // An invalid sequence stays invalid until the timeout, without
+            // overflowing if a number key is held down.
+            m_extruder_input_value = starting ? digit :
+                (m_extruder_input_value <= filaments_count() ? m_extruder_input_value * 10 + digit : m_extruder_input_value);
+            m_timer_set_extruder.StartOnce(500);
+        }
+    });
 #else //__WXOSX__
     Bind(wxEVT_CHAR, [this](wxKeyEvent& event) { key_event(event); }); // doesn't work on OSX
-    // BBS: 绑定定时器事件以支持多位数快捷键
-    m_timer_set_extruder.Bind(wxEVT_TIMER, &ObjectList::on_set_extruder_timer, this);
 #endif
+    m_timer_set_extruder.Bind(wxEVT_TIMER, &ObjectList::on_set_extruder_timer, this);
 
 #ifdef __WXMSW__
     GetMainWindow()->Bind(wxEVT_MOTION, [this](wxMouseEvent& event) {
