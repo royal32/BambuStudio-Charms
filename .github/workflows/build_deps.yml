@@ -27,6 +27,7 @@ jobs:
     runs-on: ${{ inputs.os }}
     env:
       date:
+      mac_arch: ${{ inputs.os == 'macos-15-intel' && 'x86_64' || 'universal' }}
     steps:
 
       # Setup the environment
@@ -134,7 +135,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           cd ${{ github.workspace }}/deps
-          tar -zcvf "BambuStudio_dep_mac_${{ inputs.arch }}_$(date +"%Y%m%d").tar.gz" build
+          tar -zcvf "BambuStudio_dep_${{ inputs.os }}_${{ env.mac_arch }}_${{ env.date }}.tar.gz" build
 
 
       - name: Build on Ubuntu
@@ -152,13 +153,15 @@ jobs:
         if: inputs.os == 'macos-15-intel' || inputs.os == 'macos-15' || inputs.os == 'macos-26'
         uses: actions/upload-artifact@v6
         with:
-          name: BambuStudio_dep_mac_${{ inputs.arch }}_${{ env.date }}
-          path: ${{ github.workspace }}/deps/BambuStudio_dep_mac_${{ inputs.arch }}*.tar.gz
+          name: BambuStudio_dep_${{ inputs.os }}_${{ env.mac_arch }}_${{ env.date }}
+          path: ${{ github.workspace }}/deps/BambuStudio_dep_${{ inputs.os }}_${{ env.mac_arch }}_${{ env.date }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
 
       - name: clean artifacts
         if: inputs.os == 'macos-15-intel' || inputs.os == 'macos-15' || inputs.os == 'macos-26'
         working-directory: ${{ github.workspace }}
-        run: rm -rf ${{ github.workspace }}/deps/build/BambuStudio_dep_mac_${{ inputs.arch }}*.tar.gz
+        run: rm "${{ github.workspace }}/deps/BambuStudio_dep_${{ inputs.os }}_${{ env.mac_arch }}_${{ env.date }}.tar.gz"
 
       - name: Upload Windows artifacts
         if: inputs.os == 'windows-latest'
