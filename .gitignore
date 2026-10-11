@@ -42,3 +42,8 @@ compile_commands.json
 resources/web/device_page/assets/
 resources/web/device_page/index.html
 
+# Local library inputs, runtime, staged projects, provenance and backups.
+/.charm-library/
+/tools/library-console/target/
+**/__pycache__/
+

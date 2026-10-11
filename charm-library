@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export CHARM_LIBRARY_REPO="$root"
+export PYTHONDONTWRITEBYTECODE=1
+manifest="$root/tools/library-console/Cargo.toml"
+if ! command -v cargo >/dev/null 2>&1; then
+    printf '%s\n' 'Rust/Cargo is required to build the Omnitrix interface.' >&2
+    exit 1
+fi
+# Normal launches use the pinned dependency already in the Cargo cache. First
+# installation on another machine: cargo fetch --locked --manifest-path ...
+cargo build --quiet --offline --locked --manifest-path "$manifest" --target-dir "$root/tools/library-console/target"
+exec "$root/tools/library-console/target/debug/charm-library-console" "$@"

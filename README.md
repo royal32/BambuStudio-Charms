@@ -29,6 +29,10 @@ Other major features are:
 - Assembly & explosion view
 - Flushing transition-filament into infill/object during filament change
 
+# Charm & Pair library tools
+
+Run `./charm-library` for the Omnitrix command browser: incremental A1 mini slicing, vector previews, source folders, profile settings, and integrity checks. See [the library guide](tools/CHARM_LIBRARY.md) for setup and everyday use.
+
 # How to compile
 Following platforms are currently supported to compile:
 - Windows 64-bit, [Compile Guide](https://github.com/bambulab/BambuStudio/wiki/Windows-Compile-Guide)

@@ -1,0 +1,9 @@
+[package]
+name = "charm-library-console"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+omnitrix = { git = "https://github.com/royal32/omnitrix", rev = "bcec7caabe2914e443805193dfac19d946ab60b5" }
+serde_json = "1"
