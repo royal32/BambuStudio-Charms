@@ -2563,25 +2563,32 @@ void SelectMachineDialog::EnableEditing(bool enable)
     enable ? m_saveTimeText->Enable() : m_saveTimeText->Disable();
 }
 
-/*content height > FromDIP(650), make the area scrollable*/
-/*content height < FromDIP(650), make the area size as the content*/
 void SelectMachineDialog::update_scroll_area_size() {
+    // A tall preview must not force scrolling while the display has room for
+    // the content. Reserve the footer, native window chrome and a screen margin.
+    const auto work_area = wxDisplay(this).GetClientArea();
+    const int footer_height = GetSizer()->CalcMin().y - m_scroll_area->GetMinSize().y;
+    const int chrome_height = GetSize().y - GetClientSize().y;
+    const int available_height = std::max(1, work_area.height - footer_height - chrome_height - FromDIP(24));
+    const int content_height = m_scroll_area->GetSizer()->CalcMin().y;
+    const wxSize new_size(m_scroll_area->GetMinSize().x, std::min(content_height, available_height));
 
-    wxSize new_size(FromDIP(700), -1);
-
-    int height = m_scroll_area->GetSizer()->CalcMin().GetHeight();
-    if (height < FromDIP(650)) {
-        new_size.SetHeight(height);
-    } else {
-        new_size.SetHeight(FromDIP(650));
-    }
-
-    if (m_scroll_area->GetSize() != new_size) {
+    if (m_scroll_area->GetMinSize() != new_size) {
         m_scroll_area->SetMaxSize(new_size);
         m_scroll_area->SetMinSize(new_size);
         Layout();
         Fit();
+        if (IsShown()) {
+            // Status updates can add warning rows after the dialog is opened.
+            // Keep the enlarged window within this display's usable bounds.
+            const auto rect = GetRect();
+            Move(std::max(work_area.x, std::min(rect.x, work_area.GetRight() - rect.width + 1)),
+                 std::max(work_area.y, std::min(rect.y, work_area.GetBottom() - rect.height + 1)));
+        }
     }
+    // Recompute the virtual extent as well as the viewport, including when
+    // switching from a tall plate to a short one. This clears stale scrollbars.
+    m_scroll_area->FitInside();
 }
 
 void SelectMachineDialog::update_options_layout()
@@ -3920,7 +3927,7 @@ void SelectMachineDialog::update_by_obj(MachineObject* obj_)
     update_option_dynamic_state(obj_);
     update_show_status(obj_);
     update_print_status_msg();
-    //update_scroll_area_size();/*STUDIO-12867 the page maybe blank in some platform. FIXME*/
+    update_scroll_area_size();
 
     refresh_print_time(obj_);
 }
@@ -5618,6 +5625,7 @@ bool SelectMachineDialog::Show(bool show)
     set_default();
     update_user_machine_list();
     update_by_obj(get_current_machine());
+    update_scroll_area_size();
 
     Layout();
     Fit();
