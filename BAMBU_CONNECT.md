@@ -144,6 +144,15 @@ and sign-in guidance. Manual sliced-file export remains available.
 
 ## Validation
 
+Configure the full Windows application with `-DBBL_RELEASE_TO_PUBLIC=1`
+and `-DBBL_INTERNAL_TESTING=0`, as `build_win.bat` and the Mac build do. The
+source defaults are an internal build whose fresh profiles select Bambu's staging network service;
+that service cannot provide the normal production network plugin or sign-in.
+After installing into `install-windows`, run `tools\launch-windows-review.cmd`
+to review the application with an isolated `test-profile` data directory.
+The launcher uses the supported `--datadir` argument. Instance identification
+already includes the executable path; there is no `--no-single-instance` option.
+
 Windows bridge checks can be built independently of the full slicer dependency
 build, from an x64 Visual Studio developer prompt:
 
@@ -176,7 +185,13 @@ Verified on the Windows test machine (Windows x64, MSVC 19.44), October 11, 2026
 
 - The full Release application and its dependency bundle build and install
   successfully. The packaged Studio DLL loads with its dependencies, exposes
-  its entry point, and the executable exits successfully for `--help`.
+  its entry point, and the production executable exits successfully for
+  `--help --datadir "…\test-profile"` with the review launcher's arguments.
+- The production network plugin 02.08.03.52 has a valid Bambu publisher
+  signature and passes native DLL loading, Release ABI/version matching, and
+  BambuSource dependency checks in the isolated Windows review profile.
+  The user confirmed the corrected launcher opens Studio and sign-in works;
+  the running application loads both network DLLs from that isolated profile.
 - Native Windows pipe/URL checks and all ten renderer adapter tests pass.
 - The signed official Connect 2.5.0-beta.15 application launches through the
   private pipes and passes the live renderer/store-binding probe.
