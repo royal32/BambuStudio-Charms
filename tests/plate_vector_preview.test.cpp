@@ -27,6 +27,22 @@ int main(int argc, char** argv)
     assert(p.hit_test({25, 5}) == 4); // identical RGB, different sliced filament
     assert(p.hit_test({15, 15}, .1) == -1);
     assert(p.svg().find("fill-rule=\"evenodd\"") != std::string::npos);
+    const std::vector<PlateVectorPreview::Point> square{{0, 0}, {10, 0}, {10, 10}, {0, 10}, {0, 10}};
+    const auto ants = PlateVectorPreview::marching_ants(square, 4, 0);
+    const auto shifted = PlateVectorPreview::marching_ants(square, 4, 2);
+    const auto wrapped = PlateVectorPreview::marching_ants(square, 4, 8);
+    const auto white_length = [](const auto& segments) {
+        double sum = 0;
+        for (const auto& segment : segments)
+            sum += std::hypot(segment.second.x - segment.first.x, segment.second.y - segment.first.y);
+        return sum;
+    };
+    assert(std::abs(white_length(ants) - 20) < 1e-8);
+    assert(std::abs(white_length(shifted) - 20) < 1e-8);
+    assert(ants.front().second.x == 4 && shifted.front().second.x == 2);
+    assert(wrapped.size() == ants.size() && wrapped.front().second.x == ants.front().second.x);
+    assert(PlateVectorPreview::marching_ants(square, 0, 0).empty());
+    assert(PlateVectorPreview::marching_ants({}, 4, 0).empty());
     for (const auto& change : std::vector<json>{
         {{"version", 2}}, {{"width", 0}}, {{"height", -1}}, {{"source_md5", "stale"}},
         {{"regions", json::array()}}, {{"width", std::numeric_limits<double>::infinity()}}

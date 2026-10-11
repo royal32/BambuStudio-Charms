@@ -270,6 +270,8 @@ private:
     std::string m_vector_key;
     std::vector<wxColour> m_vector_colors;
     int m_hover_filament{-1};
+    wxTimer m_hover_timer;
+    double m_ants_phase{0};
     ScalableBitmap m_background_bitmap;
     wxBitmap       bitmap_with_background;
     int            m_brightness_value{-1};

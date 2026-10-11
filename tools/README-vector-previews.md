@@ -36,6 +36,12 @@ exact region hit takes priority over the two-DIP tolerance near an edge. Regions
 sharing a sliced filament highlight and change together; equal visible RGB does
 not combine different filament IDs. Existing material swatches remain available.
 
+Hovered filament regions use animated black/white marching ants, including their
+hole boundaries. Animation runs only while a visible preview is hovered.
+Preferences → 3D Settings → **Use AMS slot colors in print previews** controls
+live recoloring in the print dialog (both vector and PNG previews). It defaults
+to disabled, preserving the original model colors while slot mapping still works.
+
 Run the geometry/picking tests (add sidecar paths to test generated plates):
 
 ```sh

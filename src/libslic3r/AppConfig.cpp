@@ -189,6 +189,8 @@ void AppConfig::set_defaults()
         set_bool("canvas_drag_to_move", true);
     if (get("thumbnail_view_angle").empty())
         set("thumbnail_view_angle", "isometric");
+    if (get("use_ams_colors_in_print_preview").empty())
+        set_bool("use_ams_colors_in_print_preview", false);
     if (get("show_shells_in_preview").empty())
         set_bool("show_shells_in_preview", true);
     if (get("enable_text_styles").empty())

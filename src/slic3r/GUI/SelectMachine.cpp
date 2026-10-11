@@ -5244,13 +5244,17 @@ void SelectMachineDialog::set_default_normal(const ThumbnailData &data)
     m_thumbnailPanel->load_vector_preview(m_plater->get_3mf_filename(), m_plater->get_partplate_list().get_curr_plate_index() + 1);
     m_thumbnailPanel->set_vector_colors(m_cur_colors_in_thumbnail);
     m_thumbnail_hint->Show(m_thumbnailPanel->has_vector_preview());
-    if (data.is_valid()) {
-        wxImage image(data.width, data.height);
+    // Keep tracking mapped colors so the optional recoloring path stays intact.
+    // Only its display is disabled; filament-to-slot assignments are unchanged.
+    const auto& display_data = wxGetApp().app_config->get_bool("use_ams_colors_in_print_preview") ||
+        &data != &m_preview_thumbnail_data || !m_cur_input_thumbnail_data.is_valid() ? data : m_cur_input_thumbnail_data;
+    if (display_data.is_valid()) {
+        wxImage image(display_data.width, display_data.height);
         image.InitAlpha();
-        for (unsigned int r = 0; r < data.height; ++r) {
-            unsigned int rr = (data.height - 1 - r) * data.width;
-            for (unsigned int c = 0; c < data.width; ++c) {
-                unsigned char *px = (unsigned char *) data.pixels.data() + 4 * (rr + c);
+        for (unsigned int r = 0; r < display_data.height; ++r) {
+            unsigned int rr = (display_data.height - 1 - r) * display_data.width;
+            for (unsigned int c = 0; c < display_data.width; ++c) {
+                const unsigned char *px = display_data.pixels.data() + 4 * (rr + c);
                 image.SetRGB((int) c, (int) r, px[0], px[1], px[2]);
                 image.SetAlpha((int) c, (int) r, px[3]);
             }
@@ -7220,7 +7224,7 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
 }
 
  ThumbnailPanel::ThumbnailPanel(wxWindow *parent, wxWindowID winid, const wxPoint &pos, const wxSize &size)
-     : wxPanel(parent, winid, pos, size)
+     : wxPanel(parent, winid, pos, size), m_hover_timer(this)
  {
 #ifdef __WINDOWS__
      SetDoubleBuffered(true);
@@ -7229,10 +7233,22 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
      SetBackgroundStyle(wxBG_STYLE_PAINT);
      m_background_bitmap = ScalableBitmap(this,"thumbnail_grid",256);
      Bind(wxEVT_PAINT, &ThumbnailPanel::OnPaint, this);
+     Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+         if (m_hover_filament < 0 || !IsShownOnScreen()) {
+             m_hover_timer.Stop();
+             m_hover_filament = -1;
+             return;
+         }
+         m_ants_phase = std::fmod(m_ants_phase + 1., 8.);
+         Refresh(false);
+     }, m_hover_timer.GetId());
      Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
          const int id = filament_at(e.GetPosition());
          if (id != m_hover_filament) {
              m_hover_filament = id;
+             m_ants_phase = 0;
+             if (id >= 0) m_hover_timer.Start(80);
+             else m_hover_timer.Stop();
              SetCursor(id >= 0 ? wxCURSOR_HAND : wxCURSOR_ARROW);
              if (id >= 0 && filament_tooltip) SetToolTip(filament_tooltip(id));
              else UnsetToolTip();
@@ -7240,6 +7256,7 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
          }
      });
      Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent&) {
+         m_hover_timer.Stop();
          m_hover_filament = -1;
          SetCursor(wxCURSOR_ARROW);
          UnsetToolTip();
@@ -7307,18 +7324,27 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
                  path.CloseSubpath();
              }
              wxColour color(region.color);
-             if (region.filament < m_vector_colors.size() && m_vector_colors[region.filament].IsOk()) color = m_vector_colors[region.filament];
+             if (wxGetApp().app_config->get_bool("use_ams_colors_in_print_preview") &&
+                 region.filament < m_vector_colors.size() && m_vector_colors[region.filament].IsOk()) color = m_vector_colors[region.filament];
              gc->SetBrush(wxBrush(color));
              gc->FillPath(path, wxODDEVEN_RULE);
              paths.push_back(path);
          }
-         // Draw hover outlines last, so neighboring regions cannot cover them.
+         // Two contrasting strokes stay visible on both white and black parts.
+         // Build moving dashes explicitly: wx 3.1 has no portable dash offset.
          for (size_t i = 0; i < paths.size(); ++i) {
              if (m_vector_preview->regions[i].filament != m_hover_filament) continue;
-             gc->SetBrush(wxBrush(wxColour(0, 174, 66, 55)));
-             gc->FillPath(paths[i], wxODDEVEN_RULE);
-             gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(wxColour(0, 174, 66)).Width(FromDIP(2) / scale)));
+             const double pen_width = FromDIP(2) / scale;
+             gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(*wxBLACK).Width(pen_width)));
              gc->StrokePath(paths[i]);
+             auto ants = gc->CreatePath();
+             for (const auto& ring : m_vector_preview->regions[i].contours)
+                 for (const auto& dash : PlateVectorPreview::marching_ants(ring, FromDIP(4) / scale, FromDIP(m_ants_phase) / scale)) {
+                     ants.MoveToPoint(dash.first.x, dash.first.y);
+                     ants.AddLineToPoint(dash.second.x, dash.second.y);
+                 }
+             gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(*wxWHITE).Width(pen_width)));
+             gc->StrokePath(ants);
          }
          return;
      }
@@ -7344,6 +7370,7 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
 
  void ThumbnailPanel::clear_vector_preview()
  {
+     m_hover_timer.Stop();
      m_vector_key.clear();
      m_vector_preview.reset();
      const int width = GetMinSize().x;

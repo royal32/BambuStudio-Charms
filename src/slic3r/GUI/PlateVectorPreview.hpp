@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r { namespace GUI {
@@ -95,6 +96,30 @@ struct PlateVectorPreview {
                         if (ex * ex + ey * ey < nearest) { nearest = ex * ex + ey * ey; filament = region.filament; }
                     }
         return filament;
+    }
+
+    // White portions of a black/white dashed outline, continuous across corners.
+    static std::vector<std::pair<Point, Point>> marching_ants(const std::vector<Point>& ring, double dash_length, double phase)
+    {
+        std::vector<std::pair<Point, Point>> dashes;
+        if (ring.size() < 2 || !std::isfinite(dash_length) || dash_length <= 0 || !std::isfinite(phase)) return dashes;
+        const double period = 2 * dash_length;
+        phase = std::fmod(std::fmod(phase, period) + period, period);
+        double distance = 0;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            const auto a = ring[i], b = ring[(i + 1) % ring.size()];
+            const double dx = b.x - a.x, dy = b.y - a.y, length = std::hypot(dx, dy);
+            if (length == 0) continue;
+            for (double white_start = std::floor((distance + phase) / period) * period - phase;
+                 white_start < distance + length; white_start += period) {
+                const double start = std::max(distance, white_start) - distance;
+                const double end = std::min(distance + length, white_start + dash_length) - distance;
+                if (end > start) dashes.push_back({{a.x + dx * start / length, a.y + dy * start / length},
+                                                 {a.x + dx * end / length, a.y + dy * end / length}});
+            }
+            distance += length;
+        }
+        return dashes;
     }
 
     std::string svg() const

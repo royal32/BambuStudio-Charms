@@ -1602,6 +1602,9 @@ wxWindow *PreferencesDialog::create_3d_tab()
     auto item_show_shells = create_item_checkbox(_L("Always show shells in preview"), scrolled,
                                                  _L("Always show shells or not in preview view tab. If you change this value, you should reslice."), 50,
                                                  "show_shells_in_preview");
+    auto item_ams_preview_colors = create_item_checkbox(_L("Use AMS slot colors in print previews"), scrolled,
+        _L("Recolor the print dialog preview to match the selected AMS slots. Leave disabled to keep the model's original colors while assigning slots."),
+        50, "use_ams_colors_in_print_preview");
 
     auto item_show_heat_soak_area = create_item_checkbox(_L("Show Thermal Preconditioning Area"), scrolled,
                                                          _L("Warn if a model extends beyond the thermal preconditioning area. Available only on printers that support this feature."), 50,
@@ -1636,6 +1639,7 @@ wxWindow *PreferencesDialog::create_3d_tab()
     sizer->Add(wrap_option_row(scrolled, item_tooltip_offset), flags);
     sizer->Add(wrap_option_row(scrolled, item_toolbar_style), flags);
     sizer->Add(wrap_option_row(scrolled, item_thumbnail_view_angle), flags);
+    sizer->Add(wrap_option_row(scrolled, item_ams_preview_colors), flags);
     sizer->Add(wrap_option_row(scrolled, item_show_shells), flags);
     sizer->Add(wrap_option_row(scrolled, item_show_heat_soak_area), flags);
 #if !BBL_RELEASE_TO_PUBLIC
@@ -2082,6 +2086,7 @@ void PreferencesDialog::on_reset_preferences()
         "disable_fins_extrude_safe_temp",
         "zoom_to_mouse",
         "thumbnail_view_angle",
+        "use_ams_colors_in_print_preview",
         "reverse_mouse_wheel_zoom",
         "canvas_drag_to_move",
         "enable_assemble_view_preview",
