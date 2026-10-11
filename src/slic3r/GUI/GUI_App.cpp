@@ -53,7 +53,7 @@
 #include <wx/filedlg.h>
 #include <wx/progdlg.h>
 #include <future>
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 #include "BambuConnectBridge.hpp"
 #endif
 #include <wx/dir.h>
@@ -6089,7 +6089,7 @@ std::string GUI_App::bambu_connect_account_session()
 
 bool GUI_App::sync_bambu_connect_account(bool show)
 {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (m_connect_account_syncing) return false;
     m_connect_account_syncing = true;
     bool ok = false;
@@ -6106,7 +6106,7 @@ bool GUI_App::sync_bambu_connect_account(bool show)
     } catch (...) {}
     m_connect_account_syncing = false;
     if (!ok) MessageDialog(mainframe,
-        _L("Could not synchronize this account with Bambu Connect. Sign in to Studio again and check that both apps use the same region. Printing through Connect is blocked until the accounts match."),
+        _L("Could not verify this account in Bambu Connect. Sign in to the same account in Studio and Connect, and check that both apps use the same region. Printing through Connect is blocked until the accounts match."),
         _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
     return ok;
 #else
@@ -6117,9 +6117,11 @@ bool GUI_App::sync_bambu_connect_account(bool show)
 bool GUI_App::open_bambu_connect(const wxString& import_url)
 {
     bool launched = false;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (!sync_bambu_connect_account(import_url.empty())) return false;
     if (import_url.empty()) return true;
+#endif
+#ifdef __APPLE__
     // Pass argv directly; never interpolate paths or names into a shell command.
     const wchar_t* args[] = { L"/usr/bin/open", L"-b", L"com.bambulab.bambu-connect",
                              import_url.empty() ? nullptr : import_url.wc_str(), nullptr };

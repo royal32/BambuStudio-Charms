@@ -1,6 +1,6 @@
 # Printing with Bambu Connect
 
-On macOS, **Print plate** opens Studio's printer/options dialog. Choose the
+On macOS and Windows, **Print plate** opens Studio's printer/options dialog. Choose the
 printer, print options and filament mapping, then **Send**. Studio exports the
 job and passes those selections to Connect's internal print state. Connect runs
 hidden during a normal send. Its existing Send handler performs submission.
@@ -37,6 +37,14 @@ until the accounts match. If using a mainland China account, select that region
 in both apps first. Account synchronization currently requires the supported
 macOS Connect version listed below.
 
+On Windows, sign in to the same Bambu account in Studio and Connect, and choose
+the same region in both apps. Windows verifies Connect's account ID before
+importing a job and again before sending it. Account switching requires signing
+in to that account in Connect too; automatic token transfer remains Mac-only.
+The Mac plugin's private memory offsets are never used on Windows. Studio logout
+also clears Connect's session when the bridge is available. A mismatched account
+blocks the handoff instead of silently choosing a different account's printer.
+
 On the Device tab, **Open Bambu Connect** opens the printer-control application.
 Select the printer there to move axes, change temperatures or operate the AMS.
 If an existing Studio control is rejected as unsigned, the dialog now explains
@@ -45,22 +53,30 @@ the rejected command. Other direct workflows, including Send to printer storage,
 reprinting a file already on the printer, and calibration, still use the original network plugin and may remain restricted
 by firmware.
 
-## Direct bridge (macOS, Connect 2.5.0-beta.15)
+## Direct bridge (macOS and Windows, Connect 2.5.0-beta.15)
 
 The first direct handoff gracefully restarts an already-running Connect so the
 signed executable can inherit two private debugging pipes. Subsequent handoffs
-reuse that process. Studio now starts hiding that process as soon as it registers
-with macOS, and maintains the hidden state throughout initialization, instead of
+reuse that process. Studio starts hiding that process as soon as its native
+windows appear, and maintains the hidden state throughout initialization, instead of
 waiting for the renderer to finish loading. This does not modify Connect's app bundle, persist debugging
 settings, or open a TCP listener. The pipe connection belongs to the Studio
 session; closing Studio can also close that Connect instance. Printer-side jobs
 already started continue independently.
 
-`BambuConnectBridge.mm` launches Connect with `--remote-debugging-pipe`, locates
-the renderer, and retrieves its print-store accessors from the module scope.
+`BambuConnectBridge.cpp` contains the shared protocol and handoff logic.
+`BambuConnectBridge.mm` provides the Mac transport and session reader;
+`BambuConnectBridgeWin.cpp` provides the Windows transport. Both launch Connect
+with `--remote-debugging-pipe`, locate the renderer, and retrieve its print-store
+accessors from the module scope. Windows passes its two inherited child handles
+through Chromium's `--remote-debugging-io-pipes` switch. Its parent pipe endpoints
+use overlapped I/O with deadlines and cancellation, a current-user-only DACL,
+and remote-client rejection. `STARTUPINFOEX` restricts handle inheritance to the
+two pipe endpoints. Startup and review use the owning process's windows; the
+bridge requests a graceful close when restarting an existing Connect instance.
 `resources/scripts/bambu_connect_bridge.js` uses those methods to import the
 sliced file, select its plate/device, set options and map filament trays.
-The bridge reads the current account ID and access token from Studio's existing
+On macOS, the bridge reads the current account ID and access token from Studio's existing
 network plugin in memory. Its public login-info API contains only display
 metadata, so the session reader is pinned to the installed arm64 plugin's Mach-O
 UUID `22253083-6232-325A-87FB-ED9092625F5E`. It checks that binary identity before
@@ -70,7 +86,13 @@ snapshot returns no token. Update this adapter when the network plugin changes;
 do not remove the UUID guard. This part of the integration currently supports
 Apple Silicon only.
 
-The bridge uses Connect's own secure-storage writer to select
+The official Windows and Mac 2.5.0-beta.15 packages contain identical renderer
+bundles: `router-DcHfLi1L.js` (SHA-256
+`94d0c7f63d743c077872243cbcdedf9fb11ef2d7ef0a8963e7b085183206427e`) and
+`index-B_vXgx8V.js` (SHA-256
+`080d5cf771de64a6c06795a543bb983a4a61549eeb4d1a2c44a65cfe623dbcf3`).
+
+On macOS, the bridge uses Connect's own secure-storage writer to select
 that session, then restarts Connect to discard old MQTT connections and printer
 caches. Tokens are never placed in job files, the account registry, URLs,
 command-line arguments or bridge logs; no additional password store is created.
@@ -121,6 +143,51 @@ import. A failed export never launches Connect; a failed launch offers install
 and sign-in guidance. Manual sliced-file export remains available.
 
 ## Validation
+
+Windows bridge checks can be built independently of the full slicer dependency
+build, from an x64 Visual Studio developer prompt:
+
+```bat
+cmake -S tests/connect -B build-connect-checks -G "Visual Studio 17 2022" -A x64
+cmake --build build-connect-checks --config Release --parallel 4
+ctest --test-dir build-connect-checks -C Release --output-on-failure
+node --experimental-vm-modules --test tests/bambu_connect_bridge.test.cjs
+build-connect-checks\Release\bambu-connect-probe.exe resources\scripts\bambu_connect_bridge.js
+```
+
+The native checks cover Windows handle inheritance, Unicode and NUL-delimited
+pipe round trips, cancellation of timed-out I/O, recovery after cancellation,
+disconnects, unverified session layouts, and import URL encoding. The probe
+loads the real Connect adapter without importing a file or submitting a print.
+Complete Connect's initial setup and sign-in before running that live probe.
+To check real imports without sending, pass a JSON array of fixtures as the
+probe's second argument and an optional printer display name as its third.
+Each fixture contains an absolute UTF-8 `path`, display `name`, original
+`plateIndex`, and a `filaments` array of the used one-based filament IDs.
+The harness forces `submit=false` and never calls Connect's Send handler.
+If MSBuild ignores an installed SDK's library paths, set `UseEnv=true` after
+entering the developer prompt and configure with
+`-DCMAKE_VS_GLOBALS=UseEnv=true`. This was needed on the Windows test machine.
+
+The `charm-library` processing tool remains Mac-only. None of these Windows
+targets include or invoke that tool.
+
+Verified on the Windows test machine (Windows x64, MSVC 19.44), October 11, 2026:
+
+- The full Release application and its dependency bundle build and install
+  successfully. The packaged Studio DLL loads with its dependencies, exposes
+  its entry point, and the executable exits successfully for `--help`.
+- Native Windows pipe/URL checks and all ten renderer adapter tests pass.
+- The signed official Connect 2.5.0-beta.15 application launches through the
+  private pipes and passes the live renderer/store-binding probe.
+- Prepare-only handoffs to A1 Five pass for Wanda Cartoon 2 Color (plate 5),
+  Bee SB (plate 2), Aroma Joes Frappe (plate 5), Candy Cane SB (plate 3), and
+  Starbucks Coffee Design 2 (plate 1). The harness checks the selected plate,
+  bed leveling On, timelapse/flow calibration Off, AMS enabled and every used
+  filament's slot mapping. The Wanda copy uses `测试 Prints/café & #1 …` in its
+  Windows path. No print was submitted.
+- The full arm64 Mac application and the three Mac session-reader cases
+  (ten assertions) pass after extracting the shared runtime.
 
 Baseline verified September 13, 2026, committed as `7cedc3d7c`:
 

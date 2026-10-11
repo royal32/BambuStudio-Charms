@@ -716,6 +716,13 @@ if (WIN32)
         )
 endif ()
 
+if (APPLE OR WIN32)
+    list(APPEND SLIC3R_GUI_SOURCES GUI/BambuConnectBridge.cpp)
+endif ()
+if (WIN32)
+    list(APPEND SLIC3R_GUI_SOURCES GUI/BambuConnectBridgeWin.cpp)
+endif ()
+
 if (APPLE)
     list(APPEND SLIC3R_GUI_SOURCES
             GUI/BambuConnectBridge.mm
@@ -796,7 +803,7 @@ target_link_libraries(libslic3r_gui libslic3r cereal imgui imguizmo minilzo GLEW
 #target_link_libraries(libslic3r_gui libslic3r cereal imgui imguizmo minilzo GLEW::GLEW OpenGL::GL hidapi libcurl OpenSSL::SSL OpenSSL::Crypto ${wxWidgets_LIBRARIES} glfw)
 
 if (MSVC)
-    target_link_libraries(libslic3r_gui Setupapi.lib dwmapi.lib)
+    target_link_libraries(libslic3r_gui Setupapi.lib dwmapi.lib advapi32.lib ole32.lib user32.lib)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     FIND_LIBRARY(WAYLAND_SERVER_LIBRARIES NAMES wayland-server)
     FIND_LIBRARY(WAYLAND_EGL_LIBRARIES    NAMES wayland-egl)

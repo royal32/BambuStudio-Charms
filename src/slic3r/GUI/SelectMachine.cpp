@@ -857,7 +857,7 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     auto* send_actions = new wxBoxSizer(wxHORIZONTAL);
     send_actions->Add(m_button_ensure, 0, wxALIGN_CENTER_VERTICAL, 0);
     m_sizer_pcont->Add(send_actions, 0, wxALIGN_CENTER, 0);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     auto* connect_setup = new Button(m_panel_prepare, _L("Open in Bambu Connect"));
     connect_setup->SetMinSize(wxSize(FromDIP(190), FromDIP(32)));
     connect_setup->SetToolTip(_L("Review this job in Bambu Connect, including when Studio cannot load the printer's options."));
@@ -3275,7 +3275,7 @@ bool SelectMachineDialog::send_via_bambu_connect(bool submit)
 
 void SelectMachineDialog::on_send_print()
 {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (m_print_type == PrintFromType::FROM_NORMAL) {
         Enable_Send_Button(false);
         if (send_via_bambu_connect(true)) EndModal(wxID_OK);

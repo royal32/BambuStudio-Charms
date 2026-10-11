@@ -10,6 +10,7 @@ std::string direct_handoff(const std::string& request, const std::string& adapte
 std::string synchronize_account(const std::string& session, const std::string& adapter_path, bool show = false);
 
 // Read only the active session from the supported arm64 network-plugin build.
-// Returns empty for a different binary/layout or a changing account. Never log.
+// Windows requires matching manual sign-in and returns empty here; never reuse
+// the Mac plugin's memory layout. Unknown/changing sessions return empty.
 std::string studio_access_token(void* agent, void* identity_function, const std::string& user_id);
 }}}

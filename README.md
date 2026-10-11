@@ -31,7 +31,9 @@ Other major features are:
 
 # Charm & Pair library tools
 
-Run `./charm-library` for the Omnitrix command browser: incremental A1 mini slicing, vector previews, source folders, profile settings, and integrity checks. See [the library guide](tools/CHARM_LIBRARY.md) for setup and everyday use.
+On macOS, run `./charm-library` for the Omnitrix command browser: incremental A1 mini slicing, vector previews, source folders, profile settings, and integrity checks. See [the library guide](tools/CHARM_LIBRARY.md) for setup and everyday use. The processing tool remains Mac-only; the sliced-library app supports Windows and macOS.
+
+The [Bambu Connect integration](BAMBU_CONNECT.md) supports Windows and macOS with Connect 2.5.0-beta.15. On Windows, sign in to the same account in both apps before printing.
 
 # How to compile
 Following platforms are currently supported to compile:

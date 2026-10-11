@@ -1,7 +1,7 @@
 #include "Plater.hpp"
 #include "PlateJobName.hpp"
 #include "BambuConnect.hpp"
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 #include "BambuConnectBridge.hpp"
 #endif
 #include <wx/progdlg.h>
@@ -23079,7 +23079,7 @@ bool Plater::print_with_bambu_connect(bool all_plates, const std::string& option
         }
         auto name = get_export_gcode_filename(".gcode.3mf", true, all_plates).utf8_string();
         if (boost::ends_with(name, ".gcode.gcode.3mf")) name.erase(name.size() - 16, 6);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
         json request = options_json.empty() ? json::object() : json::parse(options_json);
         request["account"] = json::parse(wxGetApp().bambu_connect_account_session());
         if (request["account"].value("userId", "").empty()) {
