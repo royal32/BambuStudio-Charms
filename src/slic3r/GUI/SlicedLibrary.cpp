@@ -6,11 +6,14 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 #include "PlateVectorPreview.hpp"
+#include "SlicedLibraryStorage.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <wx/base64.h>
 #include <wx/dirdlg.h>
 #include <wx/weakref.h>
+#include <wx/menu.h>
+#include <wx/textdlg.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -47,6 +50,8 @@ struct SlicedLibraryState {
     bool scanning{true};
     bool dirty{false};
     bool reading_thumbnails{false};
+    bool action_running{false};
+    LibraryJson pending_action;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 };
 
@@ -92,6 +97,8 @@ void WebViewPanel::StartSlicedLibraryScan(const std::string& folder)
             if (!state->folder.empty()) {
                 const auto root = fs::canonical(fs::u8path(state->folder));
                 if (!fs::is_directory(root)) throw std::runtime_error("The library folder is unavailable.");
+                std::set<std::string> removed;
+                for (const auto& record : LibraryStorage::exclusions(root)) removed.insert(record.at("plate").get<std::string>());
                 for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied), end; it != end; ++it) {
                     if (state->cancelled) return;
                     const auto& item = *it;
@@ -107,6 +114,7 @@ void WebViewPanel::StartSlicedLibraryScan(const std::string& folder)
                     const std::string suffix = ".gcode.3mf";
                     if (lower.size() <= suffix.size() || lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
                     const auto relative = item.path().lexically_relative(root);
+                    if (removed.count(relative.generic_u8string())) continue;
                     std::string preview_stamp;
                     std::error_code preview_error;
                     const auto preview_path = fs::u8path(item.path().u8string() + ".preview.json");
@@ -146,7 +154,7 @@ void WebViewPanel::PollSlicedLibrary()
 {
     auto state = m_sliced_library;
     if (!state) return;
-    LibraryJson list, thumbnails;
+    LibraryJson list, thumbnails, action;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->dirty) {
@@ -161,10 +169,17 @@ void WebViewPanel::PollSlicedLibrary()
             thumbnails = {{"command", "sliced_library_thumbnails"}, {"token", state->token}, {"entries", state->pending_thumbnails}};
             state->pending_thumbnails = LibraryJson::array();
         }
-        if (!state->scanning && !state->reading_thumbnails) m_sliced_library_timer->Stop();
+        action.swap(state->pending_action);
+        if (!state->scanning && !state->reading_thumbnails && !state->action_running) m_sliced_library_timer->Stop();
     }
     if (!list.is_null()) send_library_message(*this, list);
     if (!thumbnails.is_null()) send_library_message(*this, thumbnails);
+    if (!action.is_null()) {
+        m_sliced_library_opening = false;
+        send_library_message(*this, {{"command", "sliced_library_action_done"},
+            {"notice", action.value("notice", "")}, {"error", action.value("error", "")}});
+        if (action.value("rescan", false)) StartSlicedLibraryScan(state->folder);
+    }
 }
 
 bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
@@ -177,6 +192,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
     if (command.compare(0, 15, "sliced_library_") != 0) return false;
 
     if (command == "sliced_library_choose") {
+        if (m_sliced_library_opening) return true;
         wxWeakRef<WebViewPanel> weak(this);
         CallAfter([weak] {
             if (!weak) return;
@@ -190,6 +206,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
             weak->StartSlicedLibraryScan(folder);
         });
     } else if (command == "sliced_library_get" || command == "sliced_library_refresh") {
+        if (m_sliced_library_opening) return true;
         if (!IsShownOnScreen() && m_sliced_library) return true;
         const auto folder = wxGetApp().app_config->get("sliced_library_folder");
         bool scan = !m_sliced_library || m_sliced_library->folder != folder;
@@ -201,6 +218,89 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
         }
         if (scan) StartSlicedLibraryScan(folder);
         else PollSlicedLibrary();
+    } else if (command == "sliced_library_context") {
+        auto state = m_sliced_library;
+        auto done = [this](const std::string& error = "") {
+            m_sliced_library_opening = false;
+            send_library_message(*this, {{"command", "sliced_library_action_done"}, {"error", error}});
+        };
+        if (m_sliced_library_opening) { send_library_message(*this, {{"command", "sliced_library_action_done"}}); return true; }
+        if (!state || !request.contains("id") || !request["id"].is_string() ||
+            !request.contains("token") || !request["token"].is_string() || request["token"].get<std::string>() != state->token) {
+            done("The library refreshed. Select the plate again.");
+            return true;
+        }
+        SlicedLibraryEntry entry;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            const auto id = request["id"].get<std::string>();
+            const auto it = std::find_if(state->entries.begin(), state->entries.end(), [&](const auto& e) { return e.id == id; });
+            if (state->scanning || it == state->entries.end()) { done("Refresh the library and select the plate again."); return true; }
+            entry = *it;
+        }
+        m_sliced_library_opening = true;
+        wxWeakRef<WebViewPanel> weak(this);
+        // Let the webview message callback unwind before opening native menus
+        // and dialogs (the same pattern as loading a library print job).
+        CallAfter([this, weak, state, entry, done]() -> bool {
+            if (!weak) return true;
+            wxMenu menu;
+            const int remove = menu.Append(wxID_ANY, _L("Delete from library…"))->GetId();
+            const int feedback = menu.Append(wxID_ANY, _L("Leave feedback…"))->GetId();
+            const auto selection = GetPopupMenuSelectionFromUser(menu, ScreenToClient(wxGetMousePosition()));
+            if (!weak) return true;
+            if (selection != remove && selection != feedback) { done(); return true; }
+            std::string note;
+            if (selection == remove) {
+                MessageDialog dialog(this, wxString::FromUTF8("Delete “" + entry.name + "” from the library?\n\n"
+                    "This plate will be excluded from future library updates. Other plates in the project will still refresh normally. "
+                    "A recoverable copy is kept in the library; the source 3MF is unchanged."),
+                    _L("Delete sliced plate"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+                const auto answer = dialog.ShowModal();
+                if (!weak) return true;
+                if (answer != wxID_YES) { done(); return true; }
+            } else {
+                wxTextEntryDialog dialog(this, wxString::FromUTF8("What needs changing about “" + entry.name + "”?\n"
+                    "Your note will be saved in the shared library’s Library Feedback folder."),
+                    _L("Leave feedback"), "", wxOK | wxCANCEL | wxTE_MULTILINE);
+                dialog.SetSize(wxSize(540, 300));
+                while (true) {
+                    const auto answer = dialog.ShowModal();
+                    if (!weak) return true;
+                    if (answer != wxID_OK) { done(); return true; }
+                    const auto value = dialog.GetValue().Trim(true).Trim(false);
+                    if (!value.empty() && value.length() <= 8000) { note = std::string(value.utf8_string()); break; }
+                    MessageDialog invalid(this, _L("Enter a note of between 1 and 8,000 characters."), _L("Leave feedback"), wxOK);
+                    invalid.ShowModal();
+                    if (!weak) return true;
+                }
+            }
+            if (!weak) return true;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->action_running = true;
+            }
+            m_sliced_library_timer->Start(200);
+            std::thread([state, entry, note, deleting = selection == remove] {
+                LibraryJson result = {{"rescan", deleting}};
+                try {
+                    const auto root = fs::canonical(fs::u8path(state->folder));
+                    if (deleting) {
+                        LibraryStorage::remove_plate(root, entry.id, entry.name, entry.stamp);
+                        result["notice"] = "Plate deleted and excluded from future updates. Other plates will still refresh.";
+                    } else {
+                        LibraryStorage::leave_feedback(root, entry.id, entry.name, note);
+                        result["notice"] = "Feedback saved in the library’s Library Feedback folder.";
+                    }
+                } catch (const std::exception& error) {
+                    result["error"] = std::string("The library action could not finish: ") + error.what();
+                }
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->pending_action = std::move(result);
+                state->action_running = false;
+            }).detach();
+            return true;
+        });
     } else if (command == "sliced_library_thumbnails") {
         auto state = m_sliced_library;
         if (!state || !request.contains("ids") || !request["ids"].is_array() ||

@@ -10,12 +10,13 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from charm_library.engine import Library, digest, ROOT
+from charm_library import shared
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     commands = p.add_subparsers(dest='action', required=True)
-    for name in ('status', 'verify', 'exceptions', 'sources', 'settings', 'doctor', 'setup'):
+    for name in ('status', 'verify', 'exceptions', 'sources', 'settings', 'doctor', 'setup', 'feedback', 'excluded', 'sync'):
         commands.add_parser(name)
     for name in ('plan', 'update', 'previews'):
         q = commands.add_parser(name)
@@ -24,6 +25,8 @@ def parser():
         q.add_argument('--force', action='store_true')
     q = commands.add_parser('projects')
     q.add_argument('--project', default='')
+    q = commands.add_parser('restore')
+    q.add_argument('--plate', required=True)
     q = commands.add_parser('use-source')
     q.add_argument('--project', required=True)
     q.add_argument('--path', required=True)
@@ -65,6 +68,22 @@ def main(argv=None):
     if args.action == 'settings':
         print(json.dumps(library.config, indent=2))
         return 0
+    if args.action == 'feedback':
+        folder = shared.child(library.shared_root(), 'Library Feedback')
+        notes = sorted(folder.glob('*.md')) if folder.exists() else []
+        for path in notes:
+            path = shared.child(library.shared_root(), str(path.relative_to(library.shared_root())))
+            if path.stat().st_size > 65536:
+                raise ValueError('Feedback note is too large: ' + str(path))
+            print(path.read_text() + '\nSaved at: ' + str(path) + '\n')
+        print(f'{len(notes)} feedback notes. Move finished notes into a subfolder to archive them.')
+        return 0
+    if args.action == 'excluded':
+        records = shared.exclusions(library.shared_root())
+        for record in records:
+            print(record['plate'] + ' [' + record['id'] + ']')
+        print(f'{len(records)} active plate exclusions. Other plates continue to refresh.')
+        return 0
     if args.action == 'projects':
         for project in library.state['projects'].values():
             if args.project.casefold() not in (project['name'] + ' ' + project['id']).casefold():
@@ -91,12 +110,17 @@ def main(argv=None):
     if args.action == 'verify':
         errors = []
         files = library.files()
+        records = shared.exclusions(library.shared_root())
+        ignored = 0
         for path, item in files.items():
+            if library.excluded_output(path, records=records):
+                ignored += 1
+                continue
             if not Path(path).is_file() or digest(path) != item['sha256']:
                 errors.append(path)
         for path in errors:
             print('MISSING OR EDITED: ' + path)
-        print(f'{len(files)} managed files checked; {len(errors)} mismatches.')
+        print(f'{len(files) - ignored} managed files checked; {ignored} excluded files ignored; {len(errors)} mismatches.')
         return 1 if errors else 0
     if args.action == 'doctor':
         library.recipes()
@@ -122,6 +146,11 @@ def main(argv=None):
                 subprocess.run([sys.executable, '-m', 'venv', str(runtime)], check=True)
             subprocess.run([str(runtime / 'bin/python3'), '-m', 'pip', 'install', '-r', str(ROOT / 'tools/vector-preview-requirements.txt')], check=True)
             print('Runtime ready. Add source folders, review Library → Plan, then run Library → Update.')
+        elif args.action == 'sync':
+            shared.sync_projects(library.shared_root(), library.state['projects'])
+            print('Shared plate identities synchronized. Print files were not changed.')
+        elif args.action == 'restore':
+            shared.restore(library, args.plate)
         elif args.action == 'add-source':
             path = Path(args.path).expanduser().resolve()
             if not path.exists():

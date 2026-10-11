@@ -80,6 +80,30 @@ fn app() -> Result<App> {
     };
     let commands = vec![
         (
+            "library feedback",
+            "Read notes left in the shared Library Feedback folder",
+            "feedback",
+            vec![],
+        ),
+        (
+            "library excluded",
+            "List deleted plates excluded from future refreshes",
+            "excluded",
+            vec![],
+        ),
+        (
+            "library restore",
+            "Re-include a deleted plate, then regenerate it with Update",
+            "restore",
+            vec![OptionSpec::new("plate", "Exact plate filename or exclusion ID").required()],
+        ),
+        (
+            "maintenance sync",
+            "Publish shared plate identities without reslicing",
+            "sync",
+            vec![],
+        ),
+        (
             "library status",
             "Show tracked projects and folders",
             "status",

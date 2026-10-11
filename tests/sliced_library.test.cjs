@@ -90,3 +90,30 @@ test('refresh retains unchanged thumbnails and invalidates replaced files', () =
     f.list([{ ...entry, stamp: 'changed' }], 'replacement');
     assert.equal(f.el('Grid').querySelectorAll('img').length, 0);
 });
+
+test('right-click and keyboard actions send only indexed identity and release busy state on cancel/error', () => {
+    const f = fixture();
+    f.list([{ id: 'Mamá Bee SB.gcode.3mf', name: 'Mamá Bee SB', folder: '', stamp: 'old' }]);
+    const event = { key: 'F10', shiftKey: true, preventDefault() {}, stopPropagation() {} };
+    f.el('Grid').children[0].oncontextmenu(event);
+    f.el('Grid').children[0].oncontextmenu(event);
+    f.library.refresh();
+    const requests = f.messages.filter(m => m.command === 'sliced_library_context');
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].id, 'Mamá Bee SB.gcode.3mf');
+    assert.equal(requests[0].token, 'first');
+    assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, true);
+    assert.equal(f.messages.filter(m => m.command === 'sliced_library_refresh').length, 0);
+    f.library.handle({ command: 'sliced_library_action_done', error: 'Read-only shared folder' });
+    assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, false);
+    assert.equal(f.el('Status').textContent, 'Read-only shared folder');
+    f.el('Grid').children[0].onkeydown(event);
+    assert.equal(f.messages.filter(m => m.command === 'sliced_library_context').length, 2);
+    f.library.handle({ command: 'sliced_library_action_done', notice: 'Feedback saved' });
+    assert.equal(f.el('Status').textContent, 'Feedback saved');
+    f.library.handle({ command: 'sliced_library_status', folder: '/different-library', scanning: true });
+    assert.equal(f.el('Status').textContent, 'Checking your folder…');
+    f.library.handle({ command: 'sliced_library_action_done' });
+    f.list([{ id: 'other.gcode.3mf', name: 'Other', folder: '' }], 'other');
+    assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, false);
+});

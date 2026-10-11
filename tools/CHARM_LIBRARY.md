@@ -47,6 +47,25 @@ Vector sidecars preserve the original printer-compatible PNG thumbnails and G-co
 
 Keep `.charm-library/` backed up: it contains the source snapshots, configuration, manifest, saved projects and backups. These local files are ignored by Git. Never delete the manifest to “start fresh” against an existing collection: it owns the integrity and replacement records.
 
+## Deleting plates and leaving feedback
+
+Right-click a sliced library card in Studio (or focus it and press Shift-F10):
+
+- **Delete from library…** removes that plate and its vector sidecars after confirmation. Its plate identity is excluded from future updates, including forced rebuilds and preview regeneration. **Other plates in the same 3MF still update.** The editable source remains unchanged. Copies are retained in the library's hidden `.charm-library/removed/` folder.
+- **Leave feedback…** saves a dated Markdown note identifying the plate and source project in **Library Feedback/** beside the print files. No account, email or messaging service is involved. Use `./charm-library library feedback` to read notes, or open the folder in Finder. Move completed notes into an `Archive/` subfolder to clear the active list.
+
+Exclusions and plate identities are stored inside the chosen library's hidden `.charm-library/` directory. This is separate from the repository's local `.charm-library/` working state. Copy/share the **whole library folder**, including hidden metadata, when moving it to a shared iCloud folder. Select that same folder in Studio and set it as the console's output directory. Allow iCloud changes to finish syncing before running updates on the other Mac. The console publishes identity records automatically during Update, or explicitly with `./charm-library maintenance sync`; this does not reslice or alter print files.
+
+Each deletion, restoration and note has a separate file, so the two users don't rewrite a single shared list. Plate matching uses the project ID and plate index, with a relative filename fallback for older untracked exports. Renaming a plate does not restore it. Reordering/replacing source plates can change their indices: review exclusions when doing that. New projects with different identities are independent. Only the processing machine needs the slicer sources, profile presets and local manifest; the printing Mac needs the shared library and this Studio build.
+
+```sh
+./charm-library library excluded
+./charm-library library restore --plate "Bee SB.gcode.3mf"
+./charm-library library update
+```
+
+Restore re-includes a tracked plate for generation from the current source/settings; it does not silently publish an old archived slice. Original exports without a tracked source can be recovered from their retained copy. Missing excluded files don't fail integrity checks. Invalid/unreadable exclusion records stop refresh processing so a damaged record cannot accidentally recreate deleted plates.
+
 ## Setup and configuration
 
 Configure the processing machine before the first update. **Settings → Show/Configure** controls source/output locations, the slicer executable, the profile root and exact preset names. Blank configuration fields retain their current value. **Maintenance → Doctor** resolves preset inheritance and checks the executable and Python dependencies.
@@ -68,6 +87,9 @@ Normal launches build offline from the pinned Cargo lockfile. Setup installs Num
 ```sh
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p 'test_charm_library*.py'
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_vector_preview_generator.py
+node --test tests/sliced_library.test.cjs
+c++ -std=c++17 -Isrc tests/sliced_library_storage.test.cpp -o /tmp/sliced-library-storage-test
+/tmp/sliced-library-storage-test
 CHARM_LIBRARY_INTEGRATION=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_charm_library_slicer.py
 ```
 

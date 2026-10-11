@@ -15,7 +15,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-from . import geometry, package, prepare
+from . import geometry, package, prepare, shared
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -117,6 +117,14 @@ class Library:
                 item['owners'].add(key)
         return result
 
+    def shared_root(self):
+        return Path(self.config['library']).expanduser().resolve()
+
+    def excluded_output(self, path, project=None, records=None):
+        records = shared.exclusions(self.shared_root()) if records is None else records
+        projects = [project] if project else self.state['projects'].values()
+        return any(shared.output_excluded(self.shared_root(), p, path, records) for p in projects)
+
     def discover(self):
         found = {}
         roots = [Path(p).expanduser().resolve() for p in self.config['sources']]
@@ -147,6 +155,7 @@ class Library:
 
     def plan(self, project_filter='', force=False, previews_only=False):
         recipe, preview_recipe, presets = self.recipes()
+        exclusions = shared.exclusions(self.shared_root())
         previous = {p['source']: p for p in self.state['projects'].values()}
         rows, hashes = [], {}
         seen = {p['source_sha256']: p['name'] for p in previous.values()
@@ -172,6 +181,8 @@ class Library:
             damaged = []
             if old:
                 for output, sha in old['outputs'].items():
+                    if self.excluded_output(output, old, exclusions):
+                        continue
                     if output not in hashes:
                         hashes[output] = digest(output) if Path(output).is_file() else None
                     if hashes[output] != sha:
@@ -188,6 +199,8 @@ class Library:
                 action, reason = 'build', 'Source changed'
             elif current_recipe != old['recipe']:
                 action, reason = 'build', 'Profiles, slicer, names or preparation changed'
+            elif any(p.get('excluded', False) and not shared.plate_excluded(old, p, exclusions) for p in old['plates']):
+                action, reason = 'build', 'Previously excluded plate was re-included'
             elif damaged:
                 action = 'preview' if all(p.endswith(('.preview.json', '.preview.svg')) for p in damaged) else 'build'
                 reason = 'Managed output is missing'
@@ -208,8 +221,14 @@ class Library:
 
     def recover(self):
         transaction = json.loads(self.journal.read_text())
+        def excluded(action):
+            records = shared.exclusions(self.shared_root())
+            return any(shared.output_excluded(self.shared_root(), p, action['target'], records)
+                       for p in transaction['state']['projects'].values())
         # Check every action before continuing a partially completed operation.
         for action in transaction['actions']:
+            if excluded(action):
+                continue
             path = Path(action['target'])
             current = digest(path) if path.is_file() else None
             if current not in (action['before'], action['after']):
@@ -217,6 +236,8 @@ class Library:
             if action['source'] and digest(action['source']) != action['after']:
                 raise ValueError('Staged output changed; preserved publication journal')
         for action in transaction['actions']:
+            if excluded(action):
+                continue
             path = Path(action['target'])
             current = digest(path) if path.is_file() else None
             if current == action['after']:
@@ -242,7 +263,12 @@ class Library:
     def publish(self, entry, staged):
         catalog = self.files()
         old = self.state['projects'].get(entry['id'], {})
+        records = shared.exclusions(self.shared_root())
+        staged = {p: source for p, source in staged.items() if not self.excluded_output(p, entry, records)}
         actions, outputs = [], {}
+        for path, sha in old.get('outputs', {}).items():
+            if self.excluded_output(path, old, records):
+                outputs[path] = sha
         stamp = str(time.time_ns())
         for target, source in staged.items():
             target, source = Path(target), Path(source)
@@ -271,6 +297,7 @@ class Library:
         state['projects'][entry['id']] = entry
         atomic_json(self.journal, dict(actions=actions, state=state))
         self.recover()
+        shared.sync_projects(self.shared_root(), self.state['projects'])
 
     def allocate(self, label, key, reserved, old=None):
         library = Path(self.config['library']).expanduser().resolve()
@@ -350,21 +377,30 @@ class Library:
         reserved = set()
         previous_policies = {p['index']: p.get('preview_policy', 'auto') for p in old['plates']} if old else {}
         for plate, job in plates:
+            # A deletion applies to this plate identity, including its future
+            # filename, without pausing the other plates in the source project.
+            policy_plate = dict(plate, filename=plate.get('filename', plate['name'] + '.gcode.3mf'))
+            excluded = shared.plate_excluded(entry, policy_plate, shared.exclusions(self.shared_root()))
             if row['action'] == 'preview':
                 target = Path(self.config['library']).expanduser().resolve() / plate['filename']
+                if excluded:
+                    continue
             else:
                 target = self.allocate(plate['name'], row['id'], reserved)
                 staged[str(target)] = str(job)
                 plate.update(filename=target.name, preview_policy=previous_policies.get(plate['index'], 'auto'))
                 if next(s['dimensions'][2] for s in plan['shifts'] if s['plate'] == plate['index']) > MAX_VECTOR_HEIGHT_MM:
                     plate['preview_policy'] = 'Plate height exceeds 20 mm: review artwork; retain the original thumbnail'
-            artwork, reason = self.preview(prepared, job, plate['index'], plate.get('preview_policy', 'auto'))
+            plate['excluded'] = excluded
+            artwork, reason = ({}, '') if excluded else self.preview(prepared, job, plate['index'], plate.get('preview_policy', 'auto'))
             plate['preview_fallback'] = reason
             for suffix, content in artwork.items():
                 source = folder / (target.name + suffix)
                 source.write_text(content)
                 staged[str(target) + suffix] = str(source)
-            if reason:
+            if excluded:
+                print('  Excluded plate: ' + plate['name'], flush=True)
+            elif reason:
                 print('  Original thumbnail: ' + plate['name'] + ' — ' + reason, flush=True)
             if row['action'] != 'preview':
                 entry['plates'].append(plate)
@@ -378,6 +414,7 @@ class Library:
 
     def update(self, project_filter='', limit=0, force=False, previews_only=False):
         rows, presets = self.plan(project_filter, force, previews_only)
+        shared.sync_projects(self.shared_root(), self.state['projects'])
         pending = [r for r in rows if r['action'] in ('build', 'preview')]
         if limit:
             pending = pending[:limit]

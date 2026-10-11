@@ -12,6 +12,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from charm_library.engine import Library, atomic_json, digest, signature
 from charm_library.prepare import resolve_presets
+from charm_library import shared
 
 
 class LibraryTests(unittest.TestCase):
@@ -27,14 +28,16 @@ class LibraryTests(unittest.TestCase):
         self.source.write_bytes(b'original geometry')
         self.recipe, self.art = 'slice-v1', 'art-v1'
         self.slices = 0
+        self.plate_count = 1
 
         def recipes(_):
             return self.recipe, self.art, {}
 
         def prepare(source, folder, family, category, presets, overrides):
             shutil.copyfile(source, folder / 'input.3mf')
-            return {'plates': [{'index': 1, 'name': (overrides or {}).get('1', family + ' SB')}],
-                    'shifts': [{'plate': 1, 'dimensions': [40, 40, 5]}]}
+            return {'plates': [{'index': i, 'name': (overrides or {}).get(str(i), family + (' SB' if i == 1 else ' Plain'))}
+                               for i in range(1, self.plate_count + 1)],
+                    'shifts': [{'plate': i, 'dimensions': [40, 40, 5]} for i in range(1, self.plate_count + 1)]}
 
         def slice_project(config, folder, plan):
             self.slices += 1
@@ -42,9 +45,12 @@ class LibraryTests(unittest.TestCase):
         def export(folder, plan, config, presets):
             source = (folder / 'input.3mf').read_bytes()
             (folder / 'prepared.3mf').write_bytes(source)
-            path = folder / 'plate-1.gcode.3mf'
-            path.write_bytes(b'sliced:' + source + self.recipe.encode())
-            return [(copy.deepcopy(plan['plates'][0]), path)]
+            result = []
+            for plate in plan['plates']:
+                path = folder / f"plate-{plate['index']}.gcode.3mf"
+                path.write_bytes(b'sliced:' + source + self.recipe.encode() + str(plate['index']).encode())
+                result.append((copy.deepcopy(plate), path))
+            return result
 
         def preview(_, prepared, job, plate, policy='auto'):
             return ({'.preview.json': self.art, '.preview.svg': self.art}, '') if policy == 'auto' else ({}, policy)
@@ -237,6 +243,116 @@ class LibraryTests(unittest.TestCase):
         self.run_update()
         self.assertEqual(self.entry()['id'], key)
         self.assertEqual(len(self.lib.plan()[0]), 1)
+
+    def exclude(self, index=1, identifier='deleted-one'):
+        entry = self.entry()
+        plate = next(p for p in entry['plates'] if p['index'] == index)
+        root = self.lib.shared_root()
+        record = dict(version=1, kind='exclude', id=identifier, plate=plate['filename'], name=plate['name'],
+                      removed_dir='.charm-library/removed/' + identifier,
+                      targets=[dict(project_id=entry['id'], plate_index=index, source_sha256=entry['source_sha256'])])
+        shared.write_json(root, '.charm-library/events/' + identifier + '.json', record)
+        for suffix in ('', '.preview.json', '.preview.svg'):
+            source = root / (plate['filename'] + suffix)
+            if source.exists():
+                target = root / record['removed_dir'] / (plate['filename'] + suffix)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.rename(target)
+        return record
+
+    def test_deleted_plate_stays_missing_while_sibling_updates(self):
+        self.plate_count = 2
+        self.run_update()
+        record = self.exclude()
+        self.assertEqual(self.action(), 'skip')
+        self.assertEqual(self.run_update(), 0)
+        self.source.write_bytes(b'new geometry')
+        self.assertEqual(self.run_update(force=True), 0)
+        self.assertFalse((self.lib.shared_root() / record['plate']).exists())
+        sibling = self.lib.shared_root() / self.entry()['plates'][1]['filename']
+        self.assertIn(b'new geometry', sibling.read_bytes())
+        self.assertEqual(self.action(), 'skip')
+
+    def test_excluded_plate_identity_survives_rename_and_preview_refresh(self):
+        self.plate_count = 2
+        self.run_update()
+        self.exclude()
+        self.lib.config['plate_names'][self.entry()['id']] = {'1': 'Renamed Honey Bee SB'}
+        self.lib.save_config()
+        self.assertEqual(self.run_update(), 0)
+        self.assertFalse((self.lib.shared_root() / 'Renamed Honey Bee SB.gcode.3mf').exists())
+        self.assertEqual(self.run_update(force=True, previews_only=True), 0)
+        self.assertFalse((self.lib.shared_root() / 'Renamed Honey Bee SB.gcode.3mf.preview.json').exists())
+        self.assertEqual(self.action(), 'skip')
+
+    def test_reinclude_rebuilds_current_source_after_updates_while_excluded(self):
+        self.plate_count = 2
+        self.run_update()
+        record = self.exclude()
+        self.source.write_bytes(b'latest source')
+        self.run_update()
+        shared.restore(self.lib, record['plate'])
+        self.assertEqual(self.action(), 'build')
+        self.assertEqual(self.run_update(), 0)
+        self.assertIn(b'latest source', (self.lib.shared_root() / record['plate']).read_bytes())
+        self.assertEqual(self.action(), 'skip')
+
+    def test_restore_only_cancels_observed_deletions(self):
+        self.run_update()
+        record = self.exclude()
+        shared.restore(self.lib, record['plate'])
+        self.exclude(identifier='concurrent-new-delete')
+        self.assertEqual([r['id'] for r in shared.exclusions(self.lib.shared_root())], ['concurrent-new-delete'])
+
+    def test_restore_untracked_export_recovers_job_and_previews(self):
+        self.run_update()
+        record = self.exclude()
+        self.lib.state['projects'] = {}
+        shared.restore(self.lib, record['plate'])
+        for suffix in ('', '.preview.json', '.preview.svg'):
+            recovered = self.lib.shared_root() / (record['plate'] + suffix)
+            archived = self.lib.shared_root() / record['removed_dir'] / (record['plate'] + suffix)
+            self.assertEqual(digest(recovered), digest(archived))
+        self.assertFalse(shared.exclusions(self.lib.shared_root()))
+
+    def test_unavailable_recovery_copy_does_not_cancel_exclusion(self):
+        self.run_update()
+        record = self.exclude()
+        self.lib.state['projects'] = {}
+        (self.lib.shared_root() / record['removed_dir'] / record['plate']).unlink()
+        with self.assertRaisesRegex(ValueError, 'recovery copy is unavailable'):
+            shared.restore(self.lib, record['plate'])
+        self.assertEqual(len(shared.exclusions(self.lib.shared_root())), 1)
+
+    def test_corrupt_shared_metadata_blocks_updates_without_recreating_plate(self):
+        self.run_update()
+        record = self.exclude()
+        (self.lib.shared_root() / '.charm-library/events/broken.json').write_text('{broken')
+        with self.assertRaises(ValueError):
+            self.run_update(force=True)
+        self.assertFalse((self.lib.shared_root() / record['plate']).exists())
+
+    def test_exclusion_during_interrupted_publication_is_honored_on_recovery(self):
+        self.plate_count = 2
+        self.run_update()
+        self.source.write_bytes(b'new source')
+        with patch.object(self.lib, 'recover', side_effect=OSError('interruption')):
+            self.assertEqual(self.run_update(), 1)
+        record = self.exclude()
+        self.assertEqual(self.run_update(), 0)
+        self.assertFalse((self.lib.shared_root() / record['plate']).exists())
+        self.assertIn(b'new source', (self.lib.shared_root() / self.entry()['plates'][1]['filename']).read_bytes())
+
+    def test_metadata_sync_is_idempotent_and_uses_relative_plate_identity(self):
+        self.run_update()
+        path = self.lib.shared_root() / '.charm-library/projects' / (self.entry()['id'] + '.json')
+        before = path.stat().st_mtime_ns
+        self.run_update()
+        self.assertEqual(before, path.stat().st_mtime_ns)
+        data = json.loads(path.read_text())
+        self.assertEqual(data['plates'][0]['index'], 1)
+        self.assertEqual(data['plates'][0]['id'], 'Bee SB.gcode.3mf')
+        self.assertNotIn(str(self.home), path.read_text())
 
 
 class PresetTests(unittest.TestCase):
