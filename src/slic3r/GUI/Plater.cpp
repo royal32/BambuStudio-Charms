@@ -2990,7 +2990,9 @@ Sidebar::Sidebar(Plater *parent)
         auto* copy_btn = new ScalableButton(p->m_panel_filament_subtitle, wxID_ANY, "tree_copy");
         copy_btn->SetToolTip(_L("Apply first filament preset to all slots"));
         copy_btn->Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& e) {
-            e.Enable(p->combos_filament.size() > 1 && !is_new_project_in_gcode3mf());
+            // UI updates also run inside modal dialogs. Only inspect the
+            // document here; prompting to replace it recursively opens dialogs.
+            e.Enable(p->combos_filament.size() > 1 && !p->plater->using_exported_file());
         });
         copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             if (p->combos_filament.size() < 2 || is_new_project_in_gcode3mf()) return;
