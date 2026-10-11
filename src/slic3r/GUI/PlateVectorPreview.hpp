@@ -72,8 +72,10 @@ struct PlateVectorPreview {
 
     int hit_test(Point p, double tolerance = 0) const
     {
+        // Match painter order: the last region is visible where parts overlap.
         // Exact hits always win over a neighboring region's forgiving edge.
-        for (const auto& region : regions) {
+        for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+            const auto& region = *it;
             bool inside = false;
             for (const auto& ring : region.contours)
                 for (size_t i = 0, k = ring.size() - 1; i < ring.size(); k = i++) {
@@ -86,7 +88,8 @@ struct PlateVectorPreview {
         double nearest = tolerance * tolerance;
         int filament = -1;
         if (tolerance > 0)
-            for (const auto& region : regions)
+            for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+                const auto& region = *it;
                 for (const auto& ring : region.contours)
                     for (size_t i = 0, k = ring.size() - 1; i < ring.size(); k = i++) {
                         const auto a = ring[i], b = ring[k];
@@ -95,6 +98,7 @@ struct PlateVectorPreview {
                         const double ex = p.x - a.x - t * dx, ey = p.y - a.y - t * dy;
                         if (ex * ex + ey * ey < nearest) { nearest = ex * ex + ey * ey; filament = region.filament; }
                     }
+            }
         return filament;
     }
 

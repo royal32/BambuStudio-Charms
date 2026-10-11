@@ -7315,7 +7315,6 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
          const double scale = std::min(size.x / (m_vector_preview->width * 1.08), size.y / (m_vector_preview->height * 1.08));
          gc->Translate((size.x - m_vector_preview->width * scale) / 2, (size.y - m_vector_preview->height * scale) / 2);
          gc->Scale(scale, scale);
-         std::vector<wxGraphicsPath> paths;
          for (const auto& region : m_vector_preview->regions) {
              auto path = gc->CreatePath();
              for (const auto& ring : region.contours) {
@@ -7326,25 +7325,32 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
              wxColour color(region.color);
              if (wxGetApp().app_config->get_bool("use_ams_colors_in_print_preview") &&
                  region.filament < m_vector_colors.size() && m_vector_colors[region.filament].IsOk()) color = m_vector_colors[region.filament];
+             const bool hovered = region.filament == m_hover_filament;
+             // Isolate this region's alpha, including its holes. ATOP keeps the
+             // centered outline inside that mask; subsequent regions obscure
+             // it just as they obscure the model underneath them.
+             if (hovered) gc->BeginLayer(1.0);
              gc->SetBrush(wxBrush(color));
              gc->FillPath(path, wxODDEVEN_RULE);
-             paths.push_back(path);
-         }
-         // Two contrasting strokes stay visible on both white and black parts.
-         // Build moving dashes explicitly: wx 3.1 has no portable dash offset.
-         for (size_t i = 0; i < paths.size(); ++i) {
-             if (m_vector_preview->regions[i].filament != m_hover_filament) continue;
+             if (!hovered) continue;
+             if (!gc->SetCompositionMode(wxCOMPOSITION_ATOP)) {
+                 gc->EndLayer();
+                 continue;
+             }
+             // Build moving dashes explicitly: wx 3.1 has no portable dash offset.
              const double pen_width = FromDIP(2) / scale;
              gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(*wxBLACK).Width(pen_width)));
-             gc->StrokePath(paths[i]);
+             gc->StrokePath(path);
              auto ants = gc->CreatePath();
-             for (const auto& ring : m_vector_preview->regions[i].contours)
+             for (const auto& ring : region.contours)
                  for (const auto& dash : PlateVectorPreview::marching_ants(ring, FromDIP(4) / scale, FromDIP(m_ants_phase) / scale)) {
                      ants.MoveToPoint(dash.first.x, dash.first.y);
                      ants.AddLineToPoint(dash.second.x, dash.second.y);
                  }
              gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(*wxWHITE).Width(pen_width)));
              gc->StrokePath(ants);
+             gc->SetCompositionMode(wxCOMPOSITION_OVER);
+             gc->EndLayer();
          }
          return;
      }

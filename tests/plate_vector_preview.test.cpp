@@ -27,6 +27,16 @@ int main(int argc, char** argv)
     assert(p.hit_test({25, 5}) == 4); // identical RGB, different sliced filament
     assert(p.hit_test({15, 15}, .1) == -1);
     assert(p.svg().find("fill-rule=\"evenodd\"") != std::string::npos);
+    auto overlapping = doc;
+    overlapping["regions"] = json::array({
+        {{"filament", 0}, {"color", "#000000"}, {"contours", json::array({ring(1, 1, 15, 15)})}},
+        {{"filament", 1}, {"color", "#FFFF00"}, {"contours", json::array({ring(5, 5, 12, 12), ring(7, 7, 9, 9)})}}
+    });
+    const auto layered = PlateVectorPreview::parse(overlapping);
+    assert(layered.hit_test({6, 6}, 2) == 1); // visible wing wins over hidden body
+    assert(layered.hit_test({8, 8}) == 0); // hole exposes the underlying color
+    assert(layered.hit_test({3, 3}) == 0);
+    assert(layered.hit_test({5, 5.5}, .1) == 1); // exact shared edge follows paint order
     const std::vector<PlateVectorPreview::Point> square{{0, 0}, {10, 0}, {10, 10}, {0, 10}, {0, 10}};
     const auto ants = PlateVectorPreview::marching_ants(square, 4, 0);
     const auto shifted = PlateVectorPreview::marching_ants(square, 4, 2);
