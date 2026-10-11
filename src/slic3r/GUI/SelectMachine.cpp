@@ -1,4 +1,5 @@
 #include "SelectMachine.hpp"
+#include "PlateVectorPreview.hpp"
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -47,6 +48,8 @@
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dcgraph.h>
+#include <wx/dcbuffer.h>
+#include <wx/graphics.h>
 #include <wx/mstream.h>
 #include <miniz.h>
 #include <algorithm>
@@ -73,6 +76,8 @@
 #define S_RACK_NOZZLE_SUGEEST_RESLICE_FILA _L("Please re-slice to avoid filament waste.")
 
 namespace Slic3r { namespace GUI {
+
+std::vector<pPresetFilaInfo> sCollectPresetFilamentInfo();
 
 wxDEFINE_EVENT(EVT_SWITCH_PRINT_OPTION, wxCommandEvent);
 wxDEFINE_EVENT(EVT_UPDATE_USER_MACHINE_LIST, wxCommandEvent);
@@ -228,8 +233,9 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     m_scroll_area              = new wxScrolledWindow(this);
     m_scroll_area->SetScrollRate(0, 20);
     m_scroll_area->SetBackgroundColour(m_colour_def_color);
-    m_scroll_area->SetMinSize(wxSize(FromDIP(700), FromDIP(600)));
-    m_scroll_area->SetMaxSize(wxSize(FromDIP(700), FromDIP(600)));
+    const int preview_size = wxDisplay(this).GetClientArea().width >= FromDIP(920) ? 360 : 240;
+    m_scroll_area->SetMinSize(wxSize(FromDIP(preview_size + 480), FromDIP(600)));
+    m_scroll_area->SetMaxSize(wxSize(FromDIP(preview_size + 480), FromDIP(600)));
 
     m_line_top = new wxPanel(m_scroll_area, wxID_ANY, wxDefaultPosition, wxSize(-1, 1), wxTAB_TRAVERSAL);
     m_line_top->SetBackgroundColour(wxColour(166, 169, 170));
@@ -264,13 +270,33 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
 
     auto m_panel_image = new wxPanel(m_basic_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_image->SetBackgroundColour(m_colour_def_color);
-    m_sizer_thumbnail = new wxBoxSizer(wxHORIZONTAL);
+    m_sizer_thumbnail = new wxBoxSizer(wxVERTICAL);
     m_thumbnailPanel = new ThumbnailPanel(m_panel_image);
-    m_thumbnailPanel->SetSize(wxSize(FromDIP(198), FromDIP(198)));
-    m_thumbnailPanel->SetMinSize(wxSize(FromDIP(198), FromDIP(198)));
-    m_thumbnailPanel->SetMaxSize(wxSize(FromDIP(198), FromDIP(198)));
+    m_thumbnailPanel->SetSize(wxSize(FromDIP(preview_size), FromDIP(preview_size)));
+    m_thumbnailPanel->SetMinSize(wxSize(FromDIP(preview_size), FromDIP(preview_size)));
+    m_thumbnailPanel->SetMaxSize(wxSize(FromDIP(preview_size), FromDIP(preview_size)));
     m_thumbnailPanel->SetBackgroundColour(*wxWHITE);
+    m_thumbnailPanel->on_filament_clicked = [this](int id) {
+        auto it = std::find_if(m_materialList.begin(), m_materialList.end(), [id](const auto& entry) { return entry.second->id == id; });
+        if (m_print_type == PrintFromType::FROM_NORMAL && it != m_materialList.end()) {
+            const auto anchor = wxGetMousePosition();
+            open_material_mapping(it->second->item, sCollectPresetFilamentInfo(), id, &anchor);
+        }
+    };
+    m_thumbnailPanel->filament_tooltip = [this](int id) {
+        auto it = std::find_if(m_materialList.begin(), m_materialList.end(), [id](const auto& entry) { return entry.second->id == id; });
+        if (it == m_materialList.end()) return wxString();
+        const auto* item = it->second->item;
+        wxString label = wxString::Format(_L("Filament %d"), id + 1);
+        if (!item->m_ams_name.empty()) label += " → " + item->m_ams_name;
+        return label + "\n" + _L("Click to choose an AMS slot. All regions using this filament change together.");
+    };
     m_sizer_thumbnail->Add(m_thumbnailPanel, 0, wxALIGN_CENTER, 0);
+    m_thumbnail_hint = new wxStaticText(m_panel_image, wxID_ANY, _L("Click a color to choose an AMS slot"));
+    m_thumbnail_hint->SetFont(Label::Body_12);
+    m_thumbnail_hint->Wrap(FromDIP(preview_size));
+    m_thumbnail_hint->Hide();
+    m_sizer_thumbnail->Add(m_thumbnail_hint, 0, wxALIGN_CENTER | wxTOP, FromDIP(8));
     m_panel_image->SetSizer(m_sizer_thumbnail);
     m_panel_image->Layout();
 
@@ -4748,6 +4774,14 @@ void SelectMachineDialog::on_material_item_clicked(MaterialItem* item,
                                                    int used_filament_idx,
                                                    wxMouseEvent& e)
 {
+    open_material_mapping(item, preset_fila_infos, used_filament_idx);
+}
+
+void SelectMachineDialog::open_material_mapping(MaterialItem* item,
+                                                const std::vector<pPresetFilaInfo>& preset_fila_infos,
+                                                int used_filament_idx,
+                                                const wxPoint* anchor)
+{
     if (!item->m_enable || !m_check_flag || m_print_status == PrintDialogStatus::PrintStatusUnsupportedPrinter) {
         return;/*STUDIO-11301*/
     }
@@ -4764,9 +4798,6 @@ void SelectMachineDialog::on_material_item_clicked(MaterialItem* item,
     m_current_filament_id = used_filament_idx;
     item->on_selected();
 
-    auto    mouse_pos = ClientToScreen(e.GetPosition());
-    wxPoint rect = item->ClientToScreen(wxPoint(0, 0));
-
     // update ams data
     DeviceManager* dev_manager = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev_manager) return;
@@ -4782,6 +4813,7 @@ void SelectMachineDialog::on_material_item_clicked(MaterialItem* item,
             m_mapping_popup.set_show_type(get_filament_mapping_show_type(obj_, used_filament_idx));
             m_mapping_popup.update(obj_, m_ams_mapping_result, use_dynamic_nozzle_map(), m_print_type);
             m_mapping_popup.Popup();
+            if (anchor) m_mapping_popup.Position(*anchor, wxSize(0, FromDIP(8)));
         }
     }
 }
@@ -5209,6 +5241,9 @@ void SelectMachineDialog::change_default_normal(int old_filament_id, wxColour te
 void SelectMachineDialog::set_default_normal(const ThumbnailData &data)
 {
     update_page_turn_state(false);
+    m_thumbnailPanel->load_vector_preview(m_plater->get_3mf_filename(), m_plater->get_partplate_list().get_curr_plate_index() + 1);
+    m_thumbnailPanel->set_vector_colors(m_cur_colors_in_thumbnail);
+    m_thumbnail_hint->Show(m_thumbnailPanel->has_vector_preview());
     if (data.is_valid()) {
         wxImage image(data.width, data.height);
         image.InitAlpha();
@@ -5220,7 +5255,8 @@ void SelectMachineDialog::set_default_normal(const ThumbnailData &data)
                 image.SetAlpha((int) c, (int) r, px[3]);
             }
         }
-        image = image.Rescale(FromDIP(198), FromDIP(198));
+        const auto size = m_thumbnailPanel->GetClientSize();
+        image = image.Rescale(size.x, size.y, wxIMAGE_QUALITY_HIGH);
         m_thumbnailPanel->set_thumbnail(image);
     }
 
@@ -5292,6 +5328,8 @@ static wxSize s_get_full_resolution()
 
 void SelectMachineDialog::set_default_from_sdcard()
 {
+    m_thumbnailPanel->clear_vector_preview();
+    m_thumbnail_hint->Hide();
     DeviceManager *dev_manager = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev_manager) return;
     MachineObject *obj_ = dev_manager->get_selected_machine();
@@ -5307,7 +5345,8 @@ void SelectMachineDialog::set_default_from_sdcard()
     if (data.pixels.size() > 0) {
         wxMemoryInputStream mis((unsigned char*)data.pixels.data(), data.pixels.size());
         wxImage image = wxImage(mis);
-        image = image.Rescale(FromDIP(198), FromDIP(198));
+        const auto size = m_thumbnailPanel->GetClientSize();
+        image = image.Rescale(size.x, size.y, wxIMAGE_QUALITY_HIGH);
         m_thumbnailPanel->set_thumbnail(image);
     }
 
@@ -7187,15 +7226,38 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
      SetDoubleBuffered(true);
 #endif //__WINDOWS__
 
-     SetBackgroundStyle(wxBG_STYLE_CUSTOM);
-     wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
-     m_staticbitmap    = new wxStaticBitmap(parent, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize);
+     SetBackgroundStyle(wxBG_STYLE_PAINT);
      m_background_bitmap = ScalableBitmap(this,"thumbnail_grid",256);
-     sizer->Add(m_staticbitmap, 1, wxEXPAND, 0);
      Bind(wxEVT_PAINT, &ThumbnailPanel::OnPaint, this);
-     SetSizer(sizer);
-     Layout();
-     Fit();
+     Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
+         const int id = filament_at(e.GetPosition());
+         if (id != m_hover_filament) {
+             m_hover_filament = id;
+             SetCursor(id >= 0 ? wxCURSOR_HAND : wxCURSOR_ARROW);
+             if (id >= 0 && filament_tooltip) SetToolTip(filament_tooltip(id));
+             else UnsetToolTip();
+             Refresh();
+         }
+     });
+     Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent&) {
+         m_hover_filament = -1;
+         SetCursor(wxCURSOR_ARROW);
+         UnsetToolTip();
+         Refresh();
+     });
+     auto pressed_filament = std::make_shared<int>(-1);
+     Bind(wxEVT_LEFT_DOWN, [this, pressed_filament](wxMouseEvent& e) {
+         *pressed_filament = filament_at(e.GetPosition());
+     });
+     Bind(wxEVT_LEFT_UP, [this, pressed_filament](wxMouseEvent& e) {
+         const int id = filament_at(e.GetPosition());
+         const int pressed = *pressed_filament;
+         *pressed_filament = -1;
+         // Opening a transient popup on mouse-down can immediately dismiss it
+         // when that same click releases outside the newly opened popup.
+         if (id >= 0 && id == pressed && on_filament_clicked) on_filament_clicked(id);
+     });
+     Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { Refresh(); e.Skip(); });
  }
 
  void ThumbnailPanel::set_thumbnail(wxImage &img)
@@ -7206,7 +7268,14 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
      wxMemoryDC dc;
      bitmap_with_background.Create(wxSize(m_bitmap.GetWidth(), m_bitmap.GetHeight()));
      dc.SelectObject(bitmap_with_background);
-     dc.DrawBitmap(m_background_bitmap.bmp(), 0, 0);
+     dc.SetBackground(wxBrush(GetBackgroundColour()));
+     dc.Clear();
+     const auto& grid = m_background_bitmap.bmp();
+     const int tile_w = std::max(1, wxRound(grid.GetScaledWidth()));
+     const int tile_h = std::max(1, wxRound(grid.GetScaledHeight()));
+     for (int y = 0; y < m_bitmap.GetHeight(); y += tile_h)
+         for (int x = 0; x < m_bitmap.GetWidth(); x += tile_w)
+             dc.DrawBitmap(grid, x, y);
      dc.DrawBitmap(m_bitmap, 0, 0);
      dc.SelectObject(wxNullBitmap);
      Refresh();
@@ -7214,11 +7283,46 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
 
  void ThumbnailPanel::OnPaint(wxPaintEvent& event) {
 
-     wxPaintDC dc(this);
+     wxAutoBufferedPaintDC dc(this);
+     dc.SetBackground(wxBrush(GetBackgroundColour()));
+     dc.Clear();
      render(dc);
  }
 
  void ThumbnailPanel::render(wxDC& dc) {
+
+     if (m_vector_preview) {
+         std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::CreateFromUnknownDC(dc));
+         if (!gc) return;
+         const auto size = GetClientSize();
+         const double scale = std::min(size.x / (m_vector_preview->width * 1.08), size.y / (m_vector_preview->height * 1.08));
+         gc->Translate((size.x - m_vector_preview->width * scale) / 2, (size.y - m_vector_preview->height * scale) / 2);
+         gc->Scale(scale, scale);
+         std::vector<wxGraphicsPath> paths;
+         for (const auto& region : m_vector_preview->regions) {
+             auto path = gc->CreatePath();
+             for (const auto& ring : region.contours) {
+                 path.MoveToPoint(ring.front().x, ring.front().y);
+                 for (size_t i = 1; i < ring.size(); ++i) path.AddLineToPoint(ring[i].x, ring[i].y);
+                 path.CloseSubpath();
+             }
+             wxColour color(region.color);
+             if (region.filament < m_vector_colors.size() && m_vector_colors[region.filament].IsOk()) color = m_vector_colors[region.filament];
+             gc->SetBrush(wxBrush(color));
+             gc->FillPath(path, wxODDEVEN_RULE);
+             paths.push_back(path);
+         }
+         // Draw hover outlines last, so neighboring regions cannot cover them.
+         for (size_t i = 0; i < paths.size(); ++i) {
+             if (m_vector_preview->regions[i].filament != m_hover_filament) continue;
+             gc->SetBrush(wxBrush(wxColour(0, 174, 66, 55)));
+             gc->FillPath(paths[i], wxODDEVEN_RULE);
+             gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(wxColour(0, 174, 66)).Width(FromDIP(2) / scale)));
+             gc->StrokePath(paths[i]);
+         }
+         return;
+     }
+     if (!m_bitmap.IsOk()) return;
 
      if (wxGetApp().dark_mode() && m_brightness_value < SHOW_BACKGROUND_BITMAP_PIXEL_THRESHOLD) {
          #ifdef __WXMSW__
@@ -7237,6 +7341,55 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
  }
 
  ThumbnailPanel::~ThumbnailPanel() {}
+
+ void ThumbnailPanel::clear_vector_preview()
+ {
+     m_vector_key.clear();
+     m_vector_preview.reset();
+     const int width = GetMinSize().x;
+     if (width > 0) {
+         SetMinSize(wxSize(width, width));
+         SetMaxSize(wxSize(width, width));
+         SetSize(wxSize(width, width));
+     }
+     m_hover_filament = -1;
+     SetCursor(wxCURSOR_ARROW);
+     UnsetToolTip();
+     Refresh();
+ }
+
+ void ThumbnailPanel::load_vector_preview(const std::string& job, int plate_index)
+ {
+     const std::string key = job + "\n" + std::to_string(plate_index);
+     if (key == m_vector_key) return;
+     clear_vector_preview();
+     m_vector_key = key;
+     if (!job.empty()) m_vector_preview = load_plate_vector_preview(job, plate_index);
+     if (m_vector_preview) {
+         const int width = GetMinSize().x;
+         const int height = std::clamp(wxRound(width * m_vector_preview->height / m_vector_preview->width) + FromDIP(24), FromDIP(198), width);
+         SetMinSize(wxSize(width, height));
+         SetMaxSize(wxSize(width, height));
+         SetSize(wxSize(width, height));
+     }
+     Refresh();
+ }
+
+ void ThumbnailPanel::set_vector_colors(const std::vector<wxColour>& colors)
+ {
+     m_vector_colors = colors;
+     Refresh();
+ }
+
+ int ThumbnailPanel::filament_at(const wxPoint& point) const
+ {
+     if (!m_vector_preview) return -1;
+     const auto size = GetClientSize();
+     const double scale = std::min(size.x / (m_vector_preview->width * 1.08), size.y / (m_vector_preview->height * 1.08));
+     if (scale <= 0) return -1;
+     const double x = (size.x - m_vector_preview->width * scale) / 2, y = (size.y - m_vector_preview->height * scale) / 2;
+     return m_vector_preview->hit_test({(point.x - x) / scale, (point.y - y) / scale}, FromDIP(2) / scale);
+ }
 
  PrintOption::PrintOption(wxWindow *parent, wxString title, wxString tips, std::vector<POItem> ops, std::string param)
      : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)

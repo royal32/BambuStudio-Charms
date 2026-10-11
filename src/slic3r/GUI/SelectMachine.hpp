@@ -60,6 +60,8 @@ namespace Slic3r{
 
 namespace Slic3r { namespace GUI {
 
+struct PlateVectorPreview;
+
 std::string get_nozzle_volume_type_cloud_string(NozzleVolumeType nozzle_volume_type);
 void        print_ams_mapping_result(std::vector<FilamentInfo> &result);
 
@@ -255,8 +257,19 @@ public:
     void OnEraseBackground(wxEraseEvent &event);
     void set_thumbnail(wxImage &img);
     void render(wxDC &dc);
+    void load_vector_preview(const std::string& job, int plate_index);
+    void clear_vector_preview();
+    void set_vector_colors(const std::vector<wxColour>& colors);
+    bool has_vector_preview() const { return bool(m_vector_preview); }
+    std::function<void(int)> on_filament_clicked;
+    std::function<wxString(int)> filament_tooltip;
 
 private:
+    int filament_at(const wxPoint& point) const;
+    std::unique_ptr<PlateVectorPreview> m_vector_preview;
+    std::string m_vector_key;
+    std::vector<wxColour> m_vector_colors;
+    int m_hover_filament{-1};
     ScalableBitmap m_background_bitmap;
     wxBitmap       bitmap_with_background;
     int            m_brightness_value{-1};
@@ -387,6 +400,7 @@ protected:
     wxStaticBitmap*                     m_bitmap_next_plate{ nullptr };
     wxStaticBitmap*                     img_amsmapping_tip{nullptr};
     ThumbnailPanel*                     m_thumbnailPanel{ nullptr };
+    wxStaticText*                       m_thumbnail_hint{ nullptr };
     wxPanel*                            m_panel_status{ nullptr };
     wxPanel*                            m_basic_panel;
     wxPanel*                            m_rename_normal_panel{nullptr};
@@ -637,6 +651,10 @@ private:
                                   const std::vector<pPresetFilaInfo>& preset_fila_infos,
                                   int used_filament_idx,
                                   wxMouseEvent &e);
+    void open_material_mapping(MaterialItem* item,
+                               const std::vector<pPresetFilaInfo>& preset_fila_infos,
+                               int used_filament_idx,
+                               const wxPoint* anchor = nullptr);
 
     // option events
     void on_flow_pa_caliation_option_changed(wxCommandEvent& event);

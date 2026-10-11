@@ -538,6 +538,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ModelMall.cpp
     GUI/SelectMachine.hpp
     GUI/SelectMachine.cpp
+    GUI/PlateVectorPreview.hpp
+    GUI/PlateVectorPreview.cpp
     GUI/PrePrintChecker.hpp
     GUI/PrePrintChecker.cpp
     GUI/SelectMachinePop.hpp

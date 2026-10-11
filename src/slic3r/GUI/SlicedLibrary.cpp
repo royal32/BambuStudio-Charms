@@ -5,6 +5,7 @@
 #include "GLToolbar.hpp"
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
+#include "PlateVectorPreview.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 
 #include <wx/base64.h>
@@ -106,10 +107,19 @@ void WebViewPanel::StartSlicedLibraryScan(const std::string& folder)
                     const std::string suffix = ".gcode.3mf";
                     if (lower.size() <= suffix.size() || lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
                     const auto relative = item.path().lexically_relative(root);
+                    std::string preview_stamp;
+                    std::error_code preview_error;
+                    const auto preview_path = fs::u8path(item.path().u8string() + ".preview.json");
+                    const auto preview_size = fs::file_size(preview_path, preview_error);
+                    if (!preview_error) {
+                        const auto modified = fs::last_write_time(preview_path, preview_error);
+                        if (!preview_error) preview_stamp = ":vector:" + std::to_string(preview_size) + ":" + std::to_string(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count());
+                    }
                     entries.push_back({relative.generic_u8string(), item.path().u8string(),
                         filename.substr(0, filename.size() - suffix.size()), relative.parent_path().generic_u8string(), item.file_size(),
                         std::to_string(item.file_size()) + ":" + std::to_string(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(item.last_write_time().time_since_epoch()).count())});
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(item.last_write_time().time_since_epoch()).count()) + preview_stamp});
                 }
                 std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
             }
@@ -220,8 +230,13 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                 if (state->cancelled) return;
                 std::string image;
                 try {
-                    const auto png = bbs_3mf_get_thumbnail(entry.path.c_str());
-                    if (!png.empty()) image = "data:image/png;base64," + std::string(wxBase64Encode(png.data(), png.size()).utf8_string());
+                    if (auto preview = load_plate_vector_preview(entry.path)) {
+                        const auto svg = preview->svg();
+                        image = "data:image/svg+xml;base64," + std::string(wxBase64Encode(svg.data(), svg.size()).utf8_string());
+                    } else {
+                        const auto png = bbs_3mf_get_thumbnail(entry.path.c_str());
+                        if (!png.empty()) image = "data:image/png;base64," + std::string(wxBase64Encode(png.data(), png.size()).utf8_string());
+                    }
                 } catch (const std::exception&) { /* Missing thumbnails do not hide a job. */ }
                 std::lock_guard<std::mutex> lock(state->mutex);
                 state->thumbnails[entry.id + "\n" + entry.stamp] = image;
