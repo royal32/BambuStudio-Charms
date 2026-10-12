@@ -146,7 +146,7 @@ void WKWebView_clearBambulabTokenCookies()
 
 void openFolderForFile(wxString const & file)
 {
-    NSArray *fileURLs = [NSArray arrayWithObjects:wxCFStringRef(file).AsNSString(), /* ... */ nil];
+    NSArray *fileURLs = @[[NSURL fileURLWithPath:wxCFStringRef(file).AsNSString()]];
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:fileURLs];
 }
 

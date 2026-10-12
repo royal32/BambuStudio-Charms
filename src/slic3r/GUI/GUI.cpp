@@ -19,6 +19,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <shlobj.h>
 #include "boost/nowide/convert.hpp"
 #endif
 
@@ -564,6 +565,30 @@ void desktop_open_datadir_folder()
 			// Looks like we're NOT running from AppImage, we'll make no changes to the environment.
 			::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr, nullptr);
 		}
+#endif
+}
+
+bool desktop_reveal_file(const std::string& path)
+{
+#ifdef _WIN32
+    // Use the Shell API so spaces, Unicode and UNC paths remain literal paths.
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return false;
+    PIDLIST_ABSOLUTE item = nullptr;
+    const wxString widepath = from_u8(path);
+    HRESULT result = SHParseDisplayName(widepath.wc_str(), nullptr, &item, 0, nullptr);
+    if (SUCCEEDED(result)) {
+        result = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+        CoTaskMemFree(item);
+    }
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    return SUCCEEDED(result);
+#elif __APPLE__
+    openFolderForFile(from_u8(path));
+    return true;
+#else
+    desktop_open_any_folder(path);
+    return true;
 #endif
 }
 

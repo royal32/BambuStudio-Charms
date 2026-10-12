@@ -45,7 +45,7 @@ window.SlicedLibrary = (function () {
             var card = document.createElement('article');
             card.className = 'SlicedLibraryCard';
             card.tabIndex = 0;
-            card.setAttribute('aria-label', entry.name + '. Right-click to open the source project, delete, or leave feedback.');
+            card.setAttribute('aria-label', entry.name + '. Right-click to open the source project, show files in the file manager, delete, or leave feedback.');
             function context(event) {
                 event.preventDefault();
                 event.stopPropagation();
