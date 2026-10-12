@@ -94,6 +94,8 @@ def sync_projects(root, projects):
             continue
         record = dict(version=1, id=project['id'], name=project['name'], source_sha256=project['source_sha256'],
                       plates=[dict(id=p['filename'], index=p['index'], name=p['name']) for p in project['plates']])
+        source = Path(project['source'])
+        record['source'] = source.relative_to(root).as_posix() if source.is_relative_to(root) else str(source)
         write_json(root, '.charm-library/projects/' + project['id'] + '.json', record)
 
 

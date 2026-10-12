@@ -352,7 +352,15 @@ class LibraryTests(unittest.TestCase):
         data = json.loads(path.read_text())
         self.assertEqual(data['plates'][0]['index'], 1)
         self.assertEqual(data['plates'][0]['id'], 'Bee SB.gcode.3mf')
-        self.assertNotIn(str(self.home), path.read_text())
+        self.assertEqual(data['source'], str(self.source.resolve()))
+
+    def test_source_inside_library_uses_portable_relative_path(self):
+        self.run_update()
+        root = self.lib.shared_root()
+        project = dict(self.entry(), source=str(root / 'Sources/Bee.3mf'))
+        shared.sync_projects(root, {project['id']: project})
+        path = root / '.charm-library/projects' / (project['id'] + '.json')
+        self.assertEqual(json.loads(path.read_text())['source'], 'Sources/Bee.3mf')
 
 
 class PresetTests(unittest.TestCase):

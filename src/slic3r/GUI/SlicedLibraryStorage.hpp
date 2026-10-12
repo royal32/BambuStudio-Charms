@@ -133,6 +133,44 @@ inline std::vector<Json> projects_for(const fs::path& root, const std::string& p
     return projects;
 }
 
+inline bool is_source_project(const fs::path& path)
+{
+    auto name = path.filename().u8string();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+    return name.size() > 4 && name.substr(name.size() - 4) == ".3mf" &&
+        (name.size() < 10 || name.substr(name.size() - 10) != ".gcode.3mf");
+}
+
+// Availability checks can touch a disconnected drive: call this on a worker.
+// Source paths may live outside the library. Relative paths travel with it;
+// machine-local overrides let another computer locate its own source copy.
+inline Json source_projects(const fs::path& root, const std::string& plate, const Json& overrides = Json::object())
+{
+    Json sources = Json::array();
+    auto projects = projects_for(root, plate);
+    if (projects.empty()) projects.push_back({{"id", "plate:" + plate}, {"name", plate},
+        {"plates", Json::array({{{"id", plate}, {"index", 0}}})}});
+    for (const auto& project : projects) {
+        const auto id = project.at("id").get<std::string>();
+        auto source = project.value("source", std::string());
+        if (overrides.contains(id) && overrides.at(id).is_string()) source = overrides.at(id).get<std::string>();
+        fs::path path;
+        bool available = false;
+        if (!source.empty()) {
+            path = fs::u8path(source);
+            if (!path.is_absolute()) path = child(root, source);
+            std::error_code error;
+            available = is_source_project(path) && fs::is_regular_file(path, error);
+        }
+        for (const auto& p : project.at("plates")) if (p.at("id").get<std::string>() == plate) {
+            sources.push_back({{"id", id}, {"name", project.at("name")}, {"path", path.u8string()},
+                {"plate_index", p.at("index")}, {"available", available}});
+            break;
+        }
+    }
+    return sources;
+}
+
 inline std::string leave_feedback(const fs::path& root, const std::string& plate,
                                   const std::string& name, const std::string& note)
 {

@@ -11,6 +11,8 @@
 
 #include <wx/base64.h>
 #include <wx/dirdlg.h>
+#include <wx/filedlg.h>
+#include <wx/choicdlg.h>
 #include <wx/weakref.h>
 #include <wx/menu.h>
 #include <wx/textdlg.h>
@@ -60,6 +62,49 @@ static void send_library_message(WebViewPanel& panel, const LibraryJson& message
     // ASCII JSON also escapes line separators and arbitrary filename characters.
     panel.RunScript(wxString::FromUTF8("window.postMessage(" +
         message.dump(-1, ' ', true, LibraryJson::error_handler_t::replace) + ")"));
+}
+
+static std::string open_library_source(WebViewPanel* parent, LibraryJson sources, const std::string& plate)
+{
+    wxWeakRef<WebViewPanel> weak(parent);
+    if (sources.empty()) sources.push_back({{"id", "plate:" + plate}, {"name", plate},
+        {"path", ""}, {"plate_index", 0}, {"available", false}});
+    size_t selected = 0;
+    if (sources.size() > 1) {
+        wxArrayString choices;
+        for (const auto& source : sources)
+            choices.Add(wxString::FromUTF8(source.at("name").get<std::string>() + " — " + source.at("path").get<std::string>()));
+        wxSingleChoiceDialog dialog(parent, _L("This plate belongs to more than one project. Choose the source to open."),
+            _L("Open source project"), choices);
+        if (dialog.ShowModal() != wxID_OK || !weak) return {};
+        selected = static_cast<size_t>(dialog.GetSelection());
+    }
+    const auto& source = sources.at(selected);
+    auto path = source.at("path").get<std::string>();
+    if (!source.at("available").get<bool>()) {
+        wxFileDialog dialog(parent, _L("Locate the source 3MF project"), "", "",
+            _L("3MF project files (*.3mf)|*.3mf"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dialog.ShowModal() != wxID_OK || !weak) return {};
+        path = std::string(dialog.GetPath().utf8_string());
+        if (!LibraryStorage::is_source_project(fs::u8path(path)))
+            return "Choose an editable 3MF project rather than a sliced .gcode.3mf file.";
+        auto& config = *wxGetApp().app_config;
+        auto overrides = LibraryJson::parse(config.get("sliced_library_source_paths"), nullptr, false);
+        if (!overrides.is_object()) overrides = LibraryJson::object();
+        overrides[source.at("id").get<std::string>()] = path;
+        config.set("sliced_library_source_paths", overrides.dump());
+        config.save();
+    }
+    auto* plater = wxGetApp().plater();
+    if (!plater || !wxGetApp().can_load_project()) return {};
+    if (plater->is_background_process_slicing()) return "Wait for slicing to finish before opening a source project.";
+    // Use the normal editable-document path, including unsaved-change prompts.
+    if (plater->load_project(wxString::FromUTF8(path)) == wxID_CANCEL || !weak) return {};
+    if (plater->get_3mf_filename() != path) return "The source project could not be opened.";
+    const auto index = source.at("plate_index").get<int>() - 1;
+    if (index >= 0 && index < plater->get_partplate_list().get_plate_count()) plater->select_plate(index);
+    wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
+    return {};
 }
 
 void WebViewPanel::StopSlicedLibrary()
@@ -175,6 +220,19 @@ void WebViewPanel::PollSlicedLibrary()
     if (!list.is_null()) send_library_message(*this, list);
     if (!thumbnails.is_null()) send_library_message(*this, thumbnails);
     if (!action.is_null()) {
+        if (action.contains("source_projects")) {
+            wxWeakRef<WebViewPanel> weak(this);
+            CallAfter([weak, state, action] {
+                if (!weak || state->cancelled) return;
+                std::string error;
+                try { error = open_library_source(weak.get(), action.at("source_projects"), action.at("plate").get<std::string>()); }
+                catch (const std::exception& e) { error = std::string("The source project could not be opened: ") + e.what(); }
+                if (!weak) return;
+                weak->m_sliced_library_opening = false;
+                send_library_message(*weak, {{"command", "sliced_library_action_done"}, {"error", error}});
+            });
+            return;
+        }
         m_sliced_library_opening = false;
         send_library_message(*this, {{"command", "sliced_library_action_done"},
             {"notice", action.value("notice", "")}, {"error", action.value("error", "")}});
@@ -245,11 +303,13 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
         CallAfter([this, weak, state, entry, done]() -> bool {
             if (!weak) return true;
             wxMenu menu;
+            const int source = menu.Append(wxID_ANY, _L("Open source project"))->GetId();
+            menu.AppendSeparator();
             const int remove = menu.Append(wxID_ANY, _L("Delete from library…"))->GetId();
             const int feedback = menu.Append(wxID_ANY, _L("Leave feedback…"))->GetId();
             const auto selection = GetPopupMenuSelectionFromUser(menu, ScreenToClient(wxGetMousePosition()));
             if (!weak) return true;
-            if (selection != remove && selection != feedback) { done(); return true; }
+            if (selection != source && selection != remove && selection != feedback) { done(); return true; }
             std::string note;
             if (selection == remove) {
                 MessageDialog dialog(this, wxString::FromUTF8("Delete “" + entry.name + "” from the library?\n\n"
@@ -259,7 +319,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                 const auto answer = dialog.ShowModal();
                 if (!weak) return true;
                 if (answer != wxID_YES) { done(); return true; }
-            } else {
+            } else if (selection == feedback) {
                 wxTextEntryDialog dialog(this, wxString::FromUTF8("What needs changing about “" + entry.name + "”?\n"
                     "Your note will be saved in the shared library’s Library Feedback folder."),
                     _L("Leave feedback"), "", wxOK | wxCANCEL | wxTE_MULTILINE);
@@ -276,16 +336,21 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                 }
             }
             if (!weak) return true;
+            auto overrides = LibraryJson::parse(wxGetApp().app_config->get("sliced_library_source_paths"), nullptr, false);
+            if (!overrides.is_object()) overrides = LibraryJson::object();
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 state->action_running = true;
             }
             m_sliced_library_timer->Start(200);
-            std::thread([state, entry, note, deleting = selection == remove] {
+            std::thread([state, entry, note, overrides, opening = selection == source, deleting = selection == remove] {
                 LibraryJson result = {{"rescan", deleting}};
                 try {
                     const auto root = fs::canonical(fs::u8path(state->folder));
-                    if (deleting) {
+                    if (opening) {
+                        result["source_projects"] = LibraryStorage::source_projects(root, entry.id, overrides);
+                        result["plate"] = entry.id;
+                    } else if (deleting) {
                         LibraryStorage::remove_plate(root, entry.id, entry.name, entry.stamp);
                         result["notice"] = "Plate deleted and excluded from future updates. Other plates will still refresh.";
                     } else {
