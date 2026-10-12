@@ -6,15 +6,16 @@ object's front face, not a trace of a low-resolution PNG. Later colored parts
 carve earlier parts, and negative volumes cut holes. Painted meshes are
 explicitly rejected rather than silently losing their filament assignments.
 
-The .gcode.3mf is read only. Keep its .preview.json sidecar beside it. The SVG
-is useful for inspection; Studio renders the validated JSON geometry directly.
+The JSON geometry is embedded inside the .gcode.3mf. Studio generates SVG
+artwork from it when needed; there are no external preview files.
 """
 import argparse
-import hashlib
 import json
+import os
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
+from charm_library import artwork
 
 import numpy as np
 from shapely import affinity, make_valid
@@ -154,8 +155,8 @@ def generate(project, job, plate_index, face="bottom"):
         raise ValueError("No front-face geometry")
     bounds = unary_union(list(regions.values())).bounds
     xmin, ymin, xmax, ymax = bounds
-    result = {"version": 1, "plate_index": plate_index, "width": round(xmax - xmin, 5), "height": round(ymax - ymin, 5),
-              "source_md5": hashlib.md5(job.read_bytes()).hexdigest(), "source_project": project.name,
+    result = {"version": 2, "plate_index": plate_index, "width": round(xmax - xmin, 5), "height": round(ymax - ymin, 5),
+              "print_sha256": artwork.fingerprint(job, plate_index), "source_project": project.name,
               "view": face, "section_depth_mm": depth, "regions": []}
     for filament, shape in sorted(regions.items()):
         if sliced_colors.get(filament) != config["filament_colour"][filament][:7].upper():
@@ -186,10 +187,14 @@ if __name__ == "__main__":
     parser.add_argument("job", type=Path)
     parser.add_argument("--plate", type=int, required=True)
     parser.add_argument("--face", choices=["bottom", "top"], default="bottom")
-    parser.add_argument("--output", type=Path, help="Output basename; defaults to the sliced job path")
     args = parser.parse_args()
     preview = generate(args.project, args.job, args.plate, args.face)
-    output = str(args.output or args.job)
-    Path(output + ".preview.json").write_text(json.dumps(preview, separators=(",", ":")) + "\n")
-    Path(output + ".preview.svg").write_text(svg(preview) + "\n")
-    print(json.dumps({"job": args.job.name, "regions": len(preview["regions"]), "points": sum(len(r) for s in preview["regions"] for r in s["contours"]), "output": output}))
+    import tempfile
+    with tempfile.NamedTemporaryFile(prefix='.preview-', suffix='.3mf', dir=args.job.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        artwork.write(args.job, temporary, preview)
+        os.replace(temporary, args.job)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print(json.dumps({"job": args.job.name, "regions": len(preview["regions"]), "points": sum(len(r) for s in preview["regions"] for r in s["contours"])}))

@@ -1,9 +1,11 @@
 # Plate vector previews
 
-The sliced library and Send print job dialog use an optional app-only sidecar:
-`Example.gcode.3mf.preview.json`, beside `Example.gcode.3mf`. The sliced archive,
-its G-code, and its standard printer thumbnails are never modified. Copy the JSON
-along with its job when moving a library. The accompanying SVG is for inspection.
+The sliced library and Send print job dialog read app artwork embedded at
+`Metadata/charm_library/preview.json` inside each `.gcode.3mf`. Copying a sliced
+file carries its clickable vector preview with it. Studio generates SVG on demand;
+no companion JSON or SVG is needed. Printer PNGs, G-code and print settings remain
+unchanged. Source-project links, exclusions and feedback remain shared library
+records in `.charm-library`, alongside editable projects in `Projects`.
 
 Generate a preview from the **same prepared project and plate** that produced the
 sliced job:
@@ -19,17 +21,22 @@ object 0.1 mm inside its bottom face (or top face with `--face top`), applies
 prepared-part carving priority and negative cuts, and generates disjoint colored
 regions with holes. This is intended for flat, face-down charms and eyewear.
 It is not a general 3D hidden-surface renderer. Painted color segmentation is
-rejected; such jobs continue to use their standard thumbnail. Check the SVG
-against the project before publishing new sidecars.
+rejected; such jobs continue to use their standard thumbnail. Review the preview
+against the project before publishing new plates. The command stages a new archive
+and atomically replaces the job only after verifying its embedded artwork.
 
-Version 1 JSON contains `plate_index` (one based), `width`, `height` in millimeters,
-`source_md5` of the whole sliced archive, and `regions`. Each region has a zero-based
+Version 2 JSON contains `plate_index` (one based), `width`, `height` in millimeters,
+`print_sha256`, and `regions`. Each region has a zero-based
 `filament`, a hex `color`, and `contours` of `[x,y]` points in screen coordinates.
 Contours use even-odd filling, preserving lens openings and other holes.
 
-Studio validates the source digest and plate index before using the artwork.
-Missing, malformed, oversized or stale sidecars fall back to the standard PNG.
-Library Refresh also detects sidecar additions, edits and removals. The native
+The fingerprint hashes the sorted required members `Metadata/plate_N.gcode`,
+`Metadata/project_settings.config` and `Metadata/slice_info.config`. Each member
+contributes its UTF-8 name, a NUL byte, its unsigned 64-bit big-endian uncompressed
+length, then its bytes. ZIP order, timestamps, compression and preview changes do
+not affect this identity. Studio validates the fingerprint and plate index before
+using artwork. Missing, malformed, oversized or stale artwork falls back to the
+standard PNG. Library Refresh detects changes to the sliced archive. The native
 dialog draws vector paths at display resolution, uses those same contours for
 hit testing, and routes clicks through the existing AMS mapping controls. An
 exact region hit takes priority over the two-DIP tolerance near an edge. Regions
@@ -42,10 +49,11 @@ Preferences → 3D Settings → **Use AMS slot colors in print previews** contro
 live recoloring in the print dialog (both vector and PNG previews). It defaults
 to disabled, preserving the original model colors while slot mapping still works.
 
-Run the geometry/picking tests (add sidecar paths to test generated plates):
+Run the geometry, archive and picking tests:
 
 ```sh
 c++ -std=c++17 -Isrc tests/plate_vector_preview.test.cpp -o /tmp/vector-preview-test
-/tmp/vector-preview-test '/path/Example.gcode.3mf.preview.json'
+/tmp/vector-preview-test
 python3 -m unittest discover -s tests -p 'test_vector_preview_generator.py'
+python3 -m unittest discover -s tests -p 'test_embedded_artwork.py'
 ```

@@ -25,21 +25,22 @@ struct PlateVectorPreview {
     };
     int plate_index{0}; // one based, as stored in the sliced archive
     double width{0}, height{0};
-    std::string source_md5;
+    std::string print_sha256;
     std::vector<Region> regions;
 
     static PlateVectorPreview parse(const nlohmann::json& j)
     {
         PlateVectorPreview result;
-        if (j.at("version").get<int>() != 1) throw std::runtime_error("Unsupported vector preview");
+        if (!j.at("version").is_number_integer() || j.at("version").get<int>() != 2) throw std::runtime_error("Unsupported vector preview");
         result.plate_index = j.at("plate_index").get<int>();
         result.width = j.at("width").get<double>();
         result.height = j.at("height").get<double>();
-        result.source_md5 = j.at("source_md5").get<std::string>();
+        result.print_sha256 = j.at("print_sha256").get<std::string>();
         const auto is_hex = [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
         if (result.plate_index < 1 || !std::isfinite(result.width) || !std::isfinite(result.height) ||
             result.width <= 0 || result.height <= 0 || result.width > 10000 || result.height > 10000 ||
-            result.source_md5.size() != 32 || !std::all_of(result.source_md5.begin(), result.source_md5.end(), is_hex))
+            result.print_sha256.size() != 64 || !std::all_of(result.print_sha256.begin(), result.print_sha256.end(), [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }))
             throw std::runtime_error("Invalid vector preview bounds or identity");
         size_t point_count = 0;
         const auto& regions = j.at("regions");
@@ -146,7 +147,7 @@ struct PlateVectorPreview {
     }
 };
 
-// Returns null for missing, stale or malformed sidecars. Never changes a job.
+// Returns null for missing, stale or malformed embedded artwork. Never changes a job.
 std::unique_ptr<PlateVectorPreview> load_plate_vector_preview(const std::string& job, int plate_index = -1);
 
 }}

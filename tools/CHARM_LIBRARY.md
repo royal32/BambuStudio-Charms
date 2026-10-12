@@ -38,12 +38,12 @@ Saving changes to a named project triggers an update by content hash. Refreshes 
 
 - A second run with unchanged inputs does no slicing and leaves print files, previews and the manifest unchanged. An operation log is refreshed.
 - Source content, resolved profile contents, slicer executable, preparation/export code, plate-name overrides and destination changes invalidate the slice. Content hashes are used instead of timestamps.
-- A vector-generator change or missing sidecar regenerates artwork without slicing. **Previews** refuses projects that first require a slice update; `--force` explicitly retries otherwise unchanged previews.
+- A vector-generator change regenerates embedded artwork without slicing. **Previews** refuses projects that first require a slice update; `--force` explicitly retries otherwise unchanged previews.
 - Every managed output is hash-checked. Edited files block that project. Untracked filenames are preserved. Missing managed files can be rebuilt. Shared outputs are protected against differing replacements.
 - Each project is staged and validated before publication. Replaced/retired managed files are backed up under `.charm-library/archive/`. A publication journal recovers interrupted copies on the next mutating operation. An operation lock prevents competing runs. Cancel with Ctrl-C or F9; completed projects remain usable.
 - Missing source folders/files never cause print files to be deleted. Failures retain staged inputs, slicer commands and `slice.log` under `.charm-library/work/`. Successful runs also retain a full editable `prepared.3mf` there; edit the linked named project in **Projects/** for future refreshes.
 
-Vector sidecars preserve the original printer-compatible PNG thumbnails and G-code. Negative-volume holes are included in supported flat previews. Existing reviewed PNG fallbacks are retained when rebuilding. Unsupported painting, inconsistent filament assignments, or a plate taller than 20 mm produce a reported PNG fallback. Review new previews for geometry that is not well represented by a flat front-face section.
+Each sliced archive contains its vector artwork in `Metadata/charm_library/preview.json` (format version 2). Studio generates SVG from that geometry on demand; there are no JSON or SVG companions to move. The preview is bound by SHA-256 to the plate G-code, project settings and slice information, independent of ZIP compression or timestamps. Invalid or absent artwork falls back to the original printer-compatible PNG thumbnails. Preview updates preserve all G-code, print settings and PNGs. Negative-volume holes are included in supported flat previews. Existing reviewed PNG fallbacks are retained when rebuilding. Unsupported painting, inconsistent filament assignments, or a plate taller than 20 mm produce a reported PNG fallback. Review new previews for geometry that is not well represented by a flat front-face section.
 
 Keep `.charm-library/` backed up: it contains the source snapshots, configuration, manifest, saved projects and backups. These local files are ignored by Git. Never delete the manifest to “start fresh” against an existing collection: it owns the integrity and replacement records.
 
@@ -51,7 +51,7 @@ Keep `.charm-library/` backed up: it contains the source snapshots, configuratio
 
 Right-click a sliced library card in Studio (or focus it and press Shift-F10):
 
-- **Delete from library…** removes that plate and its vector sidecars after confirmation. Its plate identity is excluded from future updates, including forced rebuilds and preview regeneration. **Other plates in the same 3MF still update.** The editable source remains unchanged. Copies are retained in the library's hidden `.charm-library/removed/` folder.
+- **Delete from library…** removes that self-contained plate archive after confirmation. Its plate identity is excluded from future updates, including forced rebuilds and preview regeneration. **Other plates in the same 3MF still update.** The editable source remains unchanged. Copies are retained in the library's hidden `.charm-library/removed/` folder.
 - **Leave feedback…** saves a dated Markdown note identifying the plate and source project in **Library Feedback/** beside the print files. No account, email or messaging service is involved. Use `./charm-library library feedback` to read notes, or open the folder in Finder. Move completed notes into an `Archive/` subfolder to clear the active list.
 - **Open source project** opens the editable 3MF used by the refresh tool and selects the matching plate. Normal unsaved-change prompts apply. Save edits there, then run Library → Update to refresh the sliced files. If multiple projects publish the same plate, Studio asks which one to open. If the source has moved or is on another computer, locate its 3MF once; Studio remembers that location on this computer. This only changes where Studio opens the project; use the console's `use-source` command to change the refresh tool's input as well.
 - **Show sliced file in Finder / File Explorer** reveals the selected `.gcode.3mf` in its folder. **Show source project in Finder / File Explorer** reveals the linked editable project, using the same project chooser and remembered locations as Open source project. These actions leave the currently open Studio project intact.
@@ -91,6 +91,7 @@ Normal launches build offline from the pinned Cargo lockfile. Setup installs Num
 ```sh
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p 'test_charm_library*.py'
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_vector_preview_generator.py
+PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_embedded_artwork.py
 node --test tests/sliced_library.test.cjs
 c++ -std=c++17 -Isrc tests/sliced_library_storage.test.cpp -o /tmp/sliced-library-storage-test
 /tmp/sliced-library-storage-test

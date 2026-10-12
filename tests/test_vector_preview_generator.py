@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
@@ -10,6 +11,7 @@ import zipfile
 import numpy as np
 from shapely.geometry import Point, Polygon
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 spec = importlib.util.spec_from_file_location("vector_preview", Path(__file__).resolve().parents[1] / "tools/generate_plate_vector_preview.py")
 preview = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(preview)
@@ -66,6 +68,8 @@ def negative_volume_fixture(folder, negative_first, cutter_width=2):
         archive.writestr('Metadata/model_settings.config', ET.tostring(settings))
         archive.writestr('Metadata/project_settings.config', json.dumps({'filament_colour': ['#FF0000', '#FFFFFF']}))
     with zipfile.ZipFile(job, 'w') as archive:
+        archive.writestr('Metadata/plate_1.gcode', 'G1 X0 Y0')
+        archive.writestr('Metadata/project_settings.config', '{}')
         archive.writestr('Metadata/slice_info.config', '<config><filament id="1" color="#FF0000" used_g="1"/>'
                          '<filament id="2" color="#FFFFFF" used_g="1"/></config>')
     return project, job

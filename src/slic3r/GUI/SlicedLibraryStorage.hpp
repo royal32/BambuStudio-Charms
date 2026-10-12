@@ -203,11 +203,8 @@ inline void remove_plate(const fs::path& root, const std::string& plate, const s
     if (!fs::is_regular_file(job)) throw std::runtime_error("This plate is no longer available. Refresh and try again.");
     const auto stamp = std::to_string(fs::file_size(job)) + ":" + std::to_string(
         std::chrono::duration_cast<std::chrono::nanoseconds>(fs::last_write_time(job).time_since_epoch()).count());
-    if (expected_stamp != stamp && expected_stamp.compare(0, stamp.size() + 8, stamp + ":vector:") != 0)
+    if (expected_stamp != stamp)
         throw std::runtime_error("This plate changed since the last refresh. Refresh before deleting it.");
-    // Validate every companion before recording the action. The original source
-    // project is never moved or edited.
-    for (const auto& suffix : {"", ".preview.json", ".preview.svg"}) child(root, plate + suffix);
     const auto id = unique_id();
     const auto removed = ".charm-library/removed/" + id;
     Json targets = Json::array();
@@ -221,12 +218,10 @@ inline void remove_plate(const fs::path& root, const std::string& plate, const s
     // Exclude first: a refresh must never recreate a plate whose move failed or
     // whose removal is still syncing from the other Mac.
     write(root, ".charm-library/events/" + id + ".json", record.dump(2) + "\n");
-    for (const auto& suffix : {"", ".preview.json", ".preview.svg"}) {
-        const auto source = child(root, plate + suffix);
-        if (!fs::exists(source)) continue;
-        const auto target = child(root, removed + "/" + plate + suffix);
+    {
+        const auto target = child(root, removed + "/" + plate);
         fs::create_directories(target.parent_path());
-        fs::rename(source, target);
+        fs::rename(job, target);
     }
 }
 

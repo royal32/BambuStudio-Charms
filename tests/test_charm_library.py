@@ -12,7 +12,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from charm_library.engine import Library, atomic_json, digest, signature
 from charm_library.prepare import resolve_presets
-from charm_library import projects, shared
+from charm_library import artwork, projects, shared
 
 
 class LibraryTests(unittest.TestCase):
@@ -50,12 +50,18 @@ class LibraryTests(unittest.TestCase):
             result = []
             for plate in plan['plates']:
                 path = folder / f"plate-{plate['index']}.gcode.3mf"
-                path.write_bytes(b'sliced:' + source + self.recipe.encode() + str(plate['index']).encode())
+                with zipfile.ZipFile(path, 'w') as z:
+                    z.writestr(f"Metadata/plate_{plate['index']}.gcode", b'sliced:' + source + self.recipe.encode())
+                    z.writestr('Metadata/project_settings.config', '{}')
+                    z.writestr('Metadata/slice_info.config', '<config/>')
                 result.append((copy.deepcopy(plate), path))
             return result
 
         def preview(_, prepared, job, plate, policy='auto'):
-            return ({'.preview.json': self.art, '.preview.svg': self.art}, '') if policy == 'auto' else ({}, policy)
+            if policy != 'auto':
+                return None, policy
+            return dict(version=2, plate_index=plate, width=10, height=10, print_sha256=artwork.fingerprint(job, plate),
+                        algorithm=self.art, regions=[dict(filament=0, color='#FFFFFF', contours=[[[0, 0], [10, 0], [10, 10]]])]), ''
 
         for target, function in [('charm_library.engine.Library.recipes', recipes),
                                  ('charm_library.engine.prepare.prepare', prepare),
@@ -96,14 +102,17 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.slices, 3)
         self.assertTrue(list((self.home / 'archive').rglob('*.gcode.3mf')))
 
-    def test_preview_change_and_missing_sidecar_do_not_slice(self):
+    def test_preview_change_rewrites_embedded_art_without_slicing(self):
         self.run_update()
+        job = Path(next(iter(self.lib.files())))
+        with zipfile.ZipFile(job) as z:
+            gcode = z.read('Metadata/plate_1.gcode')
         self.art = 'new vector algorithm'
         self.assertEqual(self.action(), 'preview')
         self.run_update(previews_only=True)
-        next(Path(p) for p in self.lib.files() if p.endswith('.preview.svg')).unlink()
-        self.assertEqual(self.action(), 'preview')
-        self.run_update()
+        self.assertEqual(artwork.read(job)['algorithm'], self.art)
+        with zipfile.ZipFile(job) as z:
+            self.assertEqual(z.read('Metadata/plate_1.gcode'), gcode)
         self.assertEqual(self.slices, 1)
         self.assertEqual(self.action(), 'skip')
 
@@ -154,9 +163,10 @@ class LibraryTests(unittest.TestCase):
         self.source.write_bytes(b'new source')
         self.run_update()
         self.assertEqual(self.entry()['plates'][0]['preview_fallback'], 'Reviewed non-flat model')
-        self.assertFalse(any(p.endswith('.preview.json') for p in self.lib.files()))
+        self.assertIsNone(artwork.read(next(iter(self.lib.files()))))
 
     def test_partial_publication_recovers_without_reslicing(self):
+        self.plate_count = 2
         self.run_update()
         self.source.write_bytes(b'new source')
         self.art = 'new art'
@@ -254,7 +264,7 @@ class LibraryTests(unittest.TestCase):
                       removed_dir='.charm-library/removed/' + identifier,
                       targets=[dict(project_id=entry['id'], plate_index=index, source_sha256=entry['source_sha256'])])
         shared.write_json(root, '.charm-library/events/' + identifier + '.json', record)
-        for suffix in ('', '.preview.json', '.preview.svg'):
+        for suffix in ('',):
             source = root / (plate['filename'] + suffix)
             if source.exists():
                 target = root / record['removed_dir'] / (plate['filename'] + suffix)
@@ -284,7 +294,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.run_update(), 0)
         self.assertFalse((self.lib.shared_root() / 'Renamed Honey Bee SB.gcode.3mf').exists())
         self.assertEqual(self.run_update(force=True, previews_only=True), 0)
-        self.assertFalse((self.lib.shared_root() / 'Renamed Honey Bee SB.gcode.3mf.preview.json').exists())
+        self.assertFalse((self.lib.shared_root() / 'Renamed Honey Bee SB.gcode.3mf').exists())
         self.assertEqual(self.action(), 'skip')
 
     def test_reinclude_rebuilds_current_source_after_updates_while_excluded(self):
@@ -306,12 +316,12 @@ class LibraryTests(unittest.TestCase):
         self.exclude(identifier='concurrent-new-delete')
         self.assertEqual([r['id'] for r in shared.exclusions(self.lib.shared_root())], ['concurrent-new-delete'])
 
-    def test_restore_untracked_export_recovers_job_and_previews(self):
+    def test_restore_untracked_export_recovers_self_contained_job(self):
         self.run_update()
         record = self.exclude()
         self.lib.state['projects'] = {}
         shared.restore(self.lib, record['plate'])
-        for suffix in ('', '.preview.json', '.preview.svg'):
+        for suffix in ('',):
             recovered = self.lib.shared_root() / (record['plate'] + suffix)
             archived = self.lib.shared_root() / record['removed_dir'] / (record['plate'] + suffix)
             self.assertEqual(digest(recovered), digest(archived))
@@ -446,9 +456,9 @@ class LibraryTests(unittest.TestCase):
         self.run_update()
         canonical = self.lib.shared_root() / self.entry()['plates'][0]['filename']
         self.assertEqual(alias.read_bytes(), canonical.read_bytes())
-        self.assertTrue(Path(str(alias) + '.preview.json').is_file())
+        self.assertIsNotNone(artwork.read(alias))
         self.run_update(force=True, previews_only=True)
-        self.assertTrue(Path(str(alias) + '.preview.json').is_file())
+        self.assertIsNotNone(artwork.read(alias))
         shared.write_json(self.lib.shared_root(), '.charm-library/events/alias-excluded.json',
                           dict(version=1, kind='exclude', id='alias-excluded', plate=alias.name,
                                targets=[dict(project_id=entry['id'], plate_index=1, source_sha256=entry['source_sha256'])]))

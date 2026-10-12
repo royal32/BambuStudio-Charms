@@ -105,10 +105,8 @@ class SlicerIntegrationTests(unittest.TestCase):
             self.assertEqual(len(jobs), 9)
             for job in jobs:
                 validate(job, library.config, presets, single=True)
-                preview = Path(str(job) + '.preview.json')
-                self.assertTrue(preview.exists(), job.name)
-                artwork = json.loads(preview.read_text())
-                self.assertGreater(len(artwork['regions']), 0)
+                from charm_library.artwork import read
+                self.assertGreater(len(read(job)['regions']), 0)
             before = {p: (digest(p), Path(p).stat().st_mtime_ns) for p in library.files()}
             with library.locked():
                 self.assertEqual(library.update(), 0)

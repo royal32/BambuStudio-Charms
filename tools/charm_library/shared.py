@@ -67,10 +67,6 @@ def output_excluded(root, project, path, records):
         relative = str(Path(path).relative_to(root))
     except ValueError:
         return False
-    for suffix in ('.preview.json', '.preview.svg'):
-        if relative.endswith(suffix):
-            relative = relative[:-len(suffix)]
-            break
     if any(r['plate'] == relative for r in records):
         return True
     plates = project['plates'] + [dict(index=p['index'], filename=p['id']) for p in project.get('legacy_plates', [])]
@@ -130,21 +126,18 @@ def restore(library, plate):
             continue
         if not child(root, record['removed_dir'] + '/' + record['plate']).is_file():
             raise ValueError('The recovery copy is unavailable. Allow iCloud to finish syncing before restoring this plate.')
-        for suffix in ('', '.preview.json', '.preview.svg'):
-            source = child(root, record['removed_dir'] + '/' + record['plate'] + suffix)
-            target = child(root, record['plate'] + suffix)
-            if not source.is_file():
-                continue
-            if target.exists():
-                if digest(source) != digest(target):
-                    raise ValueError('Restoration would overwrite a different file: ' + str(target))
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = child(root, record['plate'] + suffix + '.restoring')
-            shutil.copyfile(source, temporary)
-            if digest(temporary) != digest(source):
-                raise ValueError('Restored copy failed verification')
-            temporary.replace(target)
+        source = child(root, record['removed_dir'] + '/' + record['plate'])
+        target = child(root, record['plate'])
+        if target.exists():
+            if digest(source) != digest(target):
+                raise ValueError('Restoration would overwrite a different file: ' + str(target))
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = child(root, record['plate'] + '.restoring')
+        shutil.copyfile(source, temporary)
+        if digest(temporary) != digest(source):
+            raise ValueError('Restored copy failed verification')
+        temporary.replace(target)
     # Re-inclusion is an immutable record, referencing the deletions this user
     # actually saw. It cannot override a concurrent deletion from the other Mac.
     identifier = uuid.uuid4().hex

@@ -163,19 +163,10 @@ void WebViewPanel::StartSlicedLibraryScan(const std::string& folder)
                     if (lower.size() <= suffix.size() || lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
                     const auto relative = item.path().lexically_relative(root);
                     if (removed.count(relative.generic_u8string())) continue;
-                    std::string preview_stamp;
-                    std::error_code preview_error;
-                    const auto preview_path = fs::u8path(item.path().u8string() + ".preview.json");
-                    const auto preview_size = fs::file_size(preview_path, preview_error);
-                    if (!preview_error) {
-                        const auto modified = fs::last_write_time(preview_path, preview_error);
-                        if (!preview_error) preview_stamp = ":vector:" + std::to_string(preview_size) + ":" + std::to_string(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(modified.time_since_epoch()).count());
-                    }
                     entries.push_back({relative.generic_u8string(), item.path().u8string(),
                         filename.substr(0, filename.size() - suffix.size()), relative.parent_path().generic_u8string(), item.file_size(),
                         std::to_string(item.file_size()) + ":" + std::to_string(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(item.last_write_time().time_since_epoch()).count()) + preview_stamp});
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(item.last_write_time().time_since_epoch()).count())});
                 }
                 std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
             }

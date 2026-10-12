@@ -52,10 +52,6 @@ def adopt(library, folder):
             policy = r.get('reason', 'Reviewed PNG fallback') if r.get('status') == 'fallback' and 'Visual review:' in r.get('reason', '') else 'auto'
             item = dict(index=plate['plate'], name=job.name.removesuffix('.gcode.3mf'), filename=job.name,
                         preview_policy=policy, preview_fallback=r.get('reason', '') if r.get('status') != 'ready' else '')
-            for suffix in ('.preview.json', '.preview.svg'):
-                path = Path(str(job) + suffix)
-                if path.is_file():
-                    outputs[str(path)] = digest(path)
             plates.append(item)
         # Snapshot every prepared source into permanent state, including the ten
         # sources previously held in /private/tmp. No historical script is needed

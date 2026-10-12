@@ -6,7 +6,6 @@ import gc
 import hashlib
 import importlib.util
 import json
-import math
 import os
 from pathlib import Path
 import shutil
@@ -15,7 +14,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-from . import geometry, package, prepare, projects, shared
+from . import artwork, geometry, package, prepare, projects, shared
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -104,7 +103,7 @@ class Library:
         recipe = signature({'presets': presets, 'binary': digest(binary), 'version': 1,
                             'implementation': [digest(Path(m.__file__)) for m in (geometry, prepare, package)],
                             'library': str(Path(self.config['library']).expanduser().resolve())})
-        preview_recipe = digest(ROOT / 'tools/generate_plate_vector_preview.py')
+        preview_recipe = signature([digest(ROOT / 'tools/generate_plate_vector_preview.py'), digest(Path(artwork.__file__))])
         return recipe, preview_recipe, presets
 
     def files(self):
@@ -203,7 +202,7 @@ class Library:
             elif any(p.get('excluded', False) and not shared.plate_excluded(old, p, exclusions) for p in old['plates']):
                 action, reason = 'build', 'Previously excluded plate was re-included'
             elif damaged:
-                action = 'preview' if all(p.endswith(('.preview.json', '.preview.svg')) for p in damaged) else 'build'
+                action = 'build'
                 reason = 'Managed output is missing'
             elif force or preview_recipe != old.get('preview_recipe'):
                 action, reason = ('preview', 'Preview update requested') if previews_only or not force else ('build', 'Rebuild requested')
@@ -319,33 +318,19 @@ class Library:
 
     def preview(self, prepared, job, plate, policy='auto'):
         if policy != 'auto':
-            return {}, policy
+            return None, policy
         spec = importlib.util.spec_from_file_location('plate_artwork', ROOT / 'tools/generate_plate_vector_preview.py')
         exporter = importlib.util.module_from_spec(spec)
         gc.disable()
         try:
             spec.loader.exec_module(exporter)
             data = exporter.generate(Path(prepared), Path(job), plate)
-            width, height = data['width'], data['height']
-            if not all(math.isfinite(v) and 0 < v <= 10000 for v in (width, height)):
-                raise ValueError('Invalid vector bounds')
-            points = 0
-            for region in data['regions']:
-                for ring in region['contours']:
-                    if len(ring) < 3:
-                        raise ValueError('Invalid contour')
-                    points += len(ring)
-                    for x, y in ring:
-                        if not (math.isfinite(x) and math.isfinite(y) and -.01 <= x <= width + .01 and -.01 <= y <= height + .01):
-                            raise ValueError('Invalid vector coordinates')
-            raw = json.dumps(data, separators=(',', ':'), allow_nan=False) + '\n'
-            if not data['regions'] or len(data['regions']) > 256 or points > 200000 or len(raw.encode()) > 8 * 1024 * 1024:
-                raise ValueError('Artwork exceeds Studio limits')
-            if data['source_md5'] != hashlib.md5(Path(job).read_bytes()).hexdigest():
-                raise ValueError('Vector source digest mismatch')
-            return {'.preview.json': raw, '.preview.svg': exporter.svg(data) + '\n'}, ''
-        except (ValueError, KeyError, IndexError) as error:
-            return {}, str(error)
+            artwork.validate(data)
+            if data['print_sha256'] != artwork.fingerprint(job, plate):
+                raise ValueError('Vector print digest mismatch')
+            return data, ''
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            return None, str(error)
         finally:
             gc.collect()
             gc.enable()
@@ -358,7 +343,7 @@ class Library:
             entry = copy.deepcopy(old)
             prepared = Path(old['prepared_input'])
             plates = [(copy.deepcopy(p), Path(self.config['library']) / p['filename']) for p in old['plates']]
-            staged = {path: path for path in old['outputs'] if not path.endswith(('.preview.json', '.preview.svg'))}
+            staged = {}
         else:
             family = old.get('source_family', row['name']) if old else row['name']
             plan = prepare.prepare(Path(row['source']), folder, family, row['category'],
@@ -394,12 +379,12 @@ class Library:
                 if next(s['dimensions'][2] for s in plan['shifts'] if s['plate'] == plate['index']) > MAX_VECTOR_HEIGHT_MM:
                     plate['preview_policy'] = 'Plate height exceeds 20 mm: review artwork; retain the original thumbnail'
             plate['excluded'] = excluded
-            artwork, reason = ({}, '') if excluded else self.preview(prepared, job, plate['index'], plate.get('preview_policy', 'auto'))
+            data, reason = (None, '') if excluded else self.preview(prepared, job, plate['index'], plate.get('preview_policy', 'auto'))
             plate['preview_fallback'] = reason
-            for suffix, content in artwork.items():
-                source = folder / (target.name + suffix)
-                source.write_text(content)
-                staged[str(target) + suffix] = str(source)
+            if not excluded:
+                source = folder / ('artwork-' + str(plate['index']) + '.gcode.3mf')
+                artwork.write(job, source, data)
+                staged[str(target)] = str(source)
             if excluded:
                 print('  Excluded plate: ' + plate['name'], flush=True)
             elif reason:
@@ -416,19 +401,14 @@ class Library:
             target = shared.child(self.shared_root(), alias['id'])
             canonical = next(p for p in entry['plates'] if p['index'] == plate['index'])
             if row['action'] != 'preview':
-                staged[str(target)] = str(jobs_by_index[plate['index']])
-                for suffix in ('.preview.json', '.preview.svg'):
-                    artwork = staged.get(str(self.shared_root() / canonical['filename']) + suffix)
-                    if artwork:
-                        staged[str(target) + suffix] = artwork
+                staged[str(target)] = staged[str(self.shared_root() / canonical['filename'])]
             else:
                 # An older alias can have different G-code bytes. Generate its
                 # own digest-bound preview rather than copying another job's.
-                artwork, _ = self.preview(prepared, target, plate['index'], canonical.get('preview_policy', 'auto'))
-                for suffix, content in artwork.items():
-                    source = folder / (target.name + suffix)
-                    source.write_text(content)
-                    staged[str(target) + suffix] = str(source)
+                data, _ = self.preview(prepared, target, plate['index'], canonical.get('preview_policy', 'auto'))
+                source = folder / ('alias-' + str(plate['index']) + '.gcode.3mf')
+                artwork.write(target, source, data)
+                staged[str(target)] = str(source)
         if digest(row['source']) != row['source_sha256']:
             raise ValueError('Source changed during processing; staged results were not published')
         entry['preview_recipe'] = row['preview_recipe']

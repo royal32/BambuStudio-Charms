@@ -12,8 +12,6 @@ int main(int argc, char** argv)
     try {
         const std::string plate = "Mamá Bee SB.gcode.3mf";
         write(root, plate, "test gcode archive");
-        write(root, plate + ".preview.json", "preview");
-        write(root, plate + ".preview.svg", "vector");
         write(root, "Bee.gcode.3mf", "sibling");
         Json project = {{"version", 1}, {"id", "bee-project"}, {"name", "Bee"}, {"source_sha256", "source-hash"},
             {"plates", Json::array({{{"id", plate}, {"index", 2}}, {{"id", "Bee.gcode.3mf"}, {"index", 1}}})}};
@@ -68,13 +66,12 @@ int main(int argc, char** argv)
         bool stale = false;
         try { remove_plate(root, plate, "Bee SB", "stale"); } catch (const std::exception&) { stale = true; }
         assert(stale && exclusions(root).empty());
-        remove_plate(root, plate, "Bee SB", stamp + ":vector:some-stamp");
+        remove_plate(root, plate, "Bee SB", stamp);
         const auto records = exclusions(root);
         assert(records.size() == 1);
         assert(records[0]["targets"].size() == 1);
         assert(records[0]["targets"][0]["plate_index"] == 2);
         assert(!fs::exists(root / plate));
-        assert(!fs::exists(root / (plate + ".preview.svg")));
         assert(fs::exists(root / "Bee.gcode.3mf"));
         assert(fs::exists(root / "Sources/Mamá Bee.3mf"));
         assert(fs::exists(child(root, records[0]["removed_dir"].get<std::string>() + "/" + plate)));

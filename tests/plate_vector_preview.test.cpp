@@ -13,8 +13,8 @@ int main(int argc, char** argv)
     const auto ring = [](double x0, double y0, double x1, double y1) {
         return json::array({{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
     };
-    json doc = {{"version", 1}, {"plate_index", 5}, {"width", 30.}, {"height", 20.},
-        {"source_md5", std::string(32, 'a')}, {"regions", json::array({
+    json doc = {{"version", 2}, {"plate_index", 5}, {"width", 30.}, {"height", 20.},
+        {"print_sha256", std::string(64, 'a')}, {"regions", json::array({
             {{"filament", 0}, {"color", "#FF0000"}, {"contours", json::array({ring(1, 1, 10, 10), ring(3, 3, 8, 8)})}},
             {{"filament", 1}, {"color", "#FFFFFF"}, {"contours", json::array({ring(10, 1, 10.1, 10)})}},
             {{"filament", 4}, {"color", "#FF0000"}, {"contours", json::array({ring(20, 1, 29, 10)})}}
@@ -54,7 +54,7 @@ int main(int argc, char** argv)
     assert(PlateVectorPreview::marching_ants(square, 0, 0).empty());
     assert(PlateVectorPreview::marching_ants({}, 4, 0).empty());
     for (const auto& change : std::vector<json>{
-        {{"version", 2}}, {{"width", 0}}, {{"height", -1}}, {{"source_md5", "stale"}},
+        {{"version", 1}}, {{"width", 0}}, {{"height", -1}}, {{"print_sha256", "stale"}},
         {{"regions", json::array()}}, {{"width", std::numeric_limits<double>::infinity()}}
     }) {
         auto bad = doc;
