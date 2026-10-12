@@ -15,7 +15,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-from . import geometry, package, prepare, shared
+from . import geometry, package, prepare, projects, shared
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -55,7 +55,7 @@ def default_config(home):
             'profile_root': str(profile), 'presets': {
                 'machine': 'Bambu Lab A1 mini 0.4 nozzle - 1.1.0',
                 'process': '0.20mm Charms @BBL A1M 1.0.3',
-                'filament': 'Atomic PLA  A1 Mini 1.2'}, 'plate_names': {}}
+                'filament': 'Atomic PLA  A1 Mini 1.2'}, 'plate_names': {}, 'editable_projects': True}
 
 
 class Library:
@@ -149,17 +149,18 @@ class Library:
         # their original folder is removed from discovery. Missing inputs are
         # shown, never interpreted as authorization to delete print files.
         for project in self.state['projects'].values():
-            found.setdefault(project['source'], Path(project['source']))
+            source = projects.source_path(self, project)
+            found.setdefault(str(source), source)
         retired = {p for project in self.state['projects'].values() for p in project.get('retired_sources', [])}
         return sorted(p for name, p in found.items() if name not in retired)
 
     def plan(self, project_filter='', force=False, previews_only=False):
         recipe, preview_recipe, presets = self.recipes()
         exclusions = shared.exclusions(self.shared_root())
-        previous = {p['source']: p for p in self.state['projects'].values()}
+        previous = {str(projects.source_path(self, p)): p for p in self.state['projects'].values()}
         rows, hashes = [], {}
         seen = {p['source_sha256']: p['name'] for p in previous.values()
-                if Path(p['source']).is_file() and digest(p['source']) == p['source_sha256']}
+                if projects.source_path(self, p).is_file() and digest(projects.source_path(self, p)) == p['source_sha256']}
         for path in self.discover():
             old = previous.get(str(path))
             key = old['id'] if old else signature(str(path))[:16]
@@ -370,11 +371,12 @@ class Library:
             prepared = folder / 'input.3mf'
             entry = {k: row[k] for k in ('id', 'name', 'source', 'source_sha256', 'recipe')}
             if old:
-                entry.update({k: old[k] for k in ('original_source', 'adopted', 'retired_sources') if k in old})
+                entry.update({k: old[k] for k in ('original_source', 'adopted', 'retired_sources', 'editable_project', 'legacy_plates') if k in old})
             entry.update(prepared_input=str(prepared), prepared_sha256=digest(prepared), prepared_project=str(folder / 'prepared.3mf'),
                          source_family=family, category=row['category'], plates=[])
             staged = {}
         reserved = set()
+        jobs_by_index = {p['index']: job for p, job in plates}
         previous_policies = {p['index']: p.get('preview_policy', 'auto') for p in old['plates']} if old else {}
         for plate, job in plates:
             # A deletion applies to this plate identity, including its future
@@ -407,9 +409,33 @@ class Library:
             else:
                 original = next(p for p in entry['plates'] if p['index'] == plate['index'])
                 original.update(preview_fallback=reason)
+        for alias in entry.get('legacy_plates', []):
+            plate = dict(index=alias['index'], filename=alias['id'])
+            if plate['index'] not in jobs_by_index or shared.plate_excluded(entry, plate, shared.exclusions(self.shared_root())):
+                continue
+            target = shared.child(self.shared_root(), alias['id'])
+            canonical = next(p for p in entry['plates'] if p['index'] == plate['index'])
+            if row['action'] != 'preview':
+                staged[str(target)] = str(jobs_by_index[plate['index']])
+                for suffix in ('.preview.json', '.preview.svg'):
+                    artwork = staged.get(str(self.shared_root() / canonical['filename']) + suffix)
+                    if artwork:
+                        staged[str(target) + suffix] = artwork
+            else:
+                # An older alias can have different G-code bytes. Generate its
+                # own digest-bound preview rather than copying another job's.
+                artwork, _ = self.preview(prepared, target, plate['index'], canonical.get('preview_policy', 'auto'))
+                for suffix, content in artwork.items():
+                    source = folder / (target.name + suffix)
+                    source.write_text(content)
+                    staged[str(target) + suffix] = str(source)
         if digest(row['source']) != row['source_sha256']:
             raise ValueError('Source changed during processing; staged results were not published')
         entry['preview_recipe'] = row['preview_recipe']
+        if row['action'] != 'preview' and self.config.get('editable_projects', True) and not entry.get('editable_project'):
+            projects.promote(self, entry, folder / 'prepared.3mf')
+            if digest(row['source']) != row['source_sha256']:
+                raise ValueError('Source changed while registering its editable project; retry after saving')
         self.publish(entry, staged)
 
     def update(self, project_filter='', limit=0, force=False, previews_only=False):

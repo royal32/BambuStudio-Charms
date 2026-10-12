@@ -2,14 +2,14 @@
 
 Run `./charm-library` from the repository to open the **royal32/omnitrix** terminal interface. Use arrows and Enter to browse, edit the options, then choose **Run command** or press F5. Tab switches to columns, `/` searches, and q quits. `./charm-library --plain` uses numbered menus. Every operation is also a direct CLI command.
 
-The existing collection has been adopted into persistent state: **261 projects, 698 managed sliced plates, and 654 vector previews**. The one older, unmapped Wanda export remains untouched. Forty-four tracked plates retain their original thumbnails because of painting, filament mismatches, or reviewed non-flat geometry. **Library → Exceptions** explains each fallback.
+The existing collection is tracked in persistent state, with named standardized editable projects linked to its sliced plates. **Library → Status** reports current totals. Some plates retain their original thumbnails because of painting, filament mismatches, or reviewed non-flat geometry. **Library → Exceptions** explains each fallback.
 
 ## Everyday use
 
 1. Save new editable `.3mf` projects into `.charm-library/inbox/`, or use **Sources → Add** to register a file or a folder. Choose **Pair Eyewear** for frame projects; the inbox defaults to **Bogg Charm**. Folder discovery is recursive.
 2. Run **Library → Plan**. It reads and hashes the inputs and outputs without changing them.
 3. Run **Library → Update**. Leave the project filter blank for everything, or enter part of a name/ID. Limit `0` means all projects; use `10` for a small batch.
-4. Refresh the sliced library in Studio. Output defaults to `~/Desktop/Sliced_Temp`.
+4. Refresh the sliced library in Studio. Output defaults to `~/Desktop/Sliced_Temp`. Successful new projects get a named, standardized editable source in the library's **Projects/** subfolder. Right-click a plate → **Open source project**, edit and save that project, then run **Library → Update**.
 
 ```sh
 ./charm-library sources add --path "/path/to/Pair projects" --category "Pair Eyewear"
@@ -23,7 +23,7 @@ An update converts projects to the established **A1 mini 0.4 nozzle – 1.1.0**,
 
 Plate names use existing meaningful names and model parts, with **SB** for a screw back and knob and **Hanging Hole** where applicable. Name collisions receive `Design N` while preserving SB. Use **Library → Projects** to find IDs, plate indices, source paths and saved editable project paths; **Library → Rename** sets an explicit name for the next update.
 
-The importer preserved editable copies of the old prepared inputs under `.charm-library/imported-sources/`. It does not continue watching their old iCloud/NAS/PC originals. To replace one with a newer version, use **Sources → Replace**:
+The collection now watches the named A1 Mini projects in **Projects/**. Old imported input snapshots and original files are retained for recovery, and retired inputs are excluded from discovery. To replace a project with a newer external version, use **Sources → Replace**; its next successful update creates a standardized editable source without overwriting the previous project:
 
 ```sh
 ./charm-library library projects --project Bee
@@ -32,7 +32,7 @@ The importer preserved editable copies of the old prepared inputs under `.charm-
 ./charm-library library update --project Bee
 ```
 
-Saving changes to an already tracked source path also triggers an update. Different filenames with different contents are treated as separate projects; the script does not guess version relationships from dates or filename suffixes. Exact duplicate source contents are skipped. Raw STL and model-only 3MF files need to be saved as configured slicer projects before processing.
+Saving changes to a named project triggers an update by content hash. Refreshes read that saved project and never overwrite it with generated output; the intermediate `prepared.3mf` stays separate. Established global printer/filament/process profiles are still applied when slicing. Original intake files are no longer watched once their standardized project is registered. Different filenames with different contents are treated as separate projects; use **Sources → Replace** to replace a known design. Exact duplicate source contents are skipped. Raw STL and model-only 3MF files need to be saved as configured slicer projects before processing.
 
 ## Incremental behavior and recovery
 
@@ -41,7 +41,7 @@ Saving changes to an already tracked source path also triggers an update. Differ
 - A vector-generator change or missing sidecar regenerates artwork without slicing. **Previews** refuses projects that first require a slice update; `--force` explicitly retries otherwise unchanged previews.
 - Every managed output is hash-checked. Edited files block that project. Untracked filenames are preserved. Missing managed files can be rebuilt. Shared outputs are protected against differing replacements.
 - Each project is staged and validated before publication. Replaced/retired managed files are backed up under `.charm-library/archive/`. A publication journal recovers interrupted copies on the next mutating operation. An operation lock prevents competing runs. Cancel with Ctrl-C or F9; completed projects remain usable.
-- Missing source folders/files never cause print files to be deleted. Failures retain staged inputs, slicer commands and `slice.log` under `.charm-library/work/`. Successful runs also retain a full editable `prepared.3mf` there.
+- Missing source folders/files never cause print files to be deleted. Failures retain staged inputs, slicer commands and `slice.log` under `.charm-library/work/`. Successful runs also retain a full editable `prepared.3mf` there; edit the linked named project in **Projects/** for future refreshes.
 
 Vector sidecars preserve the original printer-compatible PNG thumbnails and G-code. Negative-volume holes are included in supported flat previews. Existing reviewed PNG fallbacks are retained when rebuilding. Unsupported painting, inconsistent filament assignments, or a plate taller than 20 mm produce a reported PNG fallback. Review new previews for geometry that is not well represented by a flat front-face section.
 
@@ -55,7 +55,7 @@ Right-click a sliced library card in Studio (or focus it and press Shift-F10):
 - **Leave feedback…** saves a dated Markdown note identifying the plate and source project in **Library Feedback/** beside the print files. No account, email or messaging service is involved. Use `./charm-library library feedback` to read notes, or open the folder in Finder. Move completed notes into an `Archive/` subfolder to clear the active list.
 - **Open source project** opens the editable 3MF used by the refresh tool and selects the matching plate. Normal unsaved-change prompts apply. Save edits there, then run Library → Update to refresh the sliced files. If multiple projects publish the same plate, Studio asks which one to open. If the source has moved or is on another computer, locate its 3MF once; Studio remembers that location on this computer. This only changes where Studio opens the project; use the console's `use-source` command to change the refresh tool's input as well.
 
-Project records include the source path. Sources stored inside the library use relative paths; external paths refer to the processing computer. For projects imported by Adopt, this points to the permanent imported source snapshot used for refreshes. Run `./charm-library maintenance sync` once for an older library to add source links without reslicing.
+Project records include the source path. The named **Projects/** sources use relative paths, so copying the whole library to iCloud preserves the links. The processing manifest also resolves those sources against the configured library location. Change **Settings → Configure → Library** when moving the collection, then run **Maintenance → Sync**. Old machine-local Locate choices are ignored when the registered source changes. Some original exports are retained as aliases of a known plate; they refresh from that same editable project and honor its plate exclusions.
 
 Exclusions and plate identities are stored inside the chosen library's hidden `.charm-library/` directory. This is separate from the repository's local `.charm-library/` working state. Copy/share the **whole library folder**, including hidden metadata, when moving it to a shared iCloud folder. Select that same folder in Studio and set it as the console's output directory. Allow iCloud changes to finish syncing before running updates on the other Mac. The console publishes identity records automatically during Update, or explicitly with `./charm-library maintenance sync`; this does not reslice or alter print files.
 
@@ -96,4 +96,4 @@ c++ -std=c++17 -Isrc tests/sliced_library_storage.test.cpp -o /tmp/sliced-librar
 CHARM_LIBRARY_INTEGRATION=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_charm_library_slicer.py
 ```
 
-The opt-in integration test uses the local adopted Bee, Grinch and Wanda projects, slices nine plates into a temporary library, validates G-code/3MF/profile/preview integrity, then checks that a second run leaves the outputs untouched. Studio's thumbnail renderer requires normal macOS graphics access. It may abort in an automation sandbox even when G-code slicing succeeds.
+The opt-in integration tests use the local Bee, Grinch and Wanda projects, slice nine plates into a temporary library, validate G-code/3MF/profile/preview integrity, then check that a second run leaves the outputs untouched. A separate Band Mom test saves a geometry edit to its named project, verifies that refresh reslices it without overwriting the edit, and verifies that the next run is unchanged. Studio's thumbnail renderer requires normal macOS graphics access. It may abort in an automation sandbox even when G-code slicing succeeds.

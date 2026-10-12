@@ -91,7 +91,7 @@ static std::string open_library_source(WebViewPanel* parent, LibraryJson sources
         auto& config = *wxGetApp().app_config;
         auto overrides = LibraryJson::parse(config.get("sliced_library_source_paths"), nullptr, false);
         if (!overrides.is_object()) overrides = LibraryJson::object();
-        overrides[source.at("id").get<std::string>()] = path;
+        overrides[source.at("id").get<std::string>()] = {{"source", source.value("registered_source", std::string())}, {"path", path}};
         config.set("sliced_library_source_paths", overrides.dump());
         config.save();
     }

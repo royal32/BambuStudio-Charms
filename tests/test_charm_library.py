@@ -12,7 +12,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from charm_library.engine import Library, atomic_json, digest, signature
 from charm_library.prepare import resolve_presets
-from charm_library import shared
+from charm_library import projects, shared
 
 
 class LibraryTests(unittest.TestCase):
@@ -22,6 +22,8 @@ class LibraryTests(unittest.TestCase):
         self.home = Path(self.temp.name) / 'state'
         self.lib = Library(self.home)
         self.lib.config['library'] = str(Path(self.temp.name) / 'sliced')
+        # Retain coverage of legacy inputs alongside the editable-project tests.
+        self.lib.config['editable_projects'] = False
         self.lib.initialize()
         self.lib.save_config()
         self.source = self.home / 'inbox/Bee.3mf'
@@ -361,6 +363,98 @@ class LibraryTests(unittest.TestCase):
         shared.sync_projects(root, {project['id']: project})
         path = root / '.charm-library/projects' / (project['id'] + '.json')
         self.assertEqual(json.loads(path.read_text())['source'], 'Sources/Bee.3mf')
+
+    def enable_editable_projects(self):
+        self.lib.config['editable_projects'] = True
+        self.lib.save_config()
+
+    def test_named_project_is_watched_and_saved_edits_are_never_overwritten(self):
+        self.enable_editable_projects()
+        self.run_update()
+        original = self.source.resolve()
+        source = projects.source_path(self.lib, self.entry())
+        self.assertEqual(source.name, 'Bee A1 Mini.3mf')
+        self.assertEqual(self.entry()['editable_project'], 'Projects/Bee A1 Mini.3mf')
+        self.assertIn(str(original), self.entry()['retired_sources'])
+        self.assertEqual(self.action(), 'skip')
+        source.write_bytes(b'edited named A1 Mini project')
+        self.assertEqual(self.action(), 'build')
+        self.run_update()
+        self.assertEqual(source.read_bytes(), b'edited named A1 Mini project')
+        self.assertEqual(self.slices, 2)
+        self.assertEqual(self.action(), 'skip')
+        original.write_bytes(b'old input is no longer watched')
+        self.assertEqual(len(self.lib.plan()[0]), 1)
+        self.assertEqual(self.action(), 'skip')
+        self.recipe = 'profile change'
+        self.run_update()
+        self.assertEqual(source.read_bytes(), b'edited named A1 Mini project')
+        metadata = self.lib.shared_root() / '.charm-library/projects' / (self.entry()['id'] + '.json')
+        self.assertEqual(json.loads(metadata.read_text())['source'], 'Projects/Bee A1 Mini.3mf')
+
+    def test_named_project_registration_preserves_colliding_user_file(self):
+        self.enable_editable_projects()
+        target = self.lib.shared_root() / 'Projects/Bee A1 Mini.3mf'
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'other user project')
+        self.run_update()
+        self.assertEqual(target.read_bytes(), b'other user project')
+        self.assertEqual(projects.source_path(self.lib, self.entry()).name, 'Bee A1 Mini (2).3mf')
+
+    def test_named_project_survives_interrupted_publication(self):
+        self.enable_editable_projects()
+        with patch.object(self.lib, 'recover', side_effect=OSError('interruption')):
+            self.assertEqual(self.run_update(), 1)
+        with self.lib.locked():
+            self.assertTrue(projects.source_path(self.lib, self.entry()).is_file())
+        self.assertEqual(self.action(), 'skip')
+        self.assertEqual(len(list((self.lib.shared_root() / 'Projects').glob('*.3mf'))), 1)
+
+    def test_registration_is_idempotent_and_preserves_project_identity(self):
+        self.run_update()
+        entry = copy.deepcopy(self.entry())
+        source = entry['prepared_project']
+        projects.promote(self.lib, entry, source)
+        first = projects.source_path(self.lib, entry)
+        self.lib.state['projects'][entry['id']] = entry
+        before = first.stat().st_mtime_ns
+        projects.promote(self.lib, entry, source)
+        self.assertEqual(first, projects.source_path(self.lib, entry))
+        self.assertEqual(before, first.stat().st_mtime_ns)
+        self.assertEqual(entry['id'], self.entry()['id'])
+
+    def test_moved_library_resolves_the_named_project_relative_to_new_root(self):
+        self.enable_editable_projects()
+        self.run_update()
+        destination = Path(self.temp.name) / 'shared iCloud library'
+        shutil.copytree(self.lib.shared_root(), destination)
+        self.lib.config['library'] = str(destination)
+        rows, _ = self.lib.plan()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['source'], str(destination.resolve() / 'Projects/Bee A1 Mini.3mf'))
+
+    def test_legacy_alias_refreshes_from_its_linked_project_and_keeps_exclusions(self):
+        self.enable_editable_projects()
+        self.run_update()
+        entry = self.entry()
+        alias = self.lib.shared_root() / 'Older Bee.gcode.3mf'
+        alias.write_bytes(b'older export')
+        entry['legacy_plates'] = [dict(id=alias.name, index=1, name='Older Bee')]
+        entry['outputs'][str(alias)] = digest(alias)
+        atomic_json(self.lib.state_path, self.lib.state)
+        projects.source_path(self.lib, entry).write_bytes(b'edited canonical project')
+        self.run_update()
+        canonical = self.lib.shared_root() / self.entry()['plates'][0]['filename']
+        self.assertEqual(alias.read_bytes(), canonical.read_bytes())
+        self.assertTrue(Path(str(alias) + '.preview.json').is_file())
+        self.run_update(force=True, previews_only=True)
+        self.assertTrue(Path(str(alias) + '.preview.json').is_file())
+        shared.write_json(self.lib.shared_root(), '.charm-library/events/alias-excluded.json',
+                          dict(version=1, kind='exclude', id='alias-excluded', plate=alias.name,
+                               targets=[dict(project_id=entry['id'], plate_index=1, source_sha256=entry['source_sha256'])]))
+        alias.unlink()
+        self.run_update(force=True)
+        self.assertFalse(alias.exists())
 
 
 class PresetTests(unittest.TestCase):

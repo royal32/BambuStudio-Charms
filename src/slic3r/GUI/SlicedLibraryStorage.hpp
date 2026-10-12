@@ -153,7 +153,14 @@ inline Json source_projects(const fs::path& root, const std::string& plate, cons
     for (const auto& project : projects) {
         const auto id = project.at("id").get<std::string>();
         auto source = project.value("source", std::string());
-        if (overrides.contains(id) && overrides.at(id).is_string()) source = overrides.at(id).get<std::string>();
+        const auto registered_source = source;
+        if (overrides.contains(id)) {
+            const auto& location = overrides.at(id);
+            if (location.is_object() && location.value("source", std::string()) == registered_source)
+                source = location.value("path", source);
+            else if (location.is_string() && !project.value("editable_source", false))
+                source = location.get<std::string>();
+        }
         fs::path path;
         bool available = false;
         if (!source.empty()) {
@@ -164,7 +171,7 @@ inline Json source_projects(const fs::path& root, const std::string& plate, cons
         }
         for (const auto& p : project.at("plates")) if (p.at("id").get<std::string>() == plate) {
             sources.push_back({{"id", id}, {"name", project.at("name")}, {"path", path.u8string()},
-                {"plate_index", p.at("index")}, {"available", available}});
+                {"registered_source", registered_source}, {"plate_index", p.at("index")}, {"available", available}});
             break;
         }
     }

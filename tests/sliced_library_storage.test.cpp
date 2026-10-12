@@ -47,6 +47,15 @@ int main(int argc, char** argv)
         fs::remove(root / ".charm-library/projects/bee-project.json");
         write(root, ".charm-library/projects/bee-project.json", project.dump());
         assert(source_projects(root, plate)[0]["available"].get<bool>());
+        // A newly published canonical source invalidates old machine-local links.
+        project["editable_source"] = true;
+        fs::remove(root / ".charm-library/projects/bee-project.json");
+        write(root, ".charm-library/projects/bee-project.json", project.dump());
+        assert(source_projects(root, plate, moved)[0]["path"] == project["source"]);
+        Json obsolete = {{"bee-project", {{"source", "old-source.3mf"}, {"path", (root / "Moved Bee.3MF").u8string()}}}};
+        assert(source_projects(root, plate, obsolete)[0]["path"] == project["source"]);
+        Json located = {{"bee-project", {{"source", project["source"]}, {"path", (root / "Moved Bee.3MF").u8string()}}}};
+        assert(source_projects(root, plate, located)[0]["path"] == (root / "Moved Bee.3MF").u8string());
         const auto note = leave_feedback(root, plate, "Mamá Bee SB", "The hole needs to be larger.\nPlease keep the wings.");
         std::ifstream feedback(child(root, note));
         const std::string text((std::istreambuf_iterator<char>(feedback)), {});

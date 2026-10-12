@@ -73,7 +73,8 @@ def output_excluded(root, project, path, records):
             break
     if any(r['plate'] == relative for r in records):
         return True
-    return any(p['filename'] == relative and plate_excluded(project, p, records) for p in project['plates'])
+    plates = project['plates'] + [dict(index=p['index'], filename=p['id']) for p in project.get('legacy_plates', [])]
+    return any(p['filename'] == relative and plate_excluded(project, p, records) for p in plates)
 
 
 def write_json(root, relative, value):
@@ -89,13 +90,29 @@ def write_json(root, relative, value):
 
 
 def sync_projects(root, projects):
+    directories = {}
+
+    def actual_id(filename):
+        path = child(root, filename)
+        if path.parent not in directories:
+            directories[path.parent] = {p.name for p in path.parent.iterdir()} if path.parent.exists() else set()
+        names = directories[path.parent]
+        if path.name not in names and path.is_file():
+            # APFS may retain the original export's casing when a managed file
+            # is replaced. Cards use the actual directory entry as their ID.
+            actual = next((n for n in names if n.casefold() == path.name.casefold()), path.name)
+            return (path.parent / actual).relative_to(root).as_posix()
+        return filename
+
     for project in projects.values():
         if not any(Path(p).is_relative_to(root) for p in project['outputs']):
             continue
         record = dict(version=1, id=project['id'], name=project['name'], source_sha256=project['source_sha256'],
-                      plates=[dict(id=p['filename'], index=p['index'], name=p['name']) for p in project['plates']])
+                      plates=[dict(id=actual_id(p['filename']), index=p['index'], name=p['name']) for p in project['plates']])
         source = Path(project['source'])
-        record['source'] = source.relative_to(root).as_posix() if source.is_relative_to(root) else str(source)
+        record['source'] = project.get('editable_project') or (source.relative_to(root).as_posix() if source.is_relative_to(root) else str(source))
+        record['editable_source'] = bool(project.get('editable_project'))
+        record['plates'].extend(project.get('legacy_plates', []))
         write_json(root, '.charm-library/projects/' + project['id'] + '.json', record)
 
 

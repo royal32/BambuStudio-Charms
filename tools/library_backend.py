@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from charm_library.engine import Library, digest, ROOT
-from charm_library import shared
+from charm_library import projects, shared
 
 
 def parser():
@@ -88,8 +88,8 @@ def main(argv=None):
         for project in library.state['projects'].values():
             if args.project.casefold() not in (project['name'] + ' ' + project['id']).casefold():
                 continue
-            print(f"{project['name']} [{project['id']}]\n  Source: {project['source']}")
-            print('  Saved project: ' + project.get('prepared_project', project['prepared_input']))
+            print(f"{project['name']} [{project['id']}]\n  Source: {projects.source_path(library, project)}")
+            print('  Last generated project: ' + project.get('prepared_project', project['prepared_input']))
             for plate in project['plates']:
                 print(f"  {plate['index']:3}: {plate['name']}")
         return 0
@@ -189,12 +189,14 @@ def main(argv=None):
                 raise ValueError('Use an exact project name or ID from Library → Projects.')
             if not path.is_file() or path.suffix.lower() != '.3mf' or path.name.lower().endswith('.gcode.3mf'):
                 raise ValueError('Select an existing editable .3mf project.')
-            if any(p['source'] == str(path) and p['id'] != matches[0]['id'] for p in library.state['projects'].values()):
+            if any(projects.source_path(library, p) == path and p['id'] != matches[0]['id'] for p in library.state['projects'].values()):
                 raise ValueError('That source is already tracked as another project.')
-            if matches[0]['source'] != str(path):
-                matches[0].setdefault('retired_sources', []).append(matches[0]['source'])
+            previous_source = str(projects.source_path(library, matches[0]))
+            if previous_source != str(path):
+                matches[0].setdefault('retired_sources', []).append(previous_source)
                 matches[0]['retired_sources'] = [p for p in matches[0]['retired_sources'] if p != str(path)]
                 matches[0]['source'] = str(path)
+                matches[0].pop('editable_project', None)
             from charm_library.engine import atomic_json
             atomic_json(library.state_path, library.state)
             print('Source registered for the existing project. Review Library → Plan, then Update.')
