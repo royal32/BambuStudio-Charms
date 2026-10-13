@@ -144,6 +144,10 @@ window.SlicedLibrary = (function () {
             } else if (message.command === 'sliced_library_opened') {
                 busy = false;
                 render();
+            } else if (message.command === 'sliced_library_action_status') {
+                error = '';
+                notice = message.notice || '';
+                render();
             } else if (message.command === 'sliced_library_action_done') {
                 busy = false;
                 error = message.error || '';

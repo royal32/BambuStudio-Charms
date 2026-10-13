@@ -117,3 +117,24 @@ test('right-click and keyboard actions send only indexed identity and release bu
     f.list([{ id: 'other.gcode.3mf', name: 'Other', folder: '' }], 'other');
     assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, false);
 });
+
+test('source chooser explains the pending action and cancel restores menus and printing', () => {
+    const f = fixture();
+    f.list([{ id: 'Larkin 3 Color.gcode.3mf', name: 'Larkin 3 Color', folder: '' }]);
+    const event = { preventDefault() {}, stopPropagation() {} };
+    f.el('Grid').children[0].oncontextmenu(event);
+    f.library.handle({ command: 'sliced_library_action_status', notice: 'Choose the source project in the open dialog.' });
+    assert.equal(f.el('Status').textContent, 'Choose the source project in the open dialog.');
+    assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, true);
+    f.search('larkin');
+    f.el('Grid').children[0].oncontextmenu(event);
+    assert.equal(f.messages.filter(m => m.command === 'sliced_library_context').length, 1);
+    f.library.handle({ command: 'sliced_library_action_done' });
+    assert.equal(f.el('Status').textContent, '');
+    assert.equal(f.el('Grid').querySelectorAll('button')[0].disabled, false);
+    f.el('Grid').children[0].oncontextmenu(event);
+    assert.equal(f.messages.filter(m => m.command === 'sliced_library_context').length, 2);
+    f.library.handle({ command: 'sliced_library_action_done' });
+    f.el('Grid').querySelectorAll('button')[0].onclick();
+    assert.equal(f.messages.filter(m => m.command === 'sliced_library_print').length, 1);
+});

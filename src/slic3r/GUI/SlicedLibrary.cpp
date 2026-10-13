@@ -65,9 +65,26 @@ static void send_library_message(WebViewPanel& panel, const LibraryJson& message
         message.dump(-1, ' ', true, LibraryJson::error_handler_t::replace) + ")"));
 }
 
+static int show_library_dialog(WebViewPanel* panel, wxDialog& dialog, const std::string& notice)
+{
+    send_library_message(*panel, {{"command", "sliced_library_action_status"}, {"notice", notice}});
+    // The home page is a nested notebook panel. In particular on macOS,
+    // dialogs owned by that panel can land behind the main window (or on a
+    // different display), leaving the library looking permanently busy.
+    auto* owner = wxGetTopLevelParent(panel);
+    if (owner) owner->Raise();
+    dialog.CentreOnParent();
+    dialog.Bind(wxEVT_SHOW, [&dialog](wxShowEvent& event) {
+        event.Skip();
+        if (event.IsShown()) dialog.Raise();
+    });
+    return dialog.ShowModal();
+}
+
 static std::string open_library_source(WebViewPanel* parent, LibraryJson sources, const std::string& plate, bool reveal = false)
 {
     wxWeakRef<WebViewPanel> weak(parent);
+    auto* owner = wxGetTopLevelParent(parent);
     if (sources.empty()) sources.push_back({{"id", "plate:" + plate}, {"name", plate},
         {"path", ""}, {"plate_index", 0}, {"available", false}});
     size_t selected = 0;
@@ -75,17 +92,17 @@ static std::string open_library_source(WebViewPanel* parent, LibraryJson sources
         wxArrayString choices;
         for (const auto& source : sources)
             choices.Add(wxString::FromUTF8(source.at("name").get<std::string>() + " — " + source.at("path").get<std::string>()));
-        wxSingleChoiceDialog dialog(parent, _L("This plate belongs to more than one project. Choose the source project."),
+        wxSingleChoiceDialog dialog(owner, _L("This plate belongs to more than one project. Choose the source project."),
             reveal ? _L("Show source project location") : _L("Open source project"), choices);
-        if (dialog.ShowModal() != wxID_OK || !weak) return {};
+        if (show_library_dialog(parent, dialog, "Choose the source project in the open dialog, or cancel to return to the library.") != wxID_OK || !weak) return {};
         selected = static_cast<size_t>(dialog.GetSelection());
     }
     const auto& source = sources.at(selected);
     auto path = source.at("path").get<std::string>();
     if (!source.at("available").get<bool>()) {
-        wxFileDialog dialog(parent, _L("Locate the source 3MF project"), "", "",
+        wxFileDialog dialog(owner, _L("Locate the source 3MF project"), "", "",
             _L("3MF project files (*.3mf)|*.3mf"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-        if (dialog.ShowModal() != wxID_OK || !weak) return {};
+        if (show_library_dialog(parent, dialog, "Locate the source project in the open dialog, or cancel to return to the library.") != wxID_OK || !weak) return {};
         path = std::string(dialog.GetPath().utf8_string());
         if (!LibraryStorage::is_source_project(fs::u8path(path)))
             return "Choose an editable 3MF project rather than a sliced .gcode.3mf file.";
@@ -322,25 +339,25 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
             if (selection != source && selection != reveal_plate && selection != reveal_source && selection != remove && selection != feedback) { done(); return true; }
             std::string note;
             if (selection == remove) {
-                MessageDialog dialog(this, wxString::FromUTF8("Delete “" + entry.name + "” from the library?\n\n"
+                MessageDialog dialog(wxGetTopLevelParent(this), wxString::FromUTF8("Delete “" + entry.name + "” from the library?\n\n"
                     "This plate will be excluded from future library updates. Other plates in the project will still refresh normally. "
                     "A recoverable copy is kept in the library; the source 3MF is unchanged."),
                     _L("Delete sliced plate"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
-                const auto answer = dialog.ShowModal();
+                const auto answer = show_library_dialog(this, dialog, "Confirm or cancel deletion in the open dialog.");
                 if (!weak) return true;
                 if (answer != wxID_YES) { done(); return true; }
             } else if (selection == feedback) {
-                wxTextEntryDialog dialog(this, wxString::FromUTF8("What needs changing about “" + entry.name + "”?\n"
+                wxTextEntryDialog dialog(wxGetTopLevelParent(this), wxString::FromUTF8("What needs changing about “" + entry.name + "”?\n"
                     "Your note will be saved in the shared library’s Library Feedback folder."),
                     _L("Leave feedback"), "", wxOK | wxCANCEL | wxTE_MULTILINE);
                 dialog.SetSize(wxSize(540, 300));
                 while (true) {
-                    const auto answer = dialog.ShowModal();
+                    const auto answer = show_library_dialog(this, dialog, "Enter feedback in the open dialog, or cancel to return to the library.");
                     if (!weak) return true;
                     if (answer != wxID_OK) { done(); return true; }
                     const auto value = dialog.GetValue().Trim(true).Trim(false);
                     if (!value.empty() && value.length() <= 8000) { note = std::string(value.utf8_string()); break; }
-                    MessageDialog invalid(this, _L("Enter a note of between 1 and 8,000 characters."), _L("Leave feedback"), wxOK);
+                    MessageDialog invalid(&dialog, _L("Enter a note of between 1 and 8,000 characters."), _L("Leave feedback"), wxOK);
                     invalid.ShowModal();
                     if (!weak) return true;
                 }
