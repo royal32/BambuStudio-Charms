@@ -7317,9 +7317,19 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
  void ThumbnailPanel::render(wxDC& dc) {
 
      if (m_vector_preview) {
+         // A neutral transparency grid keeps both white and black filament
+         // visible in either theme, including thin outlines and model holes.
+         const auto size = GetClientSize();
+         const int tile = FromDIP(12);
+         dc.SetPen(*wxTRANSPARENT_PEN);
+         dc.SetBrush(wxBrush(wxColour(112, 112, 112)));
+         dc.DrawRectangle(0, 0, size.x, size.y);
+         dc.SetBrush(wxBrush(wxColour(128, 128, 128)));
+         for (int y = 0; y < size.y; y += tile)
+             for (int x = 0; x < size.x; x += tile)
+                 if ((x / tile + y / tile) % 2) dc.DrawRectangle(x, y, tile, tile);
          std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::CreateFromUnknownDC(dc));
          if (!gc) return;
-         const auto size = GetClientSize();
          const double scale = std::min(size.x / (m_vector_preview->width * 1.08), size.y / (m_vector_preview->height * 1.08));
          gc->Translate((size.x - m_vector_preview->width * scale) / 2, (size.y - m_vector_preview->height * scale) / 2);
          gc->Scale(scale, scale);

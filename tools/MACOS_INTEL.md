@@ -72,9 +72,11 @@ Native checks on an iMac18,1 running macOS 12.6 pass for:
   renderer and internal store bindings.
 
 The Apple Silicon session-reader regression tests and library/Connect JavaScript
-tests also pass. The app is staged with a separate review profile and five real
-library samples. Visual print-dialog and authenticated Connect import checks
-remain a separate acceptance check; transport success alone does not prove them.
+tests also pass. The app was staged with a separate review profile and five real
+library samples. The tester subsequently confirmed sign-in to both apps and a
+successful end-to-end print using interactive filament selection on the Intel Mac.
+The subsequent neutral checkerboard preview update was also confirmed on the
+Intel Mac in light mode: white regions remain visible and open the AMS selector.
 
 Local package: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`.
 The review launcher on the Intel Mac is
