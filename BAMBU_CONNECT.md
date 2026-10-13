@@ -22,7 +22,7 @@ confirmed, changes an option because of printer capabilities, or cannot reproduc
 a mapping, it opens for review. Multi-extruder and manual-change-assistance jobs
 also require Connect review until their full option semantics are verified.
 
-On macOS, Studio keeps Connect on the selected Studio account automatically.
+On Apple Silicon Macs, Studio keeps Connect on the selected Studio account automatically.
 Use the account menu at the upper left of **Home** to add or select an account.
 Adding an account restarts Studio and opens its normal sign-in page. After that,
 selecting a saved account restarts Studio with its saved login and switches
@@ -37,11 +37,11 @@ until the accounts match. If using a mainland China account, select that region
 in both apps first. Account synchronization currently requires the supported
 macOS Connect version listed below.
 
-On Windows, sign in to the same Bambu account in Studio and Connect, and choose
-the same region in both apps. Windows verifies Connect's account ID before
+On Intel Macs and Windows, sign in to the same Bambu account in Studio and Connect, and choose
+the same region in both apps. Studio verifies Connect's account ID before
 importing a job and again before sending it. Account switching requires signing
-in to that account in Connect too; automatic token transfer remains Mac-only.
-The Mac plugin's private memory offsets are never used on Windows. Studio logout
+in to that account in Connect too; automatic token transfer remains Apple Silicon-only.
+The Mac plugin's private memory offsets are never used on Intel or Windows. Studio logout
 also clears Connect's session when the bridge is available. A mismatched account
 blocks the handoff instead of silently choosing a different account's printer.
 
@@ -76,7 +76,7 @@ two pipe endpoints. Startup and review use the owning process's windows; the
 bridge requests a graceful close when restarting an existing Connect instance.
 `resources/scripts/bambu_connect_bridge.js` uses those methods to import the
 sliced file, select its plate/device, set options and map filament trays.
-On macOS, the bridge reads the current account ID and access token from Studio's existing
+On Apple Silicon, the bridge reads the current account ID and access token from Studio's existing
 network plugin in memory. Its public login-info API contains only display
 metadata, so the session reader is pinned to the installed arm64 plugin's Mach-O
 UUID `22253083-6232-325A-87FB-ED9092625F5E`. It checks that binary identity before
@@ -92,7 +92,7 @@ bundles: `router-DcHfLi1L.js` (SHA-256
 `index-B_vXgx8V.js` (SHA-256
 `080d5cf771de64a6c06795a543bb983a4a61549eeb4d1a2c44a65cfe623dbcf3`).
 
-On macOS, the bridge uses Connect's own secure-storage writer to select
+On Apple Silicon, the bridge uses Connect's own secure-storage writer to select
 that session, then restarts Connect to discard old MQTT connections and printer
 caches. Tokens are never placed in job files, the account registry, URLs,
 command-line arguments or bridge logs; no additional password store is created.

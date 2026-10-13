@@ -23,6 +23,7 @@ namespace Slic3r { namespace GUI { namespace BambuConnect {
 namespace {
 using Clock = std::chrono::steady_clock;
 
+#if defined(__arm64__)
 bool read_own_memory(uintptr_t address, void* destination, size_t size) {
     if (!address || !size) return false;
     mach_vm_size_t copied = 0;
@@ -31,7 +32,6 @@ bool read_own_memory(uintptr_t address, void* destination, size_t size) {
 }
 
 bool supported_session_layout(void* identity_function) {
-#if defined(__arm64__)
     Dl_info image{};
     if (!identity_function || !dladdr(identity_function, &image)) return false;
     const auto base = reinterpret_cast<uintptr_t>(image.dli_fbase);
@@ -55,7 +55,6 @@ bool supported_session_layout(void* identity_function) {
         }
         offset += command.cmdsize;
     }
-#endif
     return false;
 }
 
@@ -80,6 +79,7 @@ std::string read_session_string(uintptr_t address) {
     if (!read_own_memory(address, after.data(), after.size()) || before != after) return {};
     return result;
 }
+#endif
 
 bool process_running(pid_t pid) {
     proc_bsdinfo info{};
@@ -186,6 +186,7 @@ public:
 std::unique_ptr<Transport> create_transport() { return std::make_unique<MacTransport>(); }
 std::string studio_access_token(void* agent, void* identity_function, const std::string& user_id)
 {
+#if defined(__arm64__)
     if (!agent || user_id.empty() || !supported_session_layout(identity_function)) return {};
     uintptr_t implementation = 0, account = 0, current = 0;
     if (!read_own_memory(reinterpret_cast<uintptr_t>(agent), &implementation, sizeof(implementation)) ||
@@ -197,5 +198,11 @@ std::string studio_access_token(void* agent, void* identity_function, const std:
     if (!read_own_memory(implementation + 0x20, &current, sizeof(current)) || current != account ||
         read_session_string(account + 0x48) != user_id) return {};
     return token;
+#else
+    // Intel's libc++ string ABI differs from the pinned arm64 plugin. Use the
+    // shared bridge's matching-account check with Connect's own sign-in.
+    (void)agent; (void)identity_function; (void)user_id;
+    return {};
+#endif
 }
 }}}

@@ -4,6 +4,7 @@
 
 using namespace Slic3r::GUI::BambuConnect;
 
+#if defined(__arm64__)
 TEST_CASE("Connect session reader handles short and long libc++ strings", "[ConnectSession]")
 {
     for (const std::string value : {std::string(), std::string("account-id"), std::string(256, 't')})
@@ -33,3 +34,12 @@ TEST_CASE("Connect session adapter refuses an unknown plugin binary", "[ConnectS
     REQUIRE_FALSE(supported_session_layout(reinterpret_cast<void*>(&read_own_memory)));
     REQUIRE(studio_access_token(reinterpret_cast<void*>(1), reinterpret_cast<void*>(&read_own_memory), "account-id").empty());
 }
+#else
+TEST_CASE("Intel Connect uses manual sign-in without reading the arm64 session layout", "[ConnectSession]")
+{
+    REQUIRE(studio_access_token(nullptr, nullptr, "account-id").empty());
+    REQUIRE(studio_access_token(reinterpret_cast<void*>(1), reinterpret_cast<void*>(1), "account-id").empty());
+    std::string account = "account-id";
+    REQUIRE(studio_access_token(&account, reinterpret_cast<void*>(&studio_access_token), account).empty());
+}
+#endif

@@ -191,7 +191,8 @@ else()
     set(DEVICE_PAGE_PATH "${NODE_BIN_PATH}:$ENV{PATH}")
 endif()
 
-set(PNPM_STORE_DIR "${CMAKE_CURRENT_BINARY_DIR}/.pnpm-store")
+set(PNPM_STORE_DIR "${CMAKE_CURRENT_BINARY_DIR}/.pnpm-store" CACHE PATH
+    "pnpm store (reuse the same store when building multiple architectures)")
 file(MAKE_DIRECTORY "${PNPM_STORE_DIR}")
 
 set(DEVICE_PAGE_BUILD_STAMP "${CMAKE_CURRENT_BINARY_DIR}/device_page.stamp")
