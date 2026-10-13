@@ -13,11 +13,29 @@ static nlohmann::json signed_in_user(const std::string& auth)
 }
 int main(int argc, char** argv)
 {
-    if (argc < 2 || argc > 4) { std::cerr << "Usage: bambu-connect-probe <adapter.js> [--reload | --reload-handles | prepare-only-fixtures.json [printer-name]]\n"; return 2; }
+    if (argc < 2 || argc > 4) { std::cerr << "Usage: bambu-connect-probe <adapter.js> [--account-state | --reload | --reload-handles | prepare-only-fixtures.json [printer-name]]\n"; return 2; }
     try {
         using namespace Slic3r::GUI::BambuConnect;
         bridge.start(argv[1]);
         std::cout << "Connect version, private pipe, renderer and store bindings verified. No file imported or print sent.\n";
+        if (argc == 3 && std::string(argv[2]) == "--account-state") {
+            // Return presence flags only. Credentials never leave Connect and
+            // this diagnostic cannot write/delete credentials or import a file.
+            auto state = bridge.invoke(bridge.call("Runtime.evaluate", {{"expression",
+                "import('./assets/index-B_vXgx8V.js').then(m=>m.a2)"}, {"awaitPromise", true}}).at("result").at("objectId"),
+                R"JS(async function(){
+                    try { return {storedCredentialReadable: !!(await this.invoke('secureStorageRead', {key:'token'}))}; }
+                    catch (_) { return {storedCredentialReadable:false, storageReadFailed:true}; }
+                })JS").at("value");
+            // account_facade is private; obtain the same pinned module bindings.
+            const auto component = bridge.call("Runtime.evaluate", {{"expression",
+                "import('./assets/router-DcHfLi1L.js').then(m=>m.router.options.routeTree.options.component)"}, {"awaitPromise", true}}).at("result").at("objectId").get<std::string>();
+            state["credentialLoaded"] = bridge.invoke(bridge.scope_binding(component, "Qp"), "function(){return !!this();}").at("value");
+            state["accountLoaded"] = signed_in_user(bridge.scope_binding(component, "Ro")) != "";
+            std::cout << state.dump() << '\n';
+            bridge.show();
+            return 0;
+        }
         if (argc == 3 && (std::string(argv[2]) == "--reload" || std::string(argv[2]) == "--reload-handles")) {
             const bool check_account = std::string(argv[2]) == "--reload";
             const auto component = bridge.call("Runtime.evaluate", {{"expression",
@@ -48,6 +66,7 @@ int main(int argc, char** argv)
             if (bridge.start(argv[1])) throw std::runtime_error("The refreshed renderer handles were not reusable.");
             std::cout << "Renderer reload: original account handle rejected, fresh handles rebound and reused on the same private pipe; " <<
                 (check_account ? "signed-in account match verified" : "account state left unchanged") << ". No file imported or print sent.\n";
+            bridge.show();
             return 0;
         }
         if (argc >= 3) {

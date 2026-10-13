@@ -311,7 +311,7 @@ Account-switching checks:
   strings, invalid pointers, oversized strings and unknown plugin binaries.
   On macOS, run them with:
   ```sh
-  clang++ -std=c++17 -fobjc-arc -framework Cocoa -Isrc -Itests \
+  clang++ -std=c++17 -fobjc-arc -framework Cocoa -framework Security -Isrc -Itests \
     tests/bambu_connect_session.test.mm -o /tmp/bambu-connect-session-tests
   /tmp/bambu-connect-session-tests '[ConnectSession]'
   ```
@@ -323,5 +323,20 @@ Account-switching checks:
   successful morning print and later account-verification failures. A native
   forced-reload probe reproduced invalid account-store handles and verified
   rebinding/reuse over the same private pipe, without importing or printing.
-  Authenticated verification must run in the normal desktop session; the
-  SSH-launched diagnostic reported Connect signed out.
+  Authenticated verification must run in the normal desktop security session.
+  An SSH launch could not restore Connect's Keychain credential, and Connect's
+  subsequent unauthorized profile response cleared its saved login. Normal
+  desktop quit/reopen preserved the login. The macOS transport now checks
+  `SessionGetInfo` for graphical access before terminating or launching Connect;
+  remote terminal sessions fail without touching the existing app or login.
+  A GUI launch service may run the native `--reload` probe for a no-import,
+  no-print authenticated recovery check. Its executable, adapter and output
+  should be outside Desktop/Documents/Downloads to avoid folder-access prompts.
+  `--account-state` reports only credential/account presence flags; it never
+  returns credential values or changes the stored login.
+- The 2026-10-13 authenticated Intel Mac desktop check passed: Connect restored its
+  own login, a forced renderer reload invalidated the old handles, and fresh
+  handles were rebound and reused with the same account. Two successive
+  prepare-only handoffs (Band Mom and Bee) then verified their plates, options
+  and live AMS mappings on A1 Five. No print was sent. The guarded native probe
+  rejects an SSH launch before terminating Connect.

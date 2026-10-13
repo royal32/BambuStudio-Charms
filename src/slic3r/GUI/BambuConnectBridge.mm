@@ -17,6 +17,7 @@
 #include <mach/mach_vm.h>
 #include <mach-o/loader.h>
 #import <Cocoa/Cocoa.h>
+#include <Security/AuthSession.h>
 
 extern char **environ;
 namespace Slic3r { namespace GUI { namespace BambuConnect {
@@ -131,6 +132,14 @@ public:
         throw std::runtime_error("Connect did not respond in time.");
     }
     void launch() override {
+        // SSH processes can see the desktop but belong to a separate security
+        // session. Connect cannot restore its Keychain credential there and its
+        // ensuing unauthenticated profile request deletes the persisted login.
+        // Reject before terminating a healthy desktop instance.
+        SessionAttributeBits session_attributes{};
+        if (SessionGetInfo(callerSecuritySession, nullptr, &session_attributes) != errSecSuccess ||
+            !(session_attributes & sessionHasGraphicAccess))
+            throw std::runtime_error("Open Studio from the Mac desktop to use Bambu Connect. Remote terminal sessions cannot restore its secure sign-in.");
         std::string executable;
         @autoreleasepool {
             NSURL* url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:@"com.bambulab.bambu-connect"];
