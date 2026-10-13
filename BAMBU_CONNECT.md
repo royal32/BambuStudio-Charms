@@ -99,6 +99,22 @@ command-line arguments or bridge logs; no additional password store is created.
 Connect remains responsible for authentication, upload and printer communication.
 The selected account ID is checked again before importing and before submission.
 
+Connect can replace its renderer while keeping its main process running. Before
+each new handoff, Studio validates the cached renderer and account-store handles.
+Stale handles are rebound over the existing private pipe before importing a
+file. On Intel and Windows, account verification also allows up to ten seconds
+for Connect to restore its own saved sign-in after startup or a renderer reload.
+A different signed-in account still blocks the handoff. Import and submission
+failures are never automatically replayed.
+
+The active Studio profile's `bambu-connect/bridge-events.jsonl` contains readable
+handoff diagnostics: timestamp, status, phase, failure code and whether renderer
+handles were rebound. It contains no request payload, account/session data,
+device identifiers or raw protocol errors. This supplements the vendor-encrypted
+Studio log. The standalone `bambu-connect-probe <adapter.js> --reload` check
+reproduces invalidated account handles, verifies recovery and the signed-in
+account match, and imports no files or sends any print.
+
 The adapter locates the current React send modal and invokes its existing `onOk`
 handler only when the modal is enabled and the requested selections still match.
 It never calls `_print` directly or automatically confirms a warning. Each
@@ -299,3 +315,13 @@ Account-switching checks:
     tests/bambu_connect_session.test.mm -o /tmp/bambu-connect-session-tests
   /tmp/bambu-connect-session-tests '[ConnectSession]'
   ```
+- The shared runtime lifecycle checks pass on Apple Silicon and natively on
+  Intel macOS 12.6 (three cases, 30 assertions). They cover stale renderer
+  handles, private-pipe reuse, transport failures, and no replay after failed
+  preparation or uncertain submission. Run with CMake/CTest from `tests/connect`.
+- On 2026-10-13, the Intel Mac's macOS log showed a renderer replacement between a
+  successful morning print and later account-verification failures. A native
+  forced-reload probe reproduced invalid account-store handles and verified
+  rebinding/reuse over the same private pipe, without importing or printing.
+  Authenticated verification must run in the normal desktop session; the
+  SSH-launched diagnostic reported Connect signed out.

@@ -37,6 +37,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -23100,6 +23101,17 @@ bool Plater::print_with_bambu_connect(bool all_plates, const std::string& option
         while (pending.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) progress.Pulse();
         const auto result = json::parse(pending.get());
         progress.Hide();
+        // Keep a small readable diagnostic alongside the handoff snapshots.
+        // Never record the account/session, request, device IDs or raw errors.
+        try {
+            const json diagnostic = {
+                {"time_ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()},
+                {"status", result.value("status", "unknown")}, {"phase", result.value("phase", "connect")},
+                {"failure_code", result.value("failure_code", "")},
+                {"renderer_rebound", result.value("renderer_rebound", false)}};
+            boost::nowide::ofstream stream(into_u8(from_path(spool_dir / "bridge-events.jsonl")), std::ios::binary | std::ios::app);
+            stream << diagnostic.dump() << '\n';
+        } catch (...) { /* Diagnostic I/O must not affect the print result. */ }
         if (result.value("status", "") != "unavailable") {
             if (result.contains("error"))
                 MessageDialog(this, _L("Check Bambu Connect before retrying. The handoff could not be confirmed.\n\n") +

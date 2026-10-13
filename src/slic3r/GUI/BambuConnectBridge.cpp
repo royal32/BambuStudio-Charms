@@ -12,6 +12,10 @@ namespace Slic3r { namespace GUI { namespace BambuConnect {
 namespace {
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+class BridgeCommandError : public std::runtime_error {
+public:
+    BridgeCommandError() : std::runtime_error("Connect rejected a bridge command.") {}
+};
 class StartupHider {
     std::atomic<bool> stopped{false};
     std::thread worker;
@@ -49,7 +53,7 @@ public:
                 buffer.erase(0, end + 1);
                 if (response.value("id", 0) != id) continue; // Discard protocol events.
                 if (response.contains("error")) {
-                    throw std::runtime_error("Connect rejected a bridge command.");
+                    throw BridgeCommandError();
                 }
                 return response.at("result");
             }
@@ -98,10 +102,29 @@ public:
             try { invoke(facade, "function(){this.endBackground();}"); } catch (...) {}
         }
     }
-    void start(const std::string& adapter_path) {
-        if (!facade.empty() && transport->running()) return;
-        close_pipe();
-        transport->launch();
+    bool start(const std::string& adapter_path) {
+        bool renderer_rebound = false;
+        if (!facade.empty() && transport->running()) {
+            // Electron can replace its renderer while the main process and
+            // private pipe survive. Validate both cached objects before any
+            // account change, file import or submission for a new request.
+            try {
+                if (invoke(facade, "function(a){return typeof this.prepare === 'function' && typeof this.submit === 'function' && typeof a.auth === 'function' && typeof a.print === 'function';}",
+                    {{{"objectId", account_facade}}}).value("value", false)) return false;
+            } catch (const BridgeCommandError&) {
+                // Only stale protocol handles are recoverable here. Pipe
+                // failures propagate; a handoff is never retried after import.
+            }
+            if (!session.empty()) {
+                try { call("Target.detachFromTarget", {{"sessionId", session}}, false); }
+                catch (const BridgeCommandError&) { /* The old target may already be gone. */ }
+            }
+            session.clear(); facade.clear(); account_facade.clear();
+            renderer_rebound = true;
+        } else {
+            close_pipe();
+            transport->launch();
+        }
         StartupHider startup_hider(*transport);
         auto version = call("Browser.getVersion", json::object(), false);
         if (version.value("userAgent", "").find("BambuConnect/2.5.0-beta.15") == std::string::npos)
@@ -146,11 +169,20 @@ public:
         if (factory.contains("exceptionDetails")) throw std::runtime_error("Could not load the Connect adapter.");
         facade = invoke(factory.at("result").at("objectId"), "function(p,d,s,a){return this(p,d,s,a);}",
             {{{"objectId", print}}, {{"objectId", devices}}, {{"objectId", setter}}, {{"objectId", auth}}}, false).at("objectId");
+        return renderer_rebound;
     }
     void sync_account(const json& account, const std::string& adapter_path) {
         // Always check before importing: a job must never reach another account's
         // printer picker merely because Connect was signed in independently.
         auto result = invoke(account_facade, R"JS(async function(a) {
+            // After a renderer reload the navigation shell can precede restored
+            // authentication. Give Connect's own sign-in time to finish on the
+            // manual-token path; a different signed-in account still fails.
+            if (a.userId && !a.token) {
+                const current = () => String(this.auth().user?.uid ?? '');
+                for (const deadline = Date.now() + 10000; !current() && Date.now() < deadline;)
+                    await new Promise(resolve => setTimeout(resolve, 100));
+            }
             if (this.print().state.sending) throw Error('Connect is sending a job. Wait before switching accounts.');
             const user = this.auth().user;
             const current = user ? String(user.uid) : '';
@@ -182,12 +214,15 @@ public:
         if (identity != account.at("userId"))
             throw std::runtime_error("Connect could not verify the selected Studio account. Sign in to Studio again before printing.");
     }
-    json handoff(const json& request) {
+    json handoff(const json& request, std::string* phase = nullptr) {
+        if (phase) *phase = "prepare";
         invoke(facade, "function(){this.beginBackground();}");
         bounds("minimized");
         auto result = invoke(facade, "function(r){return this.prepare(r);}", {{{"value", request}}}).at("value");
         if (request.value("submit", false)) {
+            if (phase) *phase = "submit";
             result = invoke(facade, "function(id){return this.submit(id);}", {{{"value", request.at("id")}}}).at("value");
+            if (phase) *phase = "confirm";
             auto deadline = Clock::now() + std::chrono::minutes(5);
             while (result.value("status", "") == "sending" && Clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -208,9 +243,12 @@ std::string direct_handoff(const std::string& request, const std::string& adapte
     std::unique_lock<std::mutex> guard(bridge.mutex, std::try_to_lock);
     if (!guard.owns_lock()) return json({{"status", "attention"}, {"error", "Another Connect handoff is in progress."}}).dump();
     bool prepared = false;
+    bool renderer_rebound = false;
+    std::string phase = "connect";
     try {
-        bridge.start(adapter_path);
+        renderer_rebound = bridge.start(adapter_path);
         prepared = true;
+        phase = "account";
         auto data = json::parse(request);
         if (!data.contains("account")) throw std::runtime_error("Sign in to Studio before printing with Connect.");
         try {
@@ -221,12 +259,16 @@ std::string direct_handoff(const std::string& request, const std::string& adapte
         }
         data["accountUserId"] = data.at("account").at("userId");
         data.erase("account");
-        return bridge.handoff(data).dump();
+        auto result = bridge.handoff(data, &phase);
+        result["phase"] = phase;
+        result["renderer_rebound"] = renderer_rebound;
+        return result.dump();
     } catch (const std::exception& error) {
         bridge.show();
         // After entering handoff, submission may have happened: never retry or
         // switch to the URL importer automatically on an ambiguous outcome.
-        return json({{"status", prepared ? "attention" : "unavailable"}, {"error", error.what()}}).dump();
+        return json({{"status", prepared ? "attention" : "unavailable"}, {"error", error.what()},
+            {"phase", phase}, {"failure_code", phase + "_failed"}, {"renderer_rebound", renderer_rebound}}).dump();
     }
 }
 

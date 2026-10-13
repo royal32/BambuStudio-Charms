@@ -2,13 +2,54 @@
 #include "slic3r/GUI/BambuConnectBridge.cpp"
 #include <iostream>
 #include <filesystem>
+static nlohmann::json signed_in_user(const std::string& auth)
+{
+    return Slic3r::GUI::BambuConnect::bridge.invoke(auth, R"JS(async function(){
+        const current = () => String(this().user?.uid ?? '');
+        for (const deadline = Date.now() + 10000; !current() && Date.now() < deadline;)
+            await new Promise(resolve => setTimeout(resolve, 100));
+        return current();
+    })JS").at("value");
+}
 int main(int argc, char** argv)
 {
-    if (argc < 2 || argc > 4) { std::cerr << "Usage: bambu-connect-probe <adapter.js> [prepare-only-fixtures.json [printer-name]]\n"; return 2; }
+    if (argc < 2 || argc > 4) { std::cerr << "Usage: bambu-connect-probe <adapter.js> [--reload | --reload-handles | prepare-only-fixtures.json [printer-name]]\n"; return 2; }
     try {
         using namespace Slic3r::GUI::BambuConnect;
         bridge.start(argv[1]);
         std::cout << "Connect version, private pipe, renderer and store bindings verified. No file imported or print sent.\n";
+        if (argc == 3 && (std::string(argv[2]) == "--reload" || std::string(argv[2]) == "--reload-handles")) {
+            const bool check_account = std::string(argv[2]) == "--reload";
+            const auto component = bridge.call("Runtime.evaluate", {{"expression",
+                "import('./assets/router-DcHfLi1L.js').then(m=>m.router.options.routeTree.options.component)"}, {"awaitPromise", true}}).at("result").at("objectId").get<std::string>();
+            const auto auth = bridge.scope_binding(component, "Ro");
+            const auto environment = bridge.scope_binding(component, "Yi");
+            const auto uid = check_account ? signed_in_user(auth) : nlohmann::json("");
+            if (check_account && uid == "") throw std::runtime_error("Sign in to Connect before the account/renderer reload check.");
+            const auto region = bridge.invoke(environment, "function(){return this().key === 'mainland' ? 'CN' : 'US';}").at("value");
+            bridge.call("Runtime.evaluate", {{"expression", "window.__studioReloadProbe = true"}});
+            bridge.call("Page.reload");
+            bool loaded = false;
+            for (int attempt = 0; attempt < 300 && !loaded; ++attempt) {
+                try {
+                    const auto state = bridge.call("Runtime.evaluate", {{"expression",
+                        "!window.__studioReloadProbe && !!document.querySelector('#root a[href*=\"/devices\"]')"}, {"returnByValue", true}});
+                    loaded = state.at("result").value("value", false);
+                } catch (const BridgeCommandError&) { /* The execution context is being replaced. */ }
+                if (!loaded) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!loaded) throw std::runtime_error("Reloaded Connect interface did not finish loading.");
+            bool stale = false;
+            try { bridge.invoke(auth, "function(){return true;}"); }
+            catch (const BridgeCommandError&) { stale = true; }
+            if (!stale) throw std::runtime_error("Reload did not invalidate the original account-store handle.");
+            if (!bridge.start(argv[1])) throw std::runtime_error("The cached renderer was not rebound after reload.");
+            if (check_account) bridge.sync_account({{"userId", uid}, {"token", ""}, {"countryCode", region}}, argv[1]);
+            if (bridge.start(argv[1])) throw std::runtime_error("The refreshed renderer handles were not reusable.");
+            std::cout << "Renderer reload: original account handle rejected, fresh handles rebound and reused on the same private pipe; " <<
+                (check_account ? "signed-in account match verified" : "account state left unchanged") << ". No file imported or print sent.\n";
+            return 0;
+        }
         if (argc >= 3) {
             std::ifstream manifest(std::filesystem::u8path(argv[2]));
             const auto fixtures = json::parse(manifest);
@@ -18,7 +59,7 @@ int main(int argc, char** argv)
             const auto auth = bridge.scope_binding(component, "Ro");
             const auto environment = bridge.scope_binding(component, "Yi");
             const auto devices = bridge.scope_binding(component, "T_");
-            const auto uid = bridge.invoke(auth, "function(){return String(this().user?.uid ?? '');}").at("value");
+            const auto uid = signed_in_user(auth);
             if (uid == "") throw std::runtime_error("Sign in to Connect before preparing fixtures.");
             const auto region = bridge.invoke(environment, "function(){return this().key === 'mainland' ? 'CN' : 'US';}").at("value");
             bridge.sync_account({{"userId", uid}, {"token", ""}, {"countryCode", region}}, argv[1]);
@@ -35,6 +76,7 @@ int main(int argc, char** argv)
             std::cout << "Test printer: " << device.at("name").get<std::string>() << "; online: " << device.at("online") << '\n';
             int index = 0;
             for (auto request : fixtures) {
+                bridge.start(argv[1]);
                 request["id"] = "windows-prepare-only-" + std::to_string(++index);
                 request["submit"] = false; // This harness never calls the submission path.
                 request["accountUserId"] = uid;
