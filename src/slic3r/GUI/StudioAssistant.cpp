@@ -31,7 +31,13 @@
 namespace Slic3r { namespace GUI {
 namespace {
 using namespace Assistant;
-std::string action_label(const std::string& tool) {
+std::string action_label(const std::string& tool, const Json& args = Json::object()) {
+    if (tool=="document") {
+        static const std::map<std::string,std::string> documents={{"open","Open a project"},{"import","Add a model file"},
+            {"save","Save the project"},{"save_as","Save a project copy"},{"export_sliced","Export the sliced plate"}};
+        auto action=documents.find(args.value("action",std::string()));
+        if (action!=documents.end()) return action->second;
+    }
     static const std::map<std::string,std::string> labels = {
         {"inspect_project","Inspect project and warnings"},{"inspect_settings","Look up process settings"},{"list_profiles","Find installed profiles"},
         {"use_profile","Choose a profile"},{"model_view","Look at the model"},{"set_settings","Change process settings"},{"select_objects","Focus objects"},
@@ -71,7 +77,7 @@ std::string confirmation_text(const std::string& tool,const Json& args) {
         if (action=="import") return "Choose a model file to add to this project?";
         return "Choose a project to open? Studio will ask about any unsaved changes.";
     }
-    return action_label(tool)+"? You can review the result in Studio and use Undo.";
+    return action_label(tool,args)+"? You can review the result in Studio and use Undo.";
 }
 class AssistantWindow : public wxFrame {
 public:
@@ -87,7 +93,7 @@ private:
     void menu();
     void clear_chat();
     void layout_chat(bool follow = true);
-    void activity(const std::string& text, bool done = false, bool failed = false);
+    void activity(const std::string& text, bool done = false, bool failed = false, bool unconfirmed = false);
     void busy(bool value);
     void stop();
     void update_composer();
@@ -109,7 +115,8 @@ private:
     wxBoxSizer* m_messages;
     std::vector<std::pair<AssistantBubble*,bool>> m_bubbles;
     AssistantBubble* m_reply{nullptr};
-    // 0: running, 1: completed, 2: failed/skipped. A tool error must never get a tick.
+    // 0: running, 1: completed, 2: failed/skipped, 3: check result.
+    // An error or unconfirmed file operation must never get a completion tick.
     std::vector<std::pair<std::string,int>> m_steps;
     bool m_allow_changes{true}, m_action_done{true};
     Json m_registrations = Json::array(), m_model_catalog = Json::array(), m_history = Json::array();
@@ -269,10 +276,11 @@ void AssistantWindow::layout_chat(bool follow) {
     m_chat->FitInside(); m_chat->Layout();
     if (follow && at_end) m_chat->Scroll(-1,(m_chat->GetVirtualSize().y+unit-1)/unit);
 }
-void AssistantWindow::activity(const std::string& text,bool done,bool failed) {
+void AssistantWindow::activity(const std::string& text,bool done,bool failed,bool unconfirmed) {
     if (!m_reply) append("Assistant","");
-    if (!text.empty()) m_steps.emplace_back(text,failed?2:done?1:0);
-    else if (!m_steps.empty()) m_steps.back().second=failed?2:done?1:0;
+    const int state=failed?2:unconfirmed?3:done?1:0;
+    if (!text.empty()) m_steps.emplace_back(text,state);
+    else if (!m_steps.empty()) m_steps.back().second=state;
     m_action_done=done;
     wxString summary;
     // The latest few steps stay readable without turning the transcript into a log.
@@ -280,7 +288,8 @@ void AssistantWindow::activity(const std::string& text,bool done,bool failed) {
     if (start) summary=wxString::Format("%zu earlier steps · ",start);
     for (size_t i=start;i<m_steps.size();++i) {
         if (i>start) summary+="\n";
-        summary+=wxString::FromUTF8(m_steps[i].second==0?"◦ ":m_steps[i].second==2?"× ":"✓ ")+wxString::FromUTF8(m_steps[i].first);
+        summary+=wxString::FromUTF8(m_steps[i].second==0?"◦ ":m_steps[i].second==2?"× ":m_steps[i].second==3?"? ":"✓ ")+wxString::FromUTF8(m_steps[i].first);
+        if (m_steps[i].second==3) summary+=wxString::FromUTF8(" · check result");
     }
     m_reply->activity(summary); layout_chat();
 }
@@ -437,17 +446,17 @@ void AssistantWindow::handle_tool(const Json& event) {
             const std::string question = confirmation_text(tool,args);
             if (wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this) != wxYES) {
                 if (m_steps.size()==1 && m_steps.front().first=="Thinking…") m_steps.clear();
-                activity(action_label(tool)+" skipped",true,true);
+                activity(action_label(tool,args)+" skipped",true,true);
                 m_work->answer({{"cancelled", true}, {"message", "The person declined this action. Do not retry it without a new request."}}); return;
             }
         }
         // Replace the initial placeholder; actual actions stay under this reply.
         if (m_steps.size()==1 && m_steps.front().first=="Thinking…") m_steps.clear();
-        activity(action_label(tool));
-        status(wxString::FromUTF8(action_label(tool)+"…"));
+        activity(action_label(tool,args));
+        status(wxString::FromUTF8(action_label(tool,args)+"…"));
         auto result = m_actions.execute(tool, args);
         if (result.contains("pending")) { m_pending = result.at("pending"); m_pending_since = std::chrono::steady_clock::now(); return; }
-        activity("",true,result.contains("error") || result.contains("operation_error") || result.value("cancelled",false)); m_work->answer(result);
+        activity("",true,result.contains("error") || result.contains("operation_error") || result.value("cancelled",false),result.value("outcome","")=="unconfirmed"); m_work->answer(result);
     } catch (const std::exception& e) {
         activity("",true,true); m_work->answer({{"error", e.what()}, {"instruction", "Inspect the current state before deciding whether another action is appropriate."}});
     }
