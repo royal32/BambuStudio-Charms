@@ -72,10 +72,28 @@ system's credential store (Keychain on macOS, Credential Manager on Windows).
 Refreshes are serialized across Studio processes. Sign out removes local
 credentials and attempts to revoke the remote refresh token.
 An active credential is cached in memory while valid, so individual model/tool
-calls do not repeatedly access Keychain. A newly rebuilt/ad-hoc-signed executable
-may need macOS authorization again; that protected dialog requires a person.
-It is reread under the process lock
+calls do not repeatedly access Keychain. It is reread under the process lock
 when renewal is due, in case another Studio process has already renewed it.
+
+Mac packages must use the persistent private-build signing certificate via
+`tools/sign_macos_app.py`; the bundle audit rejects ad-hoc signatures and
+identifier-only requirements. The first changeover from an old ad-hoc build
+needs one explicit **⋯ → Authorize Keychain access…** action. Choose
+**Always Allow** in macOS's dialog. Ordinary rebuilds signed with the same
+certificate keep the same designated requirement and reuse that approval.
+Changing the certificate, revoking access, or locking the Keychain can still
+require a person's action; the app does not bypass those protections.
+
+Automatic Mac credential reads, refresh writes and deletion never authorize UI.
+An isolated same-executable child disables legacy Keychain interaction for its
+own process only, so the network plugin and Connect-related code in Studio are
+unaffected. The child validates its parent's executing code signature and uses
+inherited anonymous pipes; credential values are never arguments, environment
+variables, log output, or temporary files. It only accepts the assistant's
+hashed service names. Reads/writes/deletes fail promptly when access is missing.
+Only the explicit authorization action permits an OS dialog. The per-query
+`kSecUseAuthenticationUIFail` flag alone is insufficient for legacy file-based
+Keychain items on some macOS releases; it was not used as the sole protection.
 
 Project context is sent to OpenAI when a person sends a request. That can include
 object names, settings, warnings, library search results and requested model
@@ -98,6 +116,22 @@ cmake -S tests/assistant -B build/assistant-checks -DCMAKE_PREFIX_PATH=<built-de
 cmake --build build/assistant-checks
 ctest --test-dir build/assistant-checks --output-on-failure
 ```
+
+Opt-in native Keychain checks use synthetic values and automatically delete
+their disposable Keychain. Initialize the stable build identity once first:
+
+```sh
+python3 tools/sign_macos_app.py init
+python3 tools/run_studio_assistant_keychain_checks.py
+```
+
+These checks cover process restarts, moved and changed executables signed with
+the same certificate, locked-Keychain rejection, foreign-signature rejection
+for reads/writes/deletes, and private credential-pipe/caller validation. They
+never read an actual account credential. `tests/run_keychain_checks_macos.sh`
+runs the prebuilt Intel probes on the macOS 12 Intel Mac without Python or CLT.
+Both native checks pass with atomic executable replacement; on macOS 12,
+overwriting an existing executable in place can leave stale identity state.
 
 Native model/slicer checks, after building Studio with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`:

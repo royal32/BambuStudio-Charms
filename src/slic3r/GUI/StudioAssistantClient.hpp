@@ -17,6 +17,8 @@ struct Callbacks {
     std::function<Json(const std::string&)> load_secret;
     std::function<void(const std::string&, const Json&)> save_secret;
     std::function<bool(const std::string&)> delete_secret;
+    // Optional, explicit user action. Automatic loads/saves must not show OS UI.
+    std::function<Json(const std::string&)> authorize_secret;
 };
 
 std::string random_string(size_t bytes = 32);
@@ -48,6 +50,7 @@ public:
     Json sign_in(const Json& registration, std::atomic<bool>& cancel, std::function<void(const std::string&)> open_browser,
                  std::function<void(const Json&)> registration_issued = {});
     Json models(const Json& registration, std::atomic<bool>& cancel);
+    void authorize_credentials(const Json& registration, std::atomic<bool>& cancel);
     Json respond(const Json& registration, const Json& request, std::atomic<bool>& cancel,
                  std::function<void(const std::string&)> on_text);
     // Returns whether remote revocation was confirmed. Local secrets are always removed.

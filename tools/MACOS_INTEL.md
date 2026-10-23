@@ -31,17 +31,32 @@ SDK's `usr/lib/liblzma.tbd`; do not link Homebrew's dylib.
 
 Copy the completed app to a distribution directory and replace its Resources
 symlink with a real copy of the resources. Remove build-machine runtime search
-paths and bundle any required non-system dylibs. Audit the actual distribution:
+paths and bundle any required non-system dylibs. Sign with the persistent
+private-build certificate before auditing the actual distribution:
 
 ```sh
+python3 tools/sign_macos_app.py init  # Once on the build Mac; idempotent.
+python3 tools/sign_macos_app.py sign /path/to/BambuStudio.app
 python3 tools/audit_macos_bundle.py /path/to/BambuStudio.app --arch x86_64 --macos 12.6
 codesign --verify --deep --strict /path/to/BambuStudio.app
 ```
 
 The audit checks every bundled Mach-O file, minimum OS versions, architectures,
 runtime search paths, external symlinks and non-system dependencies. Passing it
-does not replace a native launch check. An ad-hoc signature is not Developer ID
-signing or notarization.
+does not replace a native launch check. The audit rejects ad-hoc or identifier-only
+signing because that would regress persistent Keychain authorization. The private
+family certificate is not Developer ID signing or notarization. It is pinned in
+the app's designated requirement; no trusted root or system trust exception is
+installed. Keep its private key on the build Mac, in the dedicated signing
+Keychain, and never regenerate it for an ordinary rebuild. Ship only the signed
+app to the Intel Mac. The same identity signs Apple Silicon and Intel packages.
+
+Build a fresh staged app, sign and verify it, quit the installed copy, then
+replace the bundle by renaming the staged directory into place. Keep the old
+bundle as a recoverable backup. Do not copy over the installed executable's
+existing inode or sign a running app in place: macOS 12 can retain stale code
+identity information for an overwritten executable. The native Keychain tests
+cover atomic file replacement and a changed binary at the original pathname.
 
 On Intel, sign in to the same Bambu account and region in Studio and Bambu
 Connect 2.5.0-beta.15. Intel deliberately does not use the private Apple Silicon
@@ -81,3 +96,18 @@ Intel Mac in light mode: white regions remain visible and open the AMS selector.
 Local package: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`.
 The review launcher on the Intel Mac is
 `~/Downloads/Charms-Intel-Review/Launch Charms Review.command`.
+
+## Stable signing validation, 2026-10-23
+
+The certificate-signed Intel package passes the macOS 12.6 bundle audit,
+strict signature verification, and native CLI startup/private-helper rejection
+on the Intel Mac. Synthetic Keychain checks there pass across process restarts,
+changed/moved binaries, atomic replacement, locked Keychains and foreign code
+signatures. They also cover private pipe/parent validation and a host that
+reaps its children automatically. No actual account credentials are tested.
+
+The new package is staged separately at
+`~/Downloads/Charms-Assistant-Stable-Signing-Review-2026-10-23/BambuStudio.app`.
+Installed and running apps remain unchanged. Adoption of this certificate from
+the previous ad-hoc build requires the owner's explicit one-time Keychain
+authorization; background operations cannot display that prompt.

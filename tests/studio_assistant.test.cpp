@@ -47,6 +47,23 @@ int main()
         assert(client.sign_out(account,cancel)); assert(deletes==1); assert(reads==3);
         rejects([&] { ClientTestAccess::credentials(client,account,cancel); }); assert(reads==4);
     }
+    {
+        int automatic_reads=0,explicit_authorizations=0;
+        Callbacks callbacks;
+        callbacks.load_secret=[&](const std::string&) -> Json { ++automatic_reads; throw std::runtime_error("Keychain authorization needed"); };
+        callbacks.authorize_secret=[&](const std::string& client) {
+            ++explicit_authorizations;
+            return Json{{"subject",client},{"access_token","synthetic"},{"expires_at",INT64_C(4102444800)}};
+        };
+        Client client("test-host",callbacks); std::atomic<bool> cancel{false};
+        const Json account={{"client_id","account-a"},{"subject","account-a"}};
+        rejects([&] { ClientTestAccess::credentials(client,account,cancel); });
+        assert(automatic_reads==1 && explicit_authorizations==0);
+        client.authorize_credentials(account,cancel);
+        for (int i=0;i<100;++i) assert(ClientTestAccess::credentials(client,account,cancel).at("access_token")=="synthetic");
+        assert(automatic_reads==1 && explicit_authorizations==1);
+        rejects([&] { client.authorize_credentials({{"client_id","account-a"},{"subject","someone-else"}},cancel); });
+    }
     assert(base64url("f") == "Zg"); assert(base64url("fo") == "Zm8"); assert(base64url("foo") == "Zm9v");
     assert(base64url(sha256("abc")) == "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0");
     assert(random_string() != random_string());

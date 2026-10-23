@@ -53,6 +53,13 @@ def audit(app, architecture, maximum_os):
     main = executable_dir / info['CFBundleExecutable']
     if not main.is_file():
         errors.append('The bundle executable is missing')
+    else:
+        try:
+            signing = command('/usr/bin/codesign', '-d', '-r-', str(app))
+            if 'cdhash' in signing.lower() or not any(value in signing.lower() for value in ('certificate', 'anchor')):
+                errors.append('Use tools/sign_macos_app.py: the app needs a stable certificate identity for Keychain access across updates')
+        except subprocess.CalledProcessError:
+            errors.append('The app has no valid code-signing identity')
 
     def local_path(value, binary):
         if value.startswith('@loader_path/'):

@@ -450,6 +450,19 @@ Json Client::models(const Json& registration, std::atomic<bool>& cancel)
     if (models.empty()) throw std::runtime_error("No available models were returned for this account.");
     return models;
 }
+void Client::authorize_credentials(const Json& registration,std::atomic<bool>& cancel)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    check_cancel(cancel);
+    if (!m_callbacks.authorize_secret) throw std::runtime_error("Keychain authorization is not needed on this platform.");
+    const auto client=registration.value("client_id","");
+    CredentialLock guard(m_credential_lock,cancel);
+    auto saved=m_callbacks.authorize_secret(client);
+    check_cancel(cancel);
+    if (client.empty() || saved.value("access_token","").empty() || saved.value("subject","")!=registration.value("subject",""))
+        throw std::runtime_error("No saved ChatGPT connection was found for this account. Sign in to ChatGPT again.");
+    m_credentials[client]=std::move(saved);
+}
 Json Client::respond(const Json& registration, const Json& input, std::atomic<bool>& cancel, std::function<void(const std::string&)> on_text)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

@@ -43,3 +43,29 @@ existing default. Client/session and native geometry/slicer checks pass,
 including real unsupported-overhang detection followed by support generation
 and a fresh slice. These checks establish tool behavior, not Luna's ability to
 choose those tools; they are not substitutes for the pending live comparison.
+
+## Keychain fix before continuing
+
+The owner requested that repeated credential prompts be fixed before further
+model trials. The old app's ad-hoc designated requirement pinned its changing
+executable hash, so a rebuild invalidated its previous Keychain authorization.
+Staged ARM and Intel packages now use one persistent, certificate-pinned private
+build identity. Background credential operations disable authorization UI in an
+isolated same-executable child; only the explicit account-menu authorization
+action can permit a prompt. No real account credential was accessed in testing.
+
+Synthetic native checks pass on Apple Silicon and the actual macOS 12.6 Intel
+Intel Mac: restarts, moved/changed executable with the same certificate, atomic
+replacement, locked-Keychain rejection, and foreign-signature rejection for
+read/update/delete. Private pipe checks also verify the signed parent, invalid
+service rejection, host child-reaping behavior, and unchanged parent interaction
+policy. Disposable test Keychains are removed automatically. An initial test
+using only per-query UI suppression unexpectedly opened an OS prompt; that
+disposable Keychain was removed and the test corrected to disable legacy UI
+process-wide before accessing it.
+
+The currently approved installed apps are deliberately untouched while the
+owner is away. Adopting the stable certificate requires one final explicit
+authorization of the old credential with **Always Allow**; it cannot inherit
+the old ad-hoc authorization securely. No automatic authorization, model trials,
+or real account sign-in checks are run while this changeover is pending.

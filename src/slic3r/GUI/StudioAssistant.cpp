@@ -1,6 +1,7 @@
 #include "StudioAssistant.hpp"
 #include "StudioAssistantActions.hpp"
 #include "StudioAssistantChat.hpp"
+#include "StudioAssistantKeychain.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
@@ -200,6 +201,12 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     if (m_active < 0 && !m_registrations.empty()) m_active = 0;
     const std::string service_prefix = "Charms Studio Assistant/" + base64url(sha256(host)) + "/";
     Callbacks callbacks;
+#ifdef __APPLE__
+    callbacks.load_secret=[service_prefix](const std::string& client) { return keychain_load(service_prefix+base64url(sha256(client))); };
+    callbacks.save_secret=[service_prefix](const std::string& client,const Json& data) { keychain_save(service_prefix+base64url(sha256(client)),data); };
+    callbacks.delete_secret=[service_prefix](const std::string& client) { return keychain_delete(service_prefix+base64url(sha256(client))); };
+    callbacks.authorize_secret=[service_prefix](const std::string& client) { return keychain_load(service_prefix+base64url(sha256(client)),true); };
+#else
     callbacks.load_secret = [service_prefix](const std::string& client) {
         auto store = wxSecretStore::GetDefault(); wxString user; wxSecretValue secret;
         if (client.empty() || !store.Load(wxString::FromUTF8(service_prefix + base64url(sha256(client))), user, secret)) return Json::object();
@@ -216,6 +223,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
         auto store = wxSecretStore::GetDefault();
         return store.Delete(wxString::FromUTF8(service_prefix + base64url(sha256(client))));
     };
+#endif
     const auto lock_directory=std::filesystem::u8path(data_dir())/"assistant";
     std::filesystem::create_directories(lock_directory);
     m_client = std::make_shared<Client>(host, callbacks,(lock_directory/"credentials.lock").u8string());
@@ -322,6 +330,15 @@ void AssistantWindow::menu() {
         },item->GetId());
     }
     add("Sign in to ChatGPT…",[this] { connect(false); },!m_busy);
+#ifdef __APPLE__
+    add("Authorize Keychain access…",[this] {
+        auto client=m_client; const auto account=registration();
+        start([client,account](const auto& work) {
+            client->authorize_credentials(account,work->cancel);
+            work->post({{"event","models"},{"models",client->models(account,work->cancel)}});
+        });
+    },!m_busy && m_active>=0);
+#endif
     add("Add account…",[this] { connect(true); },!m_busy);
     add("Sign out",[this] {
         const auto account=registration(); auto client=m_client;

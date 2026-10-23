@@ -328,6 +328,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/StudioAssistantClient.cpp
     GUI/StudioAssistantClient.hpp
     GUI/StudioAssistantTools.cpp
+    GUI/StudioAssistantKeychain.cpp
+    GUI/StudioAssistantKeychain.hpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/WebDownPluginDlg.hpp

@@ -72,6 +72,9 @@ using namespace nlohmann;
 #include "libslic3r/ObjColorUtils.hpp"
 
 #include "BambuStudio.hpp"
+#if defined(__APPLE__) && defined(SLIC3R_GUI)
+#include "slic3r/GUI/StudioAssistantKeychain.hpp"
+#endif
 //BBS: add exception handler for win32
 #include <wx/stdpaths.h>
 #ifdef WIN32
@@ -8813,6 +8816,10 @@ extern "C" {
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+#if defined(__APPLE__) && defined(SLIC3R_GUI)
+    if (argc==2 && std::strcmp(argv[1],"--internal-charms-keychain")==0)
+        return Slic3r::GUI::Assistant::keychain_child_main();
+#endif
     std::set_new_handler(bbl_out_of_memory_handler);
     return CLI().run(argc, argv);
 }
