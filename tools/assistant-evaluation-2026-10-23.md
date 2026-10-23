@@ -155,3 +155,44 @@ Review artifacts (code through `ff3b4215b`):
 - Intel Mac: `~/Downloads/Charms-Assistant-Experience-Final-2026-10-23/BambuStudio.app`.
   Its archive hash, strict signature, startup and private credential transport
   were checked on the Intel Mac without launching its GUI or reading an account.
+
+## Appearance follow-up
+
+Code through `d713896d5` fixes Cocoa's separately filled text views inside chat
+cards, vertically centers the header controls, and matches the sparkle button
+to its final toolbar container after Notebook reparents it. Native chat checks
+pass on ARM and the actual macOS 12.6 Intel Mac. Visual inspection on the Apple Silicon Mac
+confirms continuous bubble fills, the connected model selector, and a working
+sparkle button without the dark rectangular background.
+
+The certificate-signed Mac app also needs to validate the official networking
+plug-in independently of Studio's publisher. Strict Apple-anchored Bambu team
+and module-identifier checks now pass for the official module and reject
+tampered, private-signed, unrelated and missing modules on both Macs. The full
+ARM app starts with its existing Bambu account instead of repeating the plug-in
+installation flow.
+
+The tester approved **Always Allow** for the saved ChatGPT credential. The ARM review
+app successfully reloads its model catalog after quitting and reopening without
+another authorization prompt. However, an additional packaging experiment
+(bundling two Homebrew runtime libraries and rewriting load commands) caused
+the existing credential to require authorization again despite the same pinned
+certificate requirement. Restoring the approved executable/package configuration
+restored access without another prompt. This is an unresolved real-credential
+migration/packaging limitation; the synthetic stable-identity tests do not prove
+that an old credential's approval survives every future package change. No ACL
+was weakened or credential copied/deleted during this investigation. The ARM
+review therefore retains its existing local Homebrew runtime dependencies.
+
+Updated review artifacts:
+
+- ARM: `build/arm64/Assistant-Appearance-Review/BambuStudio.app`, left open with
+  the connected assistant ready.
+- Intel archive: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`, SHA-256
+  `35075f39624a2395044268ec48149d3ee267d742550e485f7138fd890f9a1b4f`.
+- Intel Mac: `~/Downloads/Charms-Assistant-Appearance-Review-2026-10-23/BambuStudio.app`.
+  The self-contained Intel bundle passes the macOS 12.6 dependency audit and
+  strict signature checks. Its archive hash, CLI startup, unauthorized-child
+  rejection and invalid-service private transport check pass on the Intel Mac.
+  The Intel Mac's authenticated GUI was not launched by SSH. Installed working apps
+  are unchanged. No subagents were used for this follow-up.
