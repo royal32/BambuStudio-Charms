@@ -1,8 +1,12 @@
 # Studio assistant
 
-Open **Help → Studio assistant…**. Choose **Continue with ChatGPT**, finish the
+Click the **sparkle button** beside the slicing controls, or open
+**Help → Studio assistant…**. Choose **Continue with ChatGPT**, finish the
 browser sign-in, and authorize ChatGPT plan usage for **Charms Studio Assistant**.
-The model menu lists the models available to that account. **Manage usage** opens
+The model menu lists the models available to that account. **GPT-6 Luna (Max)**
+explicitly uses maximum reasoning effort; other models retain their defaults.
+The **⋯** menu contains account selection, sign-in/out, **New conversation**,
+and the option to confirm every edit. **Manage usage** in that menu opens
 ChatGPT's usage settings. This uses the connected ChatGPT plan, not a separately
 billed API key. Availability and allowance depend on that account.
 
@@ -42,7 +46,18 @@ appropriate painting tool and guide the person. A clean slice is not a guarantee
 that a part will print successfully. It cannot determine physically loaded
 filament from the family's all-white AMS slot colors.
 
-Project edits use Studio's Undo history. Uncheck **Allow changes to this project**
+The chat uses message bubbles, with compact Studio action updates below the
+assistant's reply. Text can be selected or copied. Enter sends a message;
+Shift+Enter inserts a new line. Send becomes **Stop** while working. The two
+shortcuts explain warnings or help with supports.
+
+The assistant favors short, everyday language and takes sensible, reversible
+steps without asking for every preference. For example, "make the internal
+pieces a different color" reuses a contrasting compatible project color and
+reports its choice. It still asks when identifying the pieces is ambiguous or
+a physical material choice matters, and preserves existing color painting.
+
+Project edits use Studio's Undo history. Enable **⋯ → Confirm every project edit**
 to review each edit before it runs. Saving, opening another project, selecting
 profiles, and deleting parts have confirmation dialogs. File operations use
 Studio's normal dialogs. **Stop** cancels further assistant work; an operation
@@ -57,7 +72,9 @@ system's credential store (Keychain on macOS, Credential Manager on Windows).
 Refreshes are serialized across Studio processes. Sign out removes local
 credentials and attempts to revoke the remote refresh token.
 An active credential is cached in memory while valid, so individual model/tool
-calls do not repeatedly access Keychain. It is reread under the process lock
+calls do not repeatedly access Keychain. A newly rebuilt/ad-hoc-signed executable
+may need macOS authorization again; that protected dialog requires a person.
+It is reread under the process lock
 when renewal is due, in case another Studio process has already renewed it.
 
 Project context is sent to OpenAI when a person sends a request. That can include
@@ -110,8 +127,8 @@ model request, support-setting inspection/change and reslicing, copying from
 Preview into Prepare, arranging and slicing three complete Band Mom charms,
 Undo back to one charm, and a rendered-model image returned to the model.
 Stale revisions are rejected before editing. Stop returns control promptly
-while a source lookup is waiting for iCloud. No test saved a project or sent a
-print job.
+while a source lookup is waiting for iCloud. No test changed shared source
+projects or sent a print job.
 
 The native model checks pass with Band Mom, Bee, Wanda, Larkin and Frappe source
 fixtures, plus synthetic painted-color swaps, negative volumes, support masks
@@ -139,6 +156,23 @@ original STL is unchanged. Native checks also split the raw Namaste STL into
 part IDs, negative-volume rejection, and explicit replacement of existing color
 painting while retaining support painting and other parts' assignments.
 
+## Chat refinement, 2026-10-23
+
+Apple Silicon and Intel builds, client/session checks (including explicit Luna
+Max request settings), and native model/slicer checks pass. The packaged Intel
+app passes strict signature verification and the macOS 12.6 dependency audit.
+The local sparkle launcher, compact menu, chat alignment and wrapped text have
+been checked in the native UI. The Intel update is staged separately because
+The Intel Mac's current review app is still running.
+
+The first live Sol run chooses black for Namaste's inner pieces without asking
+an unnecessary preference question, then slices successfully. The saved test
+copy preserves geometry, transforms and profiles. The remaining Sol/Luna
+comparison needs macOS Keychain authorization for the rebuilt app; results and
+the exact remaining checks are recorded in
+[the comparison notes](assistant-evaluation-2026-10-23.md). Sol remains selected.
+
 Official references: [sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in),
 [profiles and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions),
-[models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+[models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference),
+[Luna reasoning settings](https://developers.openai.com/api/docs/models/gpt-6-luna).

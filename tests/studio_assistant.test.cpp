@@ -133,6 +133,16 @@ int main()
     assert((executed==std::vector<std::string>{"inspect_project","set_settings","slice"}));
     assert(history.back().at("type")=="message");
 
+    // The Luna option is explicitly Max, while Sol retains the existing default.
+    session.respond=[&](const Json& request) {
+        assert(request.at("reasoning").at("effort")=="max"); return final;
+    };
+    run_turn(Json::array(),Json::object(),"test","gpt-6-luna",session);
+    session.respond=[&](const Json& request) {
+        assert(!request.contains("reasoning")); return final;
+    };
+    run_turn(Json::array(),Json::object(),"test","gpt-6.1-sol",session);
+
     // A missing revision or an unsupported command never reaches the app.
     for (const auto& invalid : std::vector<Json>{call("set_settings",{{"scope","global"},{"settings",Json::array()}}),call("shell",{{"command","anything"}}),call("copies",{{"revision","r1"},{"object_id","o"},{"additional",999}}),
         call("assign_part_filament",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",0}}),

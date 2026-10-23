@@ -2023,6 +2023,11 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_slice_option_btn->Enable();
     m_print_option_btn->Enable();
     sizer->Add( 0, 0, 1, wxEXPAND, 0);
+    auto* assistant_button = new ScalableButton(this, wxID_ANY, "studio_assistant", "", FromDIP(wxSize(36,32)), wxDefaultPosition, wxBU_EXACTFIT|wxBORDER_NONE, true, 22);
+    assistant_button->SetName("Studio assistant");
+    assistant_button->SetToolTip(_L("Studio assistant — help with your print"));
+    assistant_button->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { show_studio_assistant(this); });
+    sizer->Add(assistant_button,0,wxALIGN_CENTER|wxRIGHT,FromDIP(8));
     sizer->Add(expand_program_holder, 0, wxALIGN_CENTER, 0);
     sizer->Add(FromDIP(4), 0, 0, 0, 0);
     sizer->Add(split_line_icon, 0, wxALIGN_CENTER, 0);
