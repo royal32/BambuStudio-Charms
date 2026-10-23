@@ -28,6 +28,45 @@ constexpr const char* token_url = "https://auth.openai.com/api/accounts/oauth/to
 constexpr const char* api = "https://api.openai.com/v1";
 int64_t epoch() { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 void check_cancel(const std::atomic<bool>& cancel) { if (cancel) throw std::runtime_error("Stopped. Changes already applied remain available through Undo."); }
+std::string field(const Json& value,const std::string& key) {
+    const auto found=value.is_object()?value.find(key):value.end();
+    return found!=value.end() && found->is_string()?found->get<std::string>():std::string();
+}
+std::string diagnostic_field(std::string value) {
+    // Provider identifiers/parameter names are diagnostic labels, not prose.
+    // Keep copied diagnostics bounded, printable, and valid even if a proxy
+    // sends malformed bytes or truncation lands inside a Unicode character.
+    value.resize(std::min(value.size(),size_t(256)));
+    for (auto& ch:value) if (static_cast<unsigned char>(ch)<32 || static_cast<unsigned char>(ch)>126) ch='?';
+    return value;
+}
+const Json& error_fields(const Json& response) {
+    if (response.is_object() && response.contains("error") && response.at("error").is_object()) return response.at("error");
+    return response;
+}
+bool sign_in_error(const std::string& code) {
+    return code=="invalid_grant" || code=="invalid_refresh_token" || code=="token_expired" || code=="refresh_token_expired" || code=="refresh_token_invalidated" || code=="refresh_token_reused";
+}
+std::string request_message(long status,const Json& response) {
+    const auto code=field(error_fields(response),"code");
+    if (code=="subscription_sharing_usage_limit_exceeded" || status==429)
+        return "ChatGPT needs a pause. Check ⋯ → Manage usage, then try again later.";
+    if (code=="subscription_sharing_user_not_eligible")
+        return "ChatGPT plan use isn't available for this account. Check the selected account and its permissions.";
+    if (code=="subscription_sharing_unsupported_capability")
+        return "ChatGPT can't use part of this request. Try another model. If it happens again, copy the problem details from ⋯ when asking for help.";
+    if (code=="subscription_sharing_route_not_supported" || code=="chatpass_v2_scope_not_authorized" || code=="chatpass_v2_invalid_authorization_context")
+        return "Studio's ChatGPT connection needs attention. Copy the problem details from ⋯ when asking for help.";
+    if (sign_in_error(code))
+        return "This ChatGPT sign-in has expired. Choose ⋯ → Sign in to ChatGPT to reconnect.";
+    if (status>=500 || code=="subscription_sharing_usage_unavailable" || code=="subscription_sharing_user_unavailable")
+        return "ChatGPT is temporarily unavailable. Please try again in a little while.";
+    if (status==401)
+        return "ChatGPT couldn't verify this connection. Check the selected account in ⋯. If it keeps happening, sign in again.";
+    if (status==403)
+        return "ChatGPT hasn't allowed this request. Check the account's permissions. If it keeps happening, copy the problem details from ⋯ when asking for help.";
+    return "ChatGPT couldn't finish this request. Try again or choose another model. If it keeps happening, copy the problem details from ⋯ when asking for help.";
+}
 class CredentialLock {
 public:
     CredentialLock(const std::string& path,std::atomic<bool>& cancel) {
@@ -101,14 +140,39 @@ struct Transfer {
     ResponseStream* stream;
     std::exception_ptr error;
     size_t received{0};
+    long status{0};
+    std::string request_id;
 };
+size_t receive_header(char* data,size_t size,size_t count,void* ptr) {
+    auto& transfer=*static_cast<Transfer*>(ptr);
+    const auto bytes=size*count;
+    try {
+        const std::string line(data,bytes);
+        if (line.rfind("HTTP/",0)==0) {
+            std::istringstream status(line); std::string protocol;
+            status>>protocol>>transfer.status; transfer.request_id.clear();
+        } else if (const auto colon=line.find(':'); colon!=std::string::npos) {
+            auto key=line.substr(0,colon);
+            std::transform(key.begin(),key.end(),key.begin(),[](unsigned char ch) { return std::tolower(ch); });
+            if (key=="x-request-id") {
+                const auto begin=line.find_first_not_of(" \t",colon+1),end=line.find_last_not_of(" \t\r\n");
+                if (begin!=std::string::npos && end>=begin) transfer.request_id=line.substr(begin,std::min(size_t(256),end-begin+1));
+            }
+        }
+    } catch (...) { transfer.error=std::current_exception(); return 0; }
+    return bytes;
+}
 size_t receive(char* data, size_t size, size_t count, void* ptr)
 {
     auto& t = *static_cast<Transfer*>(ptr);
     const size_t bytes = size * count;
     if ((t.received += bytes) > 32 * 1024 * 1024 || *t.cancel) return 0;
     try {
-        if (t.stream) t.stream->feed(std::string(data, bytes));
+        if (t.status>=400) {
+            // Admission errors may be plain JSON rather than SSE. Never feed
+            // them to the streaming decoder or discard their structured code.
+            t.body.append(data,std::min(bytes,size_t(65536)-t.body.size()));
+        } else if (t.stream) t.stream->feed(std::string(data, bytes));
         else t.body.append(data, bytes);
     } catch (...) { t.error = std::current_exception(); return 0; }
     return bytes;
@@ -142,6 +206,8 @@ Json request(const std::string& url, const std::string& body, const std::string&
 #endif
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, receive);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &transfer);
+    curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, receive_header);
+    curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &transfer);
     curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, progress);
     curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &cancel);
@@ -155,16 +221,20 @@ Json request(const std::string& url, const std::string& body, const std::string&
     long status = 0;
     curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
     if (status >= 400) {
-        std::string detail;
-        if (status == 401) detail = " Please sign in to ChatGPT again.";
-        if (status == 403) detail = " Check that ChatGPT plan usage is authorized for Studio and that this model is available.";
-        if (status == 429) detail = " Your account or this app has reached a usage limit. Check Manage usage and try later.";
-        throw std::runtime_error("OpenAI request failed (HTTP " + std::to_string(status) + ")." + detail);
+        auto response=Json::parse(transfer.body,nullptr,false);
+        if (response.is_discarded()) response=transfer.body;
+        throw RequestError(status,std::move(response),transfer.request_id);
     }
-    if (transfer.error) std::rethrow_exception(transfer.error);
-    if (result != CURLE_OK) throw std::runtime_error(std::string("OpenAI connection failed: ") + curl_easy_strerror(result));
+    if (transfer.error) {
+        try { std::rethrow_exception(transfer.error); }
+        catch (const RequestError& error) { throw RequestError(status,error.response(),transfer.request_id); }
+    }
+    if (result != CURLE_OK) throw RequestError::connection(result);
     if (status < 200 || status >= 300) throw std::runtime_error("OpenAI returned an unexpected response.");
-    if (stream) return stream->finish();
+    if (stream) {
+        try { return stream->finish(); }
+        catch (const RequestError& error) { throw RequestError(status,error.response(),transfer.request_id); }
+    }
     if (allow_empty && transfer.body.empty()) return Json::object();
     auto json = Json::parse(transfer.body, nullptr, false);
     if (json.is_discarded()) throw std::runtime_error("OpenAI returned an unreadable response.");
@@ -176,6 +246,30 @@ bool has_scope(const Json& credentials, const std::string& scope)
     for (std::string word; input >> word;) if (word == scope) return true;
     return false;
 }
+}
+
+RequestError::RequestError(long status,Json response,const std::string& request_id)
+    : std::runtime_error(request_message(status,response)),m_response(std::move(response))
+{
+    const auto& error=error_fields(m_response);
+    m_diagnostics={{"http_status",status},{"code",diagnostic_field(field(error,"code"))},
+        {"param",diagnostic_field(field(error,"param"))},{"request_id",diagnostic_field(request_id)}};
+    if (sign_in_error(field(error,"code"))) m_diagnostics["recovery"]="sign_in";
+}
+RequestError::RequestError(const std::string& message,Json diagnostics)
+    : std::runtime_error(message),m_diagnostics(std::move(diagnostics)) {}
+RequestError RequestError::connection(int code) {
+    std::string message="The ChatGPT connection was interrupted. Please try again.";
+    if (code==CURLE_COULDNT_RESOLVE_HOST || code==CURLE_COULDNT_RESOLVE_PROXY || code==CURLE_COULDNT_CONNECT)
+        message="I couldn't reach ChatGPT. Check your internet connection, then try again.";
+    else if (code==CURLE_OPERATION_TIMEDOUT)
+        message="ChatGPT took too long to reply. Please try again when you're ready.";
+    else if (code==CURLE_PEER_FAILED_VERIFICATION || code==CURLE_SSL_CONNECT_ERROR)
+        message="A secure connection to ChatGPT couldn't be verified. Check this computer's date and internet connection, then try again.";
+    return RequestError(message,{{"connection_error",code}});
+}
+RequestError RequestError::sign_in(const std::string& message) {
+    return RequestError(message,{{"recovery","sign_in"}});
 }
 
 std::string base64url(const std::string& bytes)
@@ -287,18 +381,21 @@ void ResponseStream::event()
 {
     if (m_data.empty()) return;
     if (m_data == "[DONE]") { m_data.clear(); return; }
-    const auto value = Json::parse(m_data);
+    const auto value = Json::parse(m_data,nullptr,false);
     m_data.clear();
-    const auto type = value.value("type", "");
-    if (type == "response.output_text.delta" && on_text) { m_text_streamed = true; on_text(value.value("delta", "")); }
-    if (type == "response.output_item.done") m_output[value.at("output_index").get<size_t>()] = value.at("item");
-    if (type == "response.completed") {
-        m_response = value.at("response");
-        if (m_response.value("status", "") != "completed") throw std::runtime_error("The assistant response did not complete.");
-        m_completed = true;
-    }
-    if (type == "response.failed" || type == "response.incomplete" || type == "error")
-        throw std::runtime_error("The assistant response could not be completed. Try again or choose another model.");
+    if (!value.is_object()) throw RequestError(0,Json::object());
+    try {
+        const auto type = value.value("type", "");
+        if (type == "response.output_text.delta" && on_text) { m_text_streamed = true; on_text(value.value("delta", "")); }
+        if (type == "response.output_item.done") m_output[value.at("output_index").get<size_t>()] = value.at("item");
+        if (type == "response.completed") {
+            m_response = value.at("response");
+            if (m_response.value("status", "") != "completed") throw std::runtime_error("The assistant response did not complete.");
+            m_completed = true;
+        }
+        if (type == "response.failed" || type == "response.incomplete" || type == "error")
+            throw RequestError(0,value.value("response",value));
+    } catch (const Json::exception&) { throw RequestError(0,value); }
 }
 void ResponseStream::feed(const std::string& bytes)
 {
@@ -415,8 +512,7 @@ Json Client::credentials(const Json& registration, std::atomic<bool>& cancel)
 {
     check_cancel(cancel);
     const auto client = registration.value("client_id", "");
-    if (client.empty()) throw std::runtime_error("Connect your ChatGPT account first.");
-    // Keychain may require explicit user approval per read for an ad-hoc build.
+    if (client.empty()) throw RequestError::sign_in("Connect your ChatGPT account first.");
     // Keep a valid session in memory across model/tool calls. Re-read the OS
     // store under the cross-process lock only when renewal is actually needed.
     const auto cached=m_credentials.find(client);
@@ -426,15 +522,15 @@ Json Client::credentials(const Json& registration, std::atomic<bool>& cancel)
     CredentialLock guard(m_credential_lock,cancel);
     auto saved = m_callbacks.load_secret(client);
     if (saved.value("access_token", "").empty() || saved.value("subject", "") != registration.value("subject", ""))
-        throw std::runtime_error("Sign in to this ChatGPT account again.");
+        throw RequestError::sign_in("Sign in to this ChatGPT account again.");
     if (saved.value("expires_at", int64_t(0)) > epoch()+90) { m_credentials[client]=saved; return saved; }
-    if (saved.value("refresh_token", "").empty()) throw std::runtime_error("Your ChatGPT session expired. Sign in again.");
+    if (saved.value("refresh_token", "").empty()) throw RequestError::sign_in("Your ChatGPT session expired. Sign in again.");
     auto renewed = request(token_url, form_encode({{"grant_type", "refresh_token"}, {"client_id", client},
         {"refresh_token", saved.at("refresh_token")}, {"resource", api}}), "", true, cancel);
-    if (renewed.value("access_token", "").empty()) throw std::runtime_error("ChatGPT did not renew the session. Sign in again.");
+    if (renewed.value("access_token", "").empty()) throw RequestError::sign_in("ChatGPT did not renew the session. Sign in again.");
     for (auto it = renewed.begin(); it != renewed.end(); ++it) saved[it.key()] = it.value();
     saved["expires_at"] = epoch() + renewed.value("expires_in", 3600);
-    if (!has_scope(saved, "chatgpt.tokens.use.direct")) throw std::runtime_error("ChatGPT plan usage is no longer authorized. Reconnect your account.");
+    if (!has_scope(saved, "chatgpt.tokens.use.direct")) throw RequestError::sign_in("ChatGPT plan usage is no longer authorized. Reconnect your account.");
     m_callbacks.save_secret(client, saved);
     m_credentials[client]=saved;
     return saved;
@@ -460,7 +556,7 @@ void Client::authorize_credentials(const Json& registration,std::atomic<bool>& c
     auto saved=m_callbacks.authorize_secret(client);
     check_cancel(cancel);
     if (client.empty() || saved.value("access_token","").empty() || saved.value("subject","")!=registration.value("subject",""))
-        throw std::runtime_error("No saved ChatGPT connection was found for this account. Sign in to ChatGPT again.");
+        throw RequestError::sign_in("No saved ChatGPT connection was found for this account. Sign in to ChatGPT again.");
     m_credentials[client]=std::move(saved);
 }
 Json Client::respond(const Json& registration, const Json& input, std::atomic<bool>& cancel, std::function<void(const std::string&)> on_text)

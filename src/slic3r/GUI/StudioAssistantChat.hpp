@@ -9,7 +9,7 @@
 #include <wx/menu.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
-#include "GUI_App.hpp"
+#include <algorithm>
 
 namespace Slic3r { namespace GUI {
 
@@ -17,7 +17,7 @@ namespace Slic3r { namespace GUI {
 // markup is involved. The original strings are retained so resizing can rewrap.
 class AssistantBubble : public wxPanel {
 public:
-    AssistantBubble(wxWindow* parent, bool user, const wxString& text)
+    AssistantBubble(wxWindow* parent, bool user, const wxString& text, bool dark)
         : wxPanel(parent), m_user(user), m_body(text)
     {
         SetBackgroundStyle(wxBG_STYLE_PAINT);
@@ -38,17 +38,21 @@ public:
             dc.DrawRoundedRectangle(GetClientRect(), FromDIP(12));
         });
         auto copy = [this](wxContextMenuEvent&) {
-            wxMenu menu; auto* item=menu.Append(wxID_ANY,"Copy message");
+            wxMenu menu;
+            if (m_text->HasSelection()) {
+                auto* selected=menu.Append(wxID_ANY,"Copy selected text");
+                menu.Bind(wxEVT_MENU,[this](wxCommandEvent&) { m_text->Copy(); },selected->GetId());
+            }
+            auto* item=menu.Append(wxID_ANY,"Copy message");
             menu.Bind(wxEVT_MENU,[this](wxCommandEvent&) {
                 if (wxTheClipboard->Open()) { wxTheClipboard->SetData(new wxTextDataObject(m_body)); wxTheClipboard->Close(); }
             }, item->GetId());
             PopupMenu(&menu);
         };
         Bind(wxEVT_CONTEXT_MENU,copy); m_text->Bind(wxEVT_CONTEXT_MENU,copy);
-        theme();
+        theme(dark);
     }
-    void theme() {
-        const bool dark=wxGetApp().dark_mode();
+    void theme(bool dark) {
         const wxColour background=m_user ? (dark?wxColour("#234d40"):wxColour("#dff3e9")) :
                                                    (dark?wxColour("#343839"):wxColour("#f0f2f3"));
         SetBackgroundColour(background);
@@ -57,9 +61,15 @@ public:
         m_activity->SetForegroundColour(dark?wxColour("#b8c2c1"):wxColour("#53625f"));
         Refresh();
     }
-    void delta(const wxString& value, bool paragraph) { if (paragraph && !m_body.empty()) m_body+="\n\n"; m_body+=value; }
-    void activity(const wxString& value) { m_steps=value; }
+    bool empty() const { return m_body.empty(); }
+    void text(const wxString& value) { if (m_body!=value) { m_body=value; m_dirty=true; } }
+    void delta(const wxString& value, bool paragraph) { if (paragraph && !m_body.empty()) m_body+="\n\n"; m_body+=value; m_dirty=true; }
+    void activity(const wxString& value) { if (m_steps!=value) { m_steps=value; m_dirty=true; } }
     void rewrap(int width) {
+        // Streaming updates only need to measure the changing reply. Rewrapping
+        // the entire transcript for every token makes longer chats sluggish.
+        if (!m_dirty && m_wrap_width==width) return;
+        m_dirty=false; m_wrap_width=width;
         const int inner=std::max(FromDIP(80),width-FromDIP(24));
         if (m_text->GetValue()!=m_body) m_text->ChangeValue(m_body);
         if (m_activity->GetValue()!=m_steps) m_activity->ChangeValue(m_steps);
@@ -80,6 +90,8 @@ public:
     }
 private:
     bool m_user;
+    bool m_dirty{true};
+    int m_wrap_width{0};
     wxString m_body, m_steps;
     wxTextCtrl *m_text, *m_activity;
 };

@@ -1,5 +1,6 @@
 #include "StudioAssistantActions.hpp"
 #include "StudioAssistantModel.hpp"
+#include "StudioAssistantLibrarySearch.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
@@ -135,16 +136,16 @@ Json Actions::start_library(const std::string& tool, const Json& args)
         // are global and must not be modified from a background worker.
         try {
             if (transfer->tool == "search_library") {
-                Json matches = Json::array();
-                const auto query = lower(transfer->args.at("query").get<std::string>());
+                LibrarySearch search(transfer->args.at("query").get<std::string>());
                 for (const auto& item : std::filesystem::directory_iterator(root)) {
                     if (transfer->cancel) return;
-                    const auto filename = item.path().filename().u8string();
-                    if (lower(filename).find(query) == std::string::npos || filename.size()<10 || lower(filename.substr(filename.size()-10)) != ".gcode.3mf") continue;
-                    matches.push_back({{"entry_id", base64url(sha256(filename))}, {"name", filename.substr(0,filename.size()-10)}, {"filename", filename}});
-                    if (matches.size()>=40) break;
+                    search.consider(item.path().filename().u8string());
                 }
-                transfer->result = {{"entries", matches}};
+                Json matches = Json::array();
+                for (const auto& filename : search.filenames())
+                    matches.push_back({{"entry_id", base64url(sha256(filename))}, {"name", filename.substr(0,filename.size()-10)}, {"filename", filename}});
+                transfer->result = {{"entries", matches}, {"total_matches", search.total_matches()}, {"truncated", search.truncated()}};
+                if (search.truncated()) transfer->result["note"]="Only the first 40 matching names are shown in alphabetical order. More matches exist; refine the search query before deciding the requested model is unavailable.";
             } else {
                 std::set<std::string> available;
                 for (const auto& source : LibraryStorage::source_projects(root,name,overrides)) if (source.value("available",false)) available.insert(source.at("path").get<std::string>());
@@ -342,6 +343,12 @@ Json Actions::execute(const std::string& tool, const Json& args)
     if (revision_required.count(tool) && !args.contains("revision")) throw std::runtime_error("Inspect the project and provide its current revision before editing.");
     if (args.contains("revision") && args.at("revision") != inspect().at("revision"))
         throw std::runtime_error("The project changed since inspection. Inspect again before applying this action.");
+    if (tool == "orient" || tool == "move_to_plate" || tool == "transform" || tool == "delete_selected") {
+        // Inspection reports Prepare's selection. Preview has its own canvas
+        // and selection, so bind Prepare before acting on the inspected items.
+        wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
+        p.select_view_3D("3D");
+    }
     if (tool == "select_objects") { select(p, args.at("object_ids").get<std::vector<std::string>>()); return inspect(); }
     if (tool=="select_parts" || tool=="assign_part_filament" || tool=="split_parts") {
         auto* object=find_object(p,args.at("object_id"));
@@ -429,6 +436,7 @@ Json Actions::execute(const std::string& tool, const Json& args)
         ModelObject* object = scope == "object" ? find_object(p, args.at("object_id")) : nullptr;
         PartPlate* plate = scope == "plate" ? find_plate(p, args.at("plate")) : nullptr;
         if (scope != "global" && !object && !plate) throw std::runtime_error("Unknown settings scope.");
+        if (object) validate_object_settings(changes);
         // Validate the whole candidate before touching the live project.
         auto candidate = wxGetApp().preset_bundle->full_config();
         if (plate) candidate.apply(*plate->config());
@@ -439,7 +447,12 @@ Json Actions::execute(const std::string& tool, const Json& args)
         for (const auto& problem : validation) if (!previous_validation.count(problem.first) || previous_validation.at(problem.first) != problem.second)
             throw std::runtime_error("Studio rejected these settings: " + problem.second);
         p.take_snapshot("Assistant: change process settings");
-        if (object) { object->config.apply(changes); p.changed_object(*object); }
+        if (object) {
+            object->config.apply(changes);
+            p.sidebar().obj_list()->object_config_options_changed({object, nullptr});
+            // Refresh settings and slicing without changed_object(), which
+            // realigns the object to the bed even though no mesh was edited.
+        }
         else if (plate) { plate->config()->apply(changes); plate->update_slice_result_valid_state(false); p.update(); }
         else { auto process = global; process.apply(changes); wxGetApp().get_tab(Preset::TYPE_PRINT)->load_config(process); p.on_config_change(wxGetApp().preset_bundle->full_config()); }
         p.update();
@@ -568,13 +581,20 @@ Json Actions::execute(const std::string& tool, const Json& args)
     if (tool == "document") {
         const auto action = args.at("action").get<std::string>();
         if (action == "open") { if (p.load_project() == wxID_CANCEL) return {{"cancelled", true}}; }
-        else if (action == "import") p.add_file();
+        else if (action == "import") {
+            p.add_file();
+            auto result=inspect();
+            result["outcome"]="unconfirmed";
+            result["status"]="The import chooser closed. This does not confirm a model was added.";
+            result["instruction"]="Compare objects and parts with the state before import. Honor Studio's busy/loading state; loading or SVG processing may still be running. Do not claim an import succeeded or reopen the chooser solely because it closed.";
+            return result;
+        }
         else if (action == "save" || action == "save_as") {
             if (p.save_project(action == "save_as") != wxID_YES) return {{"cancelled", true}};
         } else if (action == "export_sliced") {
             if (!p.get_partplate_list().get_curr_plate()->is_slice_result_ready_for_export()) throw std::runtime_error("Slice this plate successfully before exporting.");
             p.export_gcode_3mf(false);
-            return {{"status", "The export dialog was opened. The person must confirm whether a file was saved."}};
+            return {{"outcome", "unconfirmed"}, {"status", "The export dialog was opened. The person must confirm whether a file was saved."}};
         } else throw std::runtime_error("Unknown document action.");
         return inspect();
     }

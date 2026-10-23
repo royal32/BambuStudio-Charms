@@ -2,6 +2,7 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/bn.h>
+#include <curl/curl.h>
 #include <cassert>
 #include <iostream>
 
@@ -27,6 +28,70 @@ std::string jwt(EVP_PKEY* key, const Json& claims, const Json& header = {{"alg",
 }
 int main()
 {
+    {
+        const Json body={{"error",{{"code","subscription_sharing_usage_limit_exceeded"},{"param",nullptr},{"message","provider detail must not appear in chat"}}}};
+        RequestError limit(429,body,"req_synthetic");
+        assert(std::string(limit.what()).find("Manage usage")!=std::string::npos);
+        assert(std::string(limit.what()).find("provider detail")==std::string::npos);
+        assert(limit.response()==body && limit.diagnostics().at("request_id")=="req_synthetic");
+        assert(limit.diagnostics().at("param")=="");
+        RequestError admission(403,{{"detail","unstructured admission text"}},"req_admission");
+        assert(std::string(admission.what()).find("permissions")!=std::string::npos);
+        assert(admission.response().contains("detail"));
+        assert(admission.diagnostics().dump().find("unstructured admission text")==std::string::npos);
+        RequestError temporary(503,{{"error",{{"code","subscription_sharing_usage_unavailable"}}}});
+        assert(std::string(temporary.what()).find("temporarily unavailable")!=std::string::npos);
+        assert(std::string(temporary.what()).find("sign in")==std::string::npos);
+        assert(!temporary.diagnostics().contains("recovery"));
+        RequestError expired(400,{{"error",{{"code","invalid_grant"}}}});
+        assert(expired.diagnostics().at("recovery")=="sign_in");
+        Callbacks missing;
+        missing.load_secret=[](const std::string&) { return Json::object(); };
+        Client no_session("test-host",missing); std::atomic<bool> not_cancelled{false};
+        try {
+            ClientTestAccess::credentials(no_session,{{"client_id","test"},{"subject","test"}},not_cancelled);
+            assert(false);
+        } catch (const RequestError& error) { assert(error.diagnostics().at("recovery")=="sign_in"); }
+        RequestError ineligible(403,{{"error",{{"code","subscription_sharing_user_not_eligible"}}}});
+        assert(std::string(ineligible.what()).find("isn't available for this account")!=std::string::npos);
+        const auto timeout=RequestError::connection(CURLE_OPERATION_TIMEDOUT);
+        assert(std::string(timeout.what()).find("too long")!=std::string::npos);
+        assert(timeout.diagnostics().at("connection_error")==CURLE_OPERATION_TIMEDOUT);
+        assert(std::string(RequestError::connection(CURLE_COULDNT_CONNECT).what()).find("internet connection")!=std::string::npos);
+        RequestError unusual(400,{{"error",{{"code",std::string(255,'x')+"é"},{"param","a\nparameter"}}}},std::string(255,'r')+"é");
+        assert(!unusual.diagnostics().dump().empty());
+        assert(unusual.diagnostics().at("code").get<std::string>().size()<=256);
+        assert(unusual.diagnostics().at("param")=="a?parameter");
+        for (const auto& packet:std::vector<std::string>{"{\"private\":\"PRIVATE_SENTINEL", "{\"type\":7,\"private\":\"PRIVATE_SENTINEL\"}","null"}) {
+            try {
+                ResponseStream decoder;
+                decoder.feed("data: "+packet+"\n\n");
+                assert(false);
+            } catch (const RequestError& error) {
+                assert(std::string(error.what()).find("PRIVATE_SENTINEL")==std::string::npos);
+                assert(error.diagnostics().dump().find("PRIVATE_SENTINEL")==std::string::npos);
+            }
+        }
+        // Error events inside an otherwise-open stream keep the structured
+        // cause, rather than discarding it behind a generic parse failure.
+        try {
+            ResponseStream decoder;
+            decoder.feed("data: "+Json({{"type","response.failed"},{"response",{{"error",{{"code","subscription_sharing_usage_limit_exceeded"}}}}}}).dump()+"\n\n");
+            assert(false);
+        } catch (const RequestError& error) {
+            assert(error.diagnostics().at("code")=="subscription_sharing_usage_limit_exceeded");
+            assert(std::string(error.what()).find("Manage usage")!=std::string::npos);
+        }
+        try {
+            ResponseStream decoder;
+            decoder.feed("data: "+Json({{"type","response.failed"},{"response",{{"error",{{"code","subscription_sharing_usage_unavailable"}}}}}}).dump());
+            decoder.finish(); // A final frame need not end with a blank line.
+            assert(false);
+        } catch (const RequestError& error) {
+            assert(error.diagnostics().at("code")=="subscription_sharing_usage_unavailable");
+            assert(std::string(error.what()).find("temporarily unavailable")!=std::string::npos);
+        }
+    }
     {
         int reads=0,deletes=0; bool removed=false; std::string token="first";
         Callbacks callbacks;
@@ -164,6 +229,7 @@ int main()
     for (const auto& invalid : std::vector<Json>{call("set_settings",{{"scope","global"},{"settings",Json::array()}}),call("shell",{{"command","anything"}}),call("copies",{{"revision","r1"},{"object_id","o"},{"additional",999}}),
         call("assign_part_filament",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",0}}),
         call("assign_part_filament",{{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",1}}),
+        call("document",{{"action","unknown"}}),
         call("split_parts",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v1","v2"})}})}) {
         response_index=0; bool executed_bad=false;
         session.respond=[&](const Json& request) {
@@ -192,6 +258,105 @@ int main()
     };
     session.tool=[&](const std::string&,const Json&) -> Json { ++attempts; throw std::runtime_error("stale project"); };
     run_turn(Json::array(),Json::object(),"test","test-model",session); assert(attempts==1);
+    // A failed/cancelled action invalidates the rest of a preplanned batch.
+    // Preserve one output per call so the model can reassess the actual state.
+    for (const auto& failure : std::vector<Json>{{{"cancelled",true}},{{"error","stale project"}},{{"operation_error","Slicing failed"}}}) {
+        response_index=0; executed.clear();
+        auto batch=call("arrange",{{"revision","r1"}},"call_first");
+        batch["output"].push_back(call("slice",Json::object(),"call_second").at("output").at(0));
+        session.respond=[&](const Json& request) {
+            if (response_index++==0) return batch;
+            const auto& input=request.at("input");
+            assert(input.at(input.size()-2).at("call_id")=="call_first");
+            assert(Json::parse(input.at(input.size()-2).at("output").get<std::string>())==failure);
+            assert(input.back().at("call_id")=="call_second");
+            const auto skipped=Json::parse(input.back().at("output").get<std::string>());
+            assert(skipped.at("skipped")==true && skipped.contains("error"));
+            return final;
+        };
+        session.tool=[&](const std::string& name,const Json&) { executed.push_back(name); return failure; };
+        run_turn(Json::array(),Json::object(),"test","test-model",session);
+        assert((executed==std::vector<std::string>{"arrange"}));
+    }
+    response_index=0; executed.clear();
+    session.respond=[&](const Json&) {
+        if (response_index++!=0) return final;
+        auto batch=call("inspect_project",Json::object(),"inspect_first");
+        batch["output"].push_back(call("inspect_settings",{{"query","supports"}},"inspect_second").at("output").at(0));
+        return batch;
+    };
+    session.tool=[&](const std::string& name,const Json&) { executed.push_back(name); return Json{{"revision","r1"}}; };
+    run_turn(Json::array(),Json::object(),"test","test-model",session);
+    assert((executed==std::vector<std::string>{"inspect_project","inspect_settings"}));
+    // A declined native dialog cannot be reopened by a model retry in the same
+    // turn, including the alternate qualified tool name. A new user turn can.
+    response_index=0; executed.clear();
+    session.respond=[&](const Json& request) {
+        if (response_index++==0) return call("document",{{"action","save"}},"save_first");
+        if (response_index==2) return call("studio.document",{{"action","save"}},"save_retry");
+        if (response_index==3) {
+            const auto skipped=Json::parse(request.at("input").back().at("output").get<std::string>());
+            assert(skipped.at("cancelled")==true && skipped.at("skipped")==true);
+            return call("inspect_project",Json::object(),"inspect_after_cancel");
+        }
+        return final;
+    };
+    session.tool=[&](const std::string& name,const Json&) {
+        executed.push_back(name); return name=="document"?Json{{"cancelled",true}}:Json{{"revision","r1"}};
+    };
+    const auto cancelled_history=run_turn(Json::array(),Json::object(),"Save this project","test-model",session);
+    assert((executed==std::vector<std::string>{"document","inspect_project"}));
+    response_index=0; executed.clear();
+    session.respond=[&](const Json&) { return response_index++==0?call("document",{{"action","save"}},"save_new_turn"):final; };
+    run_turn(cancelled_history,Json::object(),"Try saving again","test-model",session);
+    assert((executed==std::vector<std::string>{"document"}));
+    // Import/export dialogs may report no native outcome. Never assume their
+    // dependent actions are ready, or reopen the same chooser to find out.
+    response_index=0; executed.clear();
+    const Json unconfirmed={{"outcome","unconfirmed"},{"message","Studio did not report whether the import completed."}};
+    session.respond=[&](const Json& request) {
+        switch (response_index++) {
+        case 0: {
+            auto batch=call("document",{{"action","import"}},"import_first");
+            batch["output"].push_back(call("document",{{"action","save"}},"save_before_inspection").at("output").at(0));
+            return batch;
+        }
+        case 1: {
+            const auto& input=request.at("input");
+            assert(input.at(input.size()-2).at("call_id")=="import_first");
+            assert(Json::parse(input.at(input.size()-2).at("output").get<std::string>())==unconfirmed);
+            assert(input.back().at("call_id")=="save_before_inspection");
+            const auto skipped=Json::parse(input.back().at("output").get<std::string>());
+            assert(skipped.at("skipped")==true);
+            assert(skipped.at("error").get<std::string>().find("needs its result checked")!=std::string::npos);
+            return call("studio.document",{{"action","import"}},"import_retry");
+        }
+        case 2: {
+            const auto skipped=Json::parse(request.at("input").back().at("output").get<std::string>());
+            assert(skipped.at("outcome")=="unconfirmed" && skipped.at("skipped")==true);
+            assert(!skipped.contains("cancelled") && !skipped.contains("error"));
+            return call("inspect_project",Json::object(),"inspect_import_result");
+        }
+        case 3: {
+            const auto inspected=Json::parse(request.at("input").back().at("output").get<std::string>());
+            assert(inspected.at("objects").at(0).at("id")=="imported-model");
+            return call("document",{{"action","save"}},"save_after_inspection");
+        }
+        default: return final;
+        }
+    };
+    session.tool=[&](const std::string& name,const Json& args) {
+        executed.push_back(name=="document"?name+":"+args.at("action").get<std::string>():name);
+        if (name=="document" && args.at("action")=="import") return unconfirmed;
+        if (name=="inspect_project") return Json{{"revision","r2"},{"objects",Json::array({{{"id","imported-model"}}})}};
+        return Json{{"saved",true}};
+    };
+    const auto import_history=run_turn(Json::array(),Json::object(),"Import a model and save the project","test-model",session);
+    assert((executed==std::vector<std::string>{"document:import","inspect_project","document:save"}));
+    response_index=0; executed.clear();
+    session.respond=[&](const Json&) { return response_index++==0?call("document",{{"action","import"}},"import_new_turn"):final; };
+    run_turn(import_history,Json::object(),"Import another model","test-model",session);
+    assert((executed==std::vector<std::string>{"document:import"}));
     // Images use multimodal tool results, not a base64 blob in ordinary text.
     response_index=0;
     session.respond=[&](const Json& request) {

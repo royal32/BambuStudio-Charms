@@ -12,6 +12,16 @@
 #include <stdexcept>
 
 namespace Slic3r { namespace GUI { namespace Assistant {
+inline void validate_object_settings(const DynamicPrintConfig& changes)
+{
+    // The slicer reads object and region options from object overrides. A
+    // global-only option can be stored there, but would have no effect.
+    const PrintObjectConfig object_config;
+    const PrintRegionConfig region_config;
+    for (const auto& key : changes.keys())
+        if (!object_config.has(key) && !region_config.has(key))
+            throw std::runtime_error("This setting cannot be changed for one object: " + key + ". Use global or plate scope instead.");
+}
 inline std::vector<ModelVolume*> part_targets(ModelObject& object,const std::vector<std::string>& ids)
 {
     if (ids.empty() || ids.size()>256) throw std::runtime_error("Choose between 1 and 256 parts.");

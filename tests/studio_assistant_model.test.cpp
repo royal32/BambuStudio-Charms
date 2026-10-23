@@ -63,7 +63,7 @@ int main(int argc,char** argv)
     Model overhang;
     auto* unsupported=overhang.add_object("Unsupported overhang","",make_cube(6,6,6));
     auto cap=make_cube(24,24,2); cap.translate(Vec3f(-9,-9,6)); unsupported->add_volume(std::move(cap));
-    unsupported->add_instance(Vec3d(80,80,0),Vec3d::Ones(),Vec3d::Zero(),Vec3d::Ones());
+    unsupported->add_instance(Vec3d(80,80,-0.4),Vec3d::Ones(),Vec3d::Zero(),Vec3d::Ones());
     const auto fixture=(boost::filesystem::path(PROJECT_TEST_TMP)/"Unsupported overhang.stl").string();
     assert(store_stl(fixture.c_str(), &overhang, true));
     auto process=DynamicPrintConfig::full_print_config();
@@ -78,11 +78,26 @@ int main(int argc,char** argv)
         return false;
     };
     assert(needs_support());
-    process.set_key_value("enable_support",new ConfigOptionBool(true));
+    DynamicPrintConfig object_support;
+    object_support.set_key_value("enable_support",new ConfigOptionBool(true));
+    object_support.set_key_value("support_on_build_plate_only",new ConfigOptionBool(false));
+    validate_object_settings(object_support);
+    // These global-only options can be stored in ModelConfig, but the slicer
+    // does not consume them as object overrides. Refuse misleading success.
+    for (const auto* key : {"enable_prime_tower", "print_sequence"}) {
+        DynamicPrintConfig invalid;
+        invalid.set_key_value(key, process.option(key)->clone());
+        rejects([&] { validate_object_settings(invalid); });
+    }
+    const auto support_pose=unsupported->instances.front()->get_transformation().get_matrix();
+    unsupported->config.apply(object_support);
+    assert(unsupported->instances.front()->get_transformation().get_matrix().matrix().isApprox(support_pose.matrix()));
     print.apply(overhang,process); print.process();
     assert(!needs_support());
     bool generated=false; for (const auto* item:print.objects()) generated|=!item->support_layers().empty(); assert(generated);
-    std::cout << "Real slicer: unsupported-overhang warning detected; support generation and reslice produced support layers and refreshed diagnostics.\n";
+    assert(!process.opt_bool("enable_support"));
+    std::cout << "Object-only setting validation and native support override passed; global support remains disabled and object placement is unchanged.\n";
+    std::cout << "Real slicer: unsupported-overhang warning detected; object support generation and reslice produced support layers and refreshed diagnostics.\n";
     for (int i=1;i<argc;++i) {
         DynamicPrintConfig config; auto project=read_source_model(argv[i],config);
         if (boost::filesystem::path(argv[i]).extension()==".stl") {

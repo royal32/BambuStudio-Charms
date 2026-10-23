@@ -69,3 +69,58 @@ owner is away. Adopting the stable certificate requires one final explicit
 authorization of the old credential with **Always Allow**; it cannot inherit
 the old ad-hoc authorization securely. No automatic authorization, model trials,
 or real account sign-in checks are run while this changeover is pending.
+
+## Further experience checks
+
+The follow-up work was assisted by two GPT-6.1 Sol High reviewers and a GPT-6
+Luna quota watcher. No reset credit is consumed automatically. Live model
+comparison remains pending explicit authorization of the certificate-signed
+review app; synthetic tests do not count as model capability trials.
+
+Changes include Stop/Escape cancellation and its worker wake-up race, suppression
+of late streamed/completion events after Stop, preserved drafts when using quick
+actions, retained text selection/focus, cached transcript layout, and adjacent
+streamed-text coalescing. Failed or declined preplanned action batches stop, and
+a declined tool cannot reopen its dialog in the same user turn. Async library
+failures no longer receive a completed tick.
+
+Native object support edits preserve placement and reject global-only keys that
+would have no effect as object overrides. Selection edits bind Prepare's inspected
+selection even after Preview. Library search is deterministic, bounded to 40
+retained names, and reports truncation/total matches so the model can refine it.
+
+Connection failures receive short recovery messages with separately copied
+HTTP/code/parameter/request-ID diagnostics. Synthetic checks cover nonstandard
+admission responses, temporary failures, usage limits, malformed and EOF-ended
+streams, and Unicode/control-byte diagnostics. Raw provider/parser fragments
+are not put into chat or copied diagnostics. There are no automatic inference
+retries, billing changes, or OAuth loops.
+Model-list recovery distinguishes transient retry from explicit sign-in for
+missing/expired credentials. A persistent deferred refresh fixes separate-tick
+sign-in completion, honors cancellation, and consumes the follow-up once.
+Import/export outcomes are explicitly unconfirmed when native dialogs provide
+no success signal. The session checks results before continuing a preplanned
+batch and prevents identical document-action dialog retries during that turn,
+while permitting inspection and different document actions. This avoids false
+import/export success and repeated choosers after cancellation.
+
+Validation completed before adoption:
+
+- ARM and Intel Studio builds and strict persistent signature checks pass; the
+  final Intel bundle audit reports no macOS 12.6 compatibility errors.
+- Pure client/session, worker race/order, and library-search targets pass locally.
+  The client and worker tests also pass on the macOS 12.6 Intel Mac.
+- Real native chat-widget checks pass locally and on the Intel Mac, covering light/dark
+  contrast, narrow/wide wrapping, selection retention, action-only replies and
+  streaming growth. CUA visual inspection confirms readability and selected-text
+  versus whole-message copy menu items on the Apple Silicon Mac.
+- The old lock-free worker Stop setter fails the new concurrency regression in
+  a disposable negative-control build; the fixed implementation passes.
+- Real slicer checks generate object-only supports with global supports disabled
+  and clear the unsupported-overhang warning. Five project fixtures (Band Mom,
+  Wanda, Frappe, Bee, Namaste) plus the raw Namaste STL pass geometry/material
+  checks; input SHA-256 values remain unchanged.
+
+The final app remains staged separately from the working installed apps. The Windows test machine
+did not answer an SSH connection attempt, so this follow-up has no fresh Windows
+build or live Windows UI validation.

@@ -8,9 +8,24 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 
 namespace Slic3r { namespace GUI { namespace Assistant {
 using Json = nlohmann::json;
+
+// The chat gets a short recovery message. Safe diagnostics can be copied
+// separately; raw provider bodies are retained in memory, never shown/logged.
+class RequestError : public std::runtime_error {
+public:
+    RequestError(long status, Json response, const std::string& request_id = {});
+    static RequestError connection(int code);
+    static RequestError sign_in(const std::string& message);
+    const Json& diagnostics() const { return m_diagnostics; }
+    const Json& response() const { return m_response; }
+private:
+    RequestError(const std::string& message, Json diagnostics);
+    Json m_diagnostics, m_response;
+};
 
 // No window pointers or application globals cross the network worker boundary.
 struct Callbacks {

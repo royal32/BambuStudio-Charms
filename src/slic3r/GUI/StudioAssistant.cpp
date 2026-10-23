@@ -2,6 +2,7 @@
 #include "StudioAssistantActions.hpp"
 #include "StudioAssistantChat.hpp"
 #include "StudioAssistantKeychain.hpp"
+#include "StudioAssistantWork.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
@@ -72,44 +73,24 @@ std::string confirmation_text(const std::string& tool,const Json& args) {
     }
     return action_label(tool)+"? You can review the result in Studio and use Undo.";
 }
-struct Work {
-    std::atomic<bool> cancel{false};
-    std::mutex mutex;
-    std::condition_variable changed;
-    std::deque<Json> events;
-    Json result;
-    bool answered{false};
-    void post(Json event) { std::lock_guard<std::mutex> lock(mutex); events.push_back(std::move(event)); }
-    Json tool(const std::string& name, const Json& arguments) {
-        std::unique_lock<std::mutex> lock(mutex);
-        answered = false;
-        events.push_back({{"event", "tool"}, {"name", name}, {"arguments", arguments}});
-        changed.wait(lock, [&] { return answered || cancel.load(); });
-        if (cancel) throw std::runtime_error("Stopped. Changes already applied remain available through Undo.");
-        return result;
-    }
-    void answer(Json value) {
-        std::lock_guard<std::mutex> lock(mutex);
-        result = std::move(value); answered = true; changed.notify_all();
-    }
-    void stop() { cancel = true; changed.notify_all(); }
-};
-
 class AssistantWindow : public wxFrame {
 public:
     explicit AssistantWindow(wxWindow* parent);
     ~AssistantWindow() override { m_timer.Stop(); if (m_work) m_work->stop(); }
+    void focus_composer() { m_input->SetFocus(); }
 private:
     void poll();
     void connect(bool add);
     void fetch_models();
-    void send(const std::string& text);
+    void send(const std::string& text, bool clear_draft = true);
     void accounts();
     void menu();
     void clear_chat();
     void layout_chat(bool follow = true);
     void activity(const std::string& text, bool done = false, bool failed = false);
     void busy(bool value);
+    void stop();
+    void update_composer();
     void status(const wxString& text);
     void append(const std::string& who, const std::string& text);
     void start(const std::function<void(const std::shared_ptr<Work>&)>& fn);
@@ -132,8 +113,12 @@ private:
     std::vector<std::pair<std::string,int>> m_steps;
     bool m_allow_changes{true}, m_action_done{true};
     Json m_registrations = Json::array(), m_model_catalog = Json::array(), m_history = Json::array();
+    Json m_problem = Json::object();
     int m_active{-1};
     bool m_busy{false}, m_streaming{false};
+    bool m_stopped_native{false};
+    bool m_fetching_models{false}, m_retry_models{false};
+    DeferredModelsRefresh m_deferred_models_refresh;
     std::string m_pending;
     std::chrono::steady_clock::time_point m_pending_since;
 };
@@ -161,7 +146,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
         auto* button = new wxButton(panel, wxID_ANY, wxString::FromUTF8(item.first));
         m_quick.push_back(button);
         quick->Add(button, 1, wxRIGHT, FromDIP(4));
-        button->Bind(wxEVT_BUTTON, [this, text=item.second](wxCommandEvent&) { send(text); });
+        button->Bind(wxEVT_BUTTON, [this, text=item.second](wxCommandEvent&) { send(text,false); });
     }
     outer->Add(quick, 0, wxEXPAND|wxALL, FromDIP(12));
     auto* composer = new wxBoxSizer(wxHORIZONTAL);
@@ -188,7 +173,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
         const auto foreground=StateColor::darkModeColorFor(wxColour("#262e30"));
         SetBackgroundColour(background); panel->SetBackgroundColour(background);
         for (auto* child:panel->GetChildren()) { child->SetBackgroundColour(background); child->SetForegroundColour(foreground); }
-        for (const auto& bubble:m_bubbles) bubble.first->theme();
+        for (const auto& bubble:m_bubbles) bubble.first->theme(wxGetApp().dark_mode());
         Refresh(); event.Skip();
     });
     auto& config = *wxGetApp().app_config;
@@ -227,7 +212,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     const auto lock_directory=std::filesystem::u8path(data_dir())/"assistant";
     std::filesystem::create_directories(lock_directory);
     m_client = std::make_shared<Client>(host, callbacks,(lock_directory/"credentials.lock").u8string());
-    m_connect->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { connect(false); });
+    m_connect->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (m_retry_models) fetch_models(); else connect(false); });
     m_menu->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { menu(); });
     m_models->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
         const int selected = m_models->GetSelection();
@@ -235,14 +220,19 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     });
     m_send->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         if (!m_busy) send(std::string(m_input->GetValue().utf8_string()));
-        else { if (m_work) m_work->stop(); m_actions.cancel_library(); m_pending.clear(); status("Stopping…"); }
+        else stop();
     });
+    m_input->Bind(wxEVT_TEXT,[this](wxCommandEvent& event) { update_composer(); event.Skip(); });
     m_input->Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
-        if ((event.GetKeyCode()==WXK_RETURN || event.GetKeyCode()==WXK_NUMPAD_ENTER) && !event.ShiftDown() && !event.AltDown()) send(std::string(m_input->GetValue().utf8_string()));
+        if (!m_busy && (event.GetKeyCode()==WXK_RETURN || event.GetKeyCode()==WXK_NUMPAD_ENTER) && !event.ShiftDown() && !event.AltDown()) send(std::string(m_input->GetValue().utf8_string()));
         else event.Skip();
     });
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
-        if (event.CanVeto()) { if (m_work) m_work->stop(); m_actions.cancel_library(); m_pending.clear(); Hide(); event.Veto(); }
+        if (event.CanVeto()) { stop(); Hide(); event.Veto(); }
+        else event.Skip();
+    });
+    Bind(wxEVT_CHAR_HOOK,[this](wxKeyEvent& event) {
+        if (event.GetKeyCode()==WXK_ESCAPE && m_busy) stop();
         else event.Skip();
     });
     Bind(wxEVT_TIMER, [this](wxTimerEvent&) { poll(); }, m_timer.GetId());
@@ -256,7 +246,7 @@ void AssistantWindow::append(const std::string& who, const std::string& text)
 {
     if (who=="Studio") { activity(text,true); return; }
     const bool user=who=="You";
-    auto* bubble=new AssistantBubble(m_chat,user,wxString::FromUTF8(text));
+    auto* bubble=new AssistantBubble(m_chat,user,wxString::FromUTF8(text),wxGetApp().dark_mode());
     auto* row=new wxBoxSizer(wxHORIZONTAL);
     if (user) row->AddStretchSpacer();
     row->Add(bubble,0,wxALL,FromDIP(4));
@@ -268,7 +258,7 @@ void AssistantWindow::append(const std::string& who, const std::string& text)
 }
 void AssistantWindow::clear_chat() {
     m_reply=nullptr; m_bubbles.clear(); m_steps.clear(); m_messages->Clear(true);
-    m_history=Json::array(); m_streaming=false; layout_chat();
+    m_history=Json::array(); m_problem=Json::object(); m_streaming=false; layout_chat();
 }
 void AssistantWindow::layout_chat(bool follow) {
     // Preserve the reader's position when resizing or reading earlier messages.
@@ -283,7 +273,6 @@ void AssistantWindow::activity(const std::string& text,bool done,bool failed) {
     if (!m_reply) append("Assistant","");
     if (!text.empty()) m_steps.emplace_back(text,failed?2:done?1:0);
     else if (!m_steps.empty()) m_steps.back().second=failed?2:done?1:0;
-    m_action_done=done;
     m_action_done=done;
     wxString summary;
     // The latest few steps stay readable without turning the transcript into a log.
@@ -307,7 +296,8 @@ void AssistantWindow::save_accounts() {
 }
 void AssistantWindow::accounts() {
     m_connect->Show(m_model_catalog.empty()); m_models->Show(!m_model_catalog.empty());
-    m_connect->SetLabel(m_busy?"Connecting…":"Continue with ChatGPT");
+    m_connect->SetLabel(m_busy?(m_fetching_models?"Checking models…":"Connecting…"):
+        m_retry_models?"Try connection again":"Continue with ChatGPT");
     Layout();
 }
 void AssistantWindow::menu() {
@@ -345,21 +335,44 @@ void AssistantWindow::menu() {
         start([client,account](const auto& work) { work->post({{"event","signed_out"},{"revoked",client->sign_out(account,work->cancel)}}); });
     },!m_busy && m_active>=0);
     add("Manage usage…",[] { wxLaunchDefaultBrowser("https://chatgpt.com/settings/usage"); });
+    if (!m_problem.empty()) add("Copy last problem details",[this] {
+        const auto text=wxString::FromUTF8(m_problem.dump(2,' ',false,Json::error_handler_t::replace));
+        if (wxTheClipboard->Open()) {
+            wxTheClipboard->SetData(new wxTextDataObject(text));
+            wxTheClipboard->Close();
+        }
+    });
     PopupMenu(&options,m_menu->GetPosition()+wxPoint(0,m_menu->GetSize().y));
 }
 void AssistantWindow::busy(bool value) {
     m_busy = value;
     m_connect->Enable(!value); m_models->Enable(!value);
-    m_send->SetLabel(value?"Stop":"Send"); m_send->Enable(value || !m_model_catalog.empty());
+    update_composer();
     for (auto* button:m_quick) button->Enable(!value && !m_model_catalog.empty());
     accounts();
 }
+void AssistantWindow::update_composer() {
+    const bool stopping=m_busy && m_work && m_work->cancel;
+    m_send->SetLabel(stopping?"Stopping…":m_busy?"Stop":"Send");
+    const auto draft=std::string(m_input->GetValue().utf8_string());
+    m_send->Enable(m_busy?!stopping:!m_model_catalog.empty() && draft.find_first_not_of(" \r\n\t")!=std::string::npos);
+    m_input->SetToolTip(m_busy?"You can write your next message while I work. Escape stops further steps.":"Enter to send. Shift+Enter for a new line.");
+}
+void AssistantWindow::stop() {
+    if (!m_busy || !m_work || m_work->cancel) return;
+    m_stopped_native=!m_pending.empty() && m_pending!="library";
+    m_work->stop(); m_actions.cancel_library(); m_pending.clear();
+    update_composer();
+    status("Stopping further steps. An operation already running in Studio may finish.");
+}
 void AssistantWindow::start(const std::function<void(const std::shared_ptr<Work>&)>& fn) {
     if (m_busy) return;
-    m_work = std::make_shared<Work>(); busy(true); m_pending.clear();
+    m_work = std::make_shared<Work>(); m_stopped_native=false; busy(true); m_pending.clear();
     auto work = m_work;
     std::thread([work, fn] {
         try { fn(work); }
+        catch (const RequestError& error) { work->post({{"event","error"},{"message",error.what()},{"details",error.diagnostics()}}); }
+        catch (const Json::exception&) { work->post({{"event","error"},{"message","ChatGPT returned an unreadable reply. Please try again."}}); }
         catch (const std::exception& error) { work->post({{"event", "error"}, {"message", error.what()}}); }
         catch (...) { work->post({{"event", "error"}, {"message", "The assistant could not complete this operation."}}); }
         work->post({{"event", "idle"}});
@@ -367,6 +380,7 @@ void AssistantWindow::start(const std::function<void(const std::shared_ptr<Work>
 }
 void AssistantWindow::connect(bool add) {
     if (m_busy) return;
+    m_retry_models=false;
     const auto account = add ? Json::object() : registration(); auto client = m_client;
     status("Finish ChatGPT sign-in in your browser. Authorize plan usage for Charms Studio Assistant.");
     start([client, account](const auto& work) {
@@ -383,18 +397,21 @@ void AssistantWindow::connect(bool add) {
 }
 void AssistantWindow::fetch_models() {
     if (m_busy || m_active < 0) return;
+    m_fetching_models=true;
     auto client = m_client; const auto account = registration();
     status("Checking models available to this ChatGPT account…");
     start([client, account](const auto& work) { work->post({{"event", "models"}, {"models", client->models(account, work->cancel)}}); });
 }
-void AssistantWindow::send(const std::string& text) {
+void AssistantWindow::send(const std::string& text, bool clear_draft) {
     if (m_busy || text.find_first_not_of(" \r\n\t") == std::string::npos) return;
     if (text.size() > 16000) { append("Studio", "Please shorten the message to 16,000 characters."); return; }
     const int selected = m_models->GetSelection();
     if (m_active < 0 || selected < 0) { append("Studio", "Connect ChatGPT and select an available model first."); return; }
     Json context;
     try { context = m_actions.inspect(); } catch (const std::exception& e) { append("Studio", e.what()); return; }
-    append("You", text); append("Assistant", ""); activity("Thinking…"); m_input->Clear(); m_streaming = false;
+    append("You", text); append("Assistant", ""); activity("Thinking…");
+    if (clear_draft) m_input->Clear();
+    m_streaming = false;
     auto client = m_client; const auto account = registration(), history = m_history;
     const auto model = m_model_catalog.at(selected).at("slug").get<std::string>();
     status("Inspecting the project and working on your request…");
@@ -419,7 +436,8 @@ void AssistantWindow::handle_tool(const Json& event) {
         if (requires_confirmation(tool) || (tool=="assign_part_filament" && args.value("replace_color_paint",false)) || (changes_project(tool) && !m_allow_changes)) {
             const std::string question = confirmation_text(tool,args);
             if (wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this) != wxYES) {
-                activity("Change skipped",true,true);
+                if (m_steps.size()==1 && m_steps.front().first=="Thinking…") m_steps.clear();
+                activity(action_label(tool)+" skipped",true,true);
                 m_work->answer({{"cancelled", true}, {"message", "The person declined this action. Do not retry it without a new request."}}); return;
             }
         }
@@ -441,7 +459,7 @@ void AssistantWindow::poll() {
         auto* p = wxGetApp().plater();
         if (elapsed > std::chrono::minutes(5)) { m_actions.cancel_library(); m_pending.clear(); activity("",true,true); m_work->answer({{"error", "Studio's operation did not finish within five minutes. Check Studio before trying again."}}); }
         else if (m_pending == "library") {
-            try { if (auto result = m_actions.poll_library()) { m_pending.clear(); activity("",true); m_work->answer(*result); } }
+            try { if (auto result = m_actions.poll_library()) { m_pending.clear(); activity("",true,result->contains("error") || result->contains("operation_error") || result->value("cancelled",false)); m_work->answer(*result); } }
             catch (const std::exception& e) { m_pending.clear(); activity("",true,true); m_work->answer({{"error",e.what()}}); }
         }
         else if (elapsed > std::chrono::milliseconds(700) && p && !p->is_background_process_slicing() && !p->is_any_job_running() && !p->is_background_process_update_scheduled()) {
@@ -455,12 +473,12 @@ void AssistantWindow::poll() {
     }
     std::deque<Json> events;
     { std::lock_guard<std::mutex> lock(m_work->mutex); events.swap(m_work->events); }
-    bool refresh = false;
     for (const auto& event : events) {
         const auto type = event.at("event").get<std::string>();
         if (type == "delta") {
+            if (m_work->cancel) continue;
             if (!m_reply) append("Assistant", "");
-            if (m_steps.size()==1 && m_steps.front().first=="Thinking…") { m_steps.clear(); m_reply->activity(""); }
+            if (m_steps.size()==1 && m_steps.front().first=="Thinking…") { m_steps.clear(); m_reply->activity(""); m_action_done=true; }
             m_reply->delta(wxString::FromUTF8(event.at("text").get<std::string>()),!m_streaming);
             m_streaming=true; layout_chat();
         } else if (type == "tool") handle_tool(event);
@@ -471,12 +489,18 @@ void AssistantWindow::poll() {
             for (size_t i=0;i<m_registrations.size();++i) if (m_registrations[i].at("client_id") == account.at("client_id")) index = int(i);
             if (index < 0) { m_registrations.push_back(account); index = int(m_registrations.size())-1; } else m_registrations[index] = account;
             m_active = index; m_history = Json::array(); m_model_catalog = Json::array(); m_models->Clear(); save_accounts();
-            if (type == "signed_in") { append("Studio", "ChatGPT connected. Checking available models…"); refresh = true; }
+            if (type == "signed_in") {
+                m_retry_models=true;
+                append("Studio", "ChatGPT connected. Checking available models…");
+                m_deferred_models_refresh.request();
+            }
         } else if (type == "signed_out") {
+            m_retry_models=false;
             m_history = Json::array(); m_model_catalog = Json::array(); m_models->Clear();
             append("Studio", event.at("revoked").get<bool>() ? "Signed out of ChatGPT." : "Signed out locally. Remote revocation could not be confirmed; you can disconnect the app in ChatGPT Settings.");
             status("Signed out. Continue with ChatGPT to reconnect this account.");
         } else if (type == "models") {
+            m_retry_models=false;
             m_model_catalog = event.at("models"); m_models->Clear(); int selected = 0;
             const auto saved = wxGetApp().app_config->get("studio_assistant_model");
             for (size_t i=0;i<m_model_catalog.size();++i) {
@@ -487,18 +511,43 @@ void AssistantWindow::poll() {
             if (!m_model_catalog.empty()) m_models->SetSelection(selected);
             status("Ready. Requests use the connected ChatGPT plan; Manage usage controls its allowance.");
         } else if (type == "done") {
+            if (m_work->cancel) continue;
             m_history = event.at("history");
             // Never silently trim tool-call pairs. A fresh conversation is safer
             // than replaying orphan outputs or sending unbounded project history.
-            if (m_history.dump().size() > 1500000) { m_history = Json::array(); append("Studio", "Conversation context was reset after this task to keep the next request manageable."); }
+            if (m_history.dump().size() > 1500000) { m_history = Json::array(); append("Studio", "This chat got long. Your next message will start a fresh conversation."); }
             status("Ready. Review changes in Studio; Undo is available.");
         } else if (type == "error") {
+            // Cancellation is acknowledged once at idle, after all queued text
+            // and completion events have been discarded. A curl error caused
+            // by Stop is not a new failure to ask the person to troubleshoot.
+            if (m_work->cancel) continue;
+            if (event.value("details",Json::object()).value("recovery","")=="sign_in") {
+                m_retry_models=false; m_model_catalog=Json::array(); m_models->Clear();
+            }
+            else if (m_fetching_models) m_retry_models=true;
+            m_problem=event.value("details",Json::object());
             if (m_reply && !m_action_done) activity("",true,true);
-            append("Assistant", event.at("message").get<std::string>()); m_streaming = false; m_history = Json::array();
+            const auto message=event.at("message").get<std::string>();
+            if (m_reply && m_reply->empty()) { m_reply->text(wxString::FromUTF8(message)); layout_chat(); }
+            else append("Assistant",message);
+            m_streaming = false; m_history = Json::array();
             status("Stopped. Review the current project before retrying. Changes already applied remain available through Undo.");
-        } else if (type == "idle") { busy(false); m_pending.clear(); }
+        } else if (type == "idle") {
+            if (m_work->cancel) {
+                if (m_fetching_models) m_retry_models=true;
+                if (m_reply && !m_action_done) activity("",true,true);
+                std::string message="Stopped. You can review any changes in Studio and use Undo.";
+                if (m_stopped_native) message+=" An operation already running may finish.";
+                if (m_reply && m_reply->empty()) { m_reply->text(wxString::FromUTF8(message)); layout_chat(); }
+                else append("Assistant",message);
+                m_history=Json::array(); m_streaming=false;
+                status("Stopped. Ready for your next message.");
+            }
+            m_fetching_models=false; busy(false); m_pending.clear();
+        }
     }
-    if (refresh && !m_busy) fetch_models();
+    if (m_deferred_models_refresh.take(m_busy,m_work->cancel.load())) fetch_models();
 }
 }
 
@@ -506,6 +555,6 @@ void show_studio_assistant(wxWindow* parent)
 {
     static wxWeakRef<AssistantWindow> window;
     if (!window) window = new AssistantWindow(parent);
-    window->Show(); window->Raise();
+    window->Show(); window->Raise(); window->focus_composer();
 }
 }}

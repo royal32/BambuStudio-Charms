@@ -8819,6 +8819,13 @@ int main(int argc, char **argv)
 #if defined(__APPLE__) && defined(SLIC3R_GUI)
     if (argc==2 && std::strcmp(argv[1],"--internal-charms-keychain")==0)
         return Slic3r::GUI::Assistant::keychain_child_main();
+    if (argc==2 && std::strcmp(argv[1],"--check-assistant-keychain")==0) {
+        // Exercise this app's signed parent/child transport without querying a
+        // Keychain item. The child must reject this fixed invalid service first.
+        try { Slic3r::GUI::Assistant::keychain_load("invalid-assistant-service"); }
+        catch (const std::exception& error) { return std::strcmp(error.what(),"Studio's credential service is invalid.")==0?0:78; }
+        return 78;
+    }
 #endif
     std::set_new_handler(bbl_out_of_memory_handler);
     return CLI().run(argc, argv);

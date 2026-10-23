@@ -124,6 +124,7 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
     std::map<std::string,Json> schemas;
     for (const auto& definition : definitions.at(0).at("tools")) schemas[definition.at("name").get<std::string>()]=definition.at("parameters");
     size_t calls=0;
+    std::set<std::string> cancelled_actions, unconfirmed_documents;
     for (int step=0;step<32;++step) {
         check();
         Json request={{"model",model},{"instructions",instructions()},{"input",input},{"tools",definitions},
@@ -136,21 +137,39 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
         if (response.value("status","")!="completed" || !response.contains("output") || !response.at("output").is_array()) throw std::runtime_error("The assistant response did not complete. No incomplete actions were executed.");
         const auto& output=response.at("output");
         for (const auto& item : output) input.push_back(item);
-        bool called=false;
+        bool called=false, reconsider=false;
         for (const auto& item : output) if (item.value("type","")=="function_call") {
             check();
             if (++calls>64) throw std::runtime_error("This task reached its action limit. Review the current project before asking to continue.");
             called=true;
             auto name=item.at("name").get<std::string>();
             if (name.rfind("studio.",0)==0) name.erase(0,7);
+            std::string action_key=name;
             Json result;
             try {
                 if (item.value("namespace","studio")!="studio" || !schemas.count(name)) throw std::runtime_error("That tool is not available in Studio.");
-                const auto arguments=Json::parse(item.at("arguments").get<std::string>());
-                validate(arguments,schemas.at(name));
-                result=callbacks.tool(name,arguments);
+                if (reconsider) {
+                    // Even with parallel calls disabled, a response can contain
+                    // multiple calls. Their assumptions need checking after an
+                    // unsuccessful action or an outcome Studio cannot confirm.
+                    result={{"skipped",true},{"error","This action was not run because a previous action in the same response needs its result checked."},
+                        {"instruction","Reinspect the current project and reconsider the remaining actions before continuing."}};
+                } else {
+                    const auto arguments=Json::parse(item.at("arguments").get<std::string>());
+                    validate(arguments,schemas.at(name));
+                    if (name=="document") action_key+=":"+arguments.at("action").get<std::string>();
+                    if (cancelled_actions.count(action_key))
+                        result={{"cancelled",true},{"skipped",true},{"message","This action was cancelled earlier in this request. Do not retry it without a new request from the person."}};
+                    else if (unconfirmed_documents.count(action_key))
+                        result={{"outcome","unconfirmed"},{"skipped",true},{"message","This document action was already requested, but Studio has not confirmed its result. Inspect the current state; do not reopen its chooser without a new request from the person."}};
+                    else result=callbacks.tool(name,arguments);
+                }
             } catch (const std::exception& e) { check(); result={{"error",e.what()},{"instruction","Inspect the current state before choosing another action. Do not assume this operation succeeded."}}; }
             check();
+            if (result.value("cancelled",false)) cancelled_actions.insert(action_key);
+            const bool unconfirmed=result.value("outcome","")=="unconfirmed";
+            if (unconfirmed && name=="document") unconfirmed_documents.insert(action_key);
+            reconsider=result.contains("error") || result.contains("operation_error") || result.value("cancelled",false) || unconfirmed;
             Json tool_output=result.dump();
             if (result.contains("image_data")) {
                 const auto image=result.at("image_data"); result.erase("image_data");

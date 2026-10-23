@@ -40,6 +40,9 @@ It can search the sliced library and import editable source models while
 preserving painted colors, support annotations and negative volumes. If the
 destination lacks matching material/color slots, it asks for an explicit mapping
 instead of silently recoloring the model.
+Library searches return the first 40 matching names in a stable alphabetical
+order and include the total match count. When more matches exist, the result
+tells the assistant to refine the query before assuming a model is unavailable.
 
 Painting individual faces remains a manual operation: the assistant can open the
 appropriate painting tool and guide the person. A clean slice is not a guarantee
@@ -49,7 +52,10 @@ filament from the family's all-white AMS slot colors.
 The chat uses message bubbles, with compact Studio action updates below the
 assistant's reply. Text can be selected or copied. Enter sends a message;
 Shift+Enter inserts a new line. Send becomes **Stop** while working. The two
-shortcuts explain warnings or help with supports.
+shortcuts explain warnings or help with supports, without erasing an unsent
+draft. You can draft the next message while the assistant works. **Escape**
+also stops further steps. Completion leaves selected text focused for copying;
+longer transcripts reuse their layout while a new reply streams.
 
 The assistant favors short, everyday language and takes sensible, reversible
 steps without asking for every preference. For example, "make the internal
@@ -62,6 +68,19 @@ to review each edit before it runs. Saving, opening another project, selecting
 profiles, and deleting parts have confirmation dialogs. File operations use
 Studio's normal dialogs. **Stop** cancels further assistant work; an operation
 Studio has already started may finish. The assistant does not send print jobs.
+After a declined or failed action, the remaining actions from that preplanned
+batch are skipped. A declined action cannot reopen its dialog during the same
+request. A new request from the person permits trying it again.
+Native import/export dialogs do not reliably report their outcome. An
+unconfirmed dialog result pauses the remaining preplanned batch; the assistant
+must inspect actual imported objects/parts or ask about the export, and cannot
+reopen the identical chooser action during that turn. Other document actions
+remain available after checking the result.
+
+Object support/settings edits preserve placement, including deliberate sinking
+into the bed. Global-only settings are refused at object scope rather than
+stored as ineffective overrides. Selection-based edits act on Prepare's inspected
+selection even when the person was looking at Preview.
 
 ## Account and data handling
 
@@ -74,6 +93,20 @@ credentials and attempts to revoke the remote refresh token.
 An active credential is cached in memory while valid, so individual model/tool
 calls do not repeatedly access Keychain. It is reread under the process lock
 when renewal is due, in case another Studio process has already renewed it.
+
+Connection, availability and usage failures get short recovery messages.
+After a temporary model-list failure, **Try connection again** repeats that
+check without repeating browser sign-in. Missing or expired credentials offer
+sign-in explicitly. Completed browser sign-in loads models even when its
+completion events arrive on separate UI timer ticks; Stop suppresses that
+follow-up.
+**⋯ → Copy last problem details** copies only HTTP status, structured error
+code/parameter, request ID, recovery hint or a connection error number for troubleshooting.
+Provider response text and account tokens are not included in that copy or
+displayed as parser fragments in the chat. Temporary errors preserve the saved
+sign-in; the assistant never automatically repeats OAuth or switches billing.
+Error handling follows the official
+[Sign in with ChatGPT recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
 
 Mac packages must use the persistent private-build signing certificate via
 `tools/sign_macos_app.py`; the bundle audit rejects ad-hoc signatures and
@@ -117,6 +150,20 @@ cmake --build build/assistant-checks
 ctest --test-dir build/assistant-checks --output-on-failure
 ```
 
+These include native worker handoff, text-event ordering, cancellation races,
+failed/cancelled action batches, and synthetic connection/stream errors. No
+account or inference is used. Standalone native chat checks exercise the actual
+bubble widget in light/dark mode, narrow/wide layouts, streaming and copying:
+
+```sh
+python3 tools/run_studio_assistant_chat_checks.py
+python3 tools/run_studio_assistant_chat_checks.py --review
+```
+
+The review fixture is an isolated app with synthetic text, no Studio profile,
+credential access, or networking. `--arch x86_64 --build-only` builds it for the
+Intel Mac; the checks themselves need a logged-in graphical desktop.
+
 Opt-in native Keychain checks use synthetic values and automatically delete
 their disposable Keychain. Initialize the stable build identity once first:
 
@@ -132,6 +179,11 @@ never read an actual account credential. `tests/run_keychain_checks_macos.sh`
 runs the prebuilt Intel probes on the macOS 12 Intel Mac without Python or CLT.
 Both native checks pass with atomic executable replacement; on macOS 12,
 overwriting an existing executable in place can leave stale identity state.
+The signed Studio executable also accepts `--check-assistant-keychain`: it
+exercises its own signed parent/child pipes using a fixed invalid service and
+expects the service guard to reject it before any Keychain query. Exit 0 means
+the transport/guard worked; exit 78 means the check failed. It does not load an
+account, show authorization UI, or initialize Studio's GUI/network plugin.
 
 Native model/slicer checks, after building Studio with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`:
