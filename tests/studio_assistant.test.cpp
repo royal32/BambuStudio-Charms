@@ -357,6 +357,33 @@ int main()
     session.respond=[&](const Json&) { return response_index++==0?call("document",{{"action","import"}},"import_new_turn"):final; };
     run_turn(import_history,Json::object(),"Import another model","test-model",session);
     assert((executed==std::vector<std::string>{"document:import"}));
+    // Library opens have no native success signal either. Block retrying the
+    // same validated entry ID, while leaving other entries and new turns usable.
+    response_index=0; executed.clear();
+    session.respond=[&](const Json& request) {
+        switch (response_index++) {
+        case 0: return call("open_library_project",{{"entry_id","source-a"}},"library_first");
+        case 1: return call("studio.open_library_project",{{"entry_id","source-a"}},"library_retry");
+        case 2: {
+            const auto skipped=Json::parse(request.at("input").back().at("output").get<std::string>());
+            assert(skipped.at("outcome")=="unconfirmed" && skipped.at("skipped")==true);
+            assert(!skipped.contains("cancelled") && !skipped.contains("error"));
+            return call("inspect_library_source",{{"entry_id","source-a"}},"library_inspect");
+        }
+        case 3: return call("open_library_project",{{"entry_id","source-b"}},"library_distinct");
+        default: return final;
+        }
+    };
+    session.tool=[&](const std::string& name,const Json& args) {
+        executed.push_back(name+":"+args.at("entry_id").get<std::string>());
+        return name=="open_library_project"?unconfirmed:Json{{"objects",Json::array()}};
+    };
+    const auto library_history=run_turn(Json::array(),Json::object(),"Open the requested library project","test-model",session);
+    assert((executed==std::vector<std::string>{"open_library_project:source-a","inspect_library_source:source-a","open_library_project:source-b"}));
+    response_index=0; executed.clear();
+    session.respond=[&](const Json&) { return response_index++==0?call("open_library_project",{{"entry_id","source-a"}},"library_new_turn"):final; };
+    run_turn(library_history,Json::object(),"Try opening that source again","test-model",session);
+    assert((executed==std::vector<std::string>{"open_library_project:source-a"}));
     // Images use multimodal tool results, not a base64 blob in ordinary text.
     response_index=0;
     session.respond=[&](const Json& request) {

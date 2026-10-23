@@ -124,7 +124,7 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
     std::map<std::string,Json> schemas;
     for (const auto& definition : definitions.at(0).at("tools")) schemas[definition.at("name").get<std::string>()]=definition.at("parameters");
     size_t calls=0;
-    std::set<std::string> cancelled_actions, unconfirmed_documents;
+    std::set<std::string> cancelled_actions, unconfirmed_actions;
     for (int step=0;step<32;++step) {
         check();
         Json request={{"model",model},{"instructions",instructions()},{"input",input},{"tools",definitions},
@@ -158,17 +158,18 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
                     const auto arguments=Json::parse(item.at("arguments").get<std::string>());
                     validate(arguments,schemas.at(name));
                     if (name=="document") action_key+=":"+arguments.at("action").get<std::string>();
+                    if (name=="open_library_project") action_key+=":"+arguments.at("entry_id").get<std::string>();
                     if (cancelled_actions.count(action_key))
                         result={{"cancelled",true},{"skipped",true},{"message","This action was cancelled earlier in this request. Do not retry it without a new request from the person."}};
-                    else if (unconfirmed_documents.count(action_key))
-                        result={{"outcome","unconfirmed"},{"skipped",true},{"message","This document action was already requested, but Studio has not confirmed its result. Inspect the current state; do not reopen its chooser without a new request from the person."}};
+                    else if (unconfirmed_actions.count(action_key))
+                        result={{"outcome","unconfirmed"},{"skipped",true},{"message","This file or project action was already requested, but Studio has not confirmed its result. Inspect the current state; do not repeat it without a new request from the person."}};
                     else result=callbacks.tool(name,arguments);
                 }
             } catch (const std::exception& e) { check(); result={{"error",e.what()},{"instruction","Inspect the current state before choosing another action. Do not assume this operation succeeded."}}; }
             check();
             if (result.value("cancelled",false)) cancelled_actions.insert(action_key);
             const bool unconfirmed=result.value("outcome","")=="unconfirmed";
-            if (unconfirmed && name=="document") unconfirmed_documents.insert(action_key);
+            if (unconfirmed && (name=="document" || name=="open_library_project")) unconfirmed_actions.insert(action_key);
             reconsider=result.contains("error") || result.contains("operation_error") || result.value("cancelled",false) || unconfirmed;
             Json tool_output=result.dump();
             if (result.contains("image_data")) {

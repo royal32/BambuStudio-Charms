@@ -1,6 +1,7 @@
 #include "StudioAssistantActions.hpp"
 #include "StudioAssistantModel.hpp"
 #include "StudioAssistantLibrarySearch.hpp"
+#include "StudioAssistantState.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
@@ -253,7 +254,7 @@ Json Actions::inspect()
     for (const auto& item : p.get_selection().get_content()) {
         if (item.first >= 0 && size_t(item.first) < p.model().objects.size()) selected.push_back(id(p.model().objects[item.first]));
     }
-    revision_data["selection"] = p.get_selection().get_content();
+    revision_data["selection"] = selection_revision(int(selection.get_mode()),selection.get_content(),selection.get_volume_idxs());
     // Mesh/painting changes can keep identical bounds. Include their native
     // identities/timestamps in the revision without transmitting geometry.
     Json geometry = Json::array();
@@ -574,13 +575,15 @@ Json Actions::execute(const std::string& tool, const Json& args)
         const auto path = library_source(args.at("entry_id"));
         const auto result = p.load_project(wxString::FromUTF8(path));
         if (result == wxID_CANCEL) return {{"cancelled", true}};
-        if (p.get_3mf_filename() != path) throw std::runtime_error("The source project did not open.");
-        return inspect();
+        return unconfirmed_project_open(inspect());
     }
     if (tool == "add_library_model") return start_library(tool,args);
     if (tool == "document") {
         const auto action = args.at("action").get<std::string>();
-        if (action == "open") { if (p.load_project() == wxID_CANCEL) return {{"cancelled", true}}; }
+        if (action == "open") {
+            if (p.load_project() == wxID_CANCEL) return {{"cancelled", true}};
+            return unconfirmed_project_open(inspect());
+        }
         else if (action == "import") {
             p.add_file();
             auto result=inspect();
