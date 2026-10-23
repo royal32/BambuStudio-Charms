@@ -735,6 +735,7 @@ endif ()
 if (APPLE)
     list(APPEND SLIC3R_GUI_SOURCES
             GUI/BambuConnectBridge.mm
+            GUI/StudioAssistantAppearance.mm
             Utils/RetinaHelperImpl.mm
             Utils/MacDarkMode.mm
             GUI/RemovableDriveManagerMM.mm

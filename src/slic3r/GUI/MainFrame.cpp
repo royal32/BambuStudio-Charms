@@ -2023,7 +2023,24 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_slice_option_btn->Enable();
     m_print_option_btn->Enable();
     sizer->Add( 0, 0, 1, wxEXPAND, 0);
-    auto* assistant_button = new ScalableButton(this, wxID_ANY, "studio_assistant", "", FromDIP(wxSize(36,32)), wxDefaultPosition, wxBU_EXACTFIT|wxBORDER_NONE, true, 22);
+    class AssistantToolbarButton final : public Button {
+    public:
+        using Button::Button;
+        bool Reparent(wxWindowBase* parent) override {
+            if (!Button::Reparent(parent)) return false;
+            // Notebook moves side tools into its tab strip after construction.
+            // Match that final container rather than the darker main frame.
+            const auto background=GetParent()->GetBackgroundColour();
+            SetBackgroundColour(background);
+            SetBackgroundColor(StateColor(
+                std::make_pair(ThemeColor::Grey200, int(StateColor::Hovered)),
+                std::make_pair(StateColor::lightModeColorFor(background), int(StateColor::Normal))));
+            return true;
+        }
+    };
+    auto* assistant_button = new AssistantToolbarButton(this, "", "studio_assistant", wxBORDER_NONE, 22);
+    assistant_button->SetPaddingSize(FromDIP(wxSize(7,5)));
+    assistant_button->SetMinSize(FromDIP(wxSize(36,32)));
     assistant_button->SetName("Studio assistant");
     assistant_button->SetToolTip(_L("Studio assistant — help with your print"));
     assistant_button->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { show_studio_assistant(this); });

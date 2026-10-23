@@ -11,6 +11,7 @@
 #include <wx/dataobj.h>
 #include <algorithm>
 #include <cstdlib>
+#include "StudioAssistantAppearance.hpp"
 
 namespace Slic3r { namespace GUI {
 
@@ -60,6 +61,8 @@ public:
         m_text->SetBackgroundColour(background); m_activity->SetBackgroundColour(background);
         m_text->SetForegroundColour(dark?wxColour("#f3f5f5"):wxColour("#262e30"));
         m_activity->SetForegroundColour(dark?wxColour("#b8c2c1"):wxColour("#53625f"));
+        assistant_transparent_text_background(m_text->GetHandle());
+        assistant_transparent_text_background(m_activity->GetHandle());
         Refresh();
     }
     bool empty() const { return m_body.empty(); }

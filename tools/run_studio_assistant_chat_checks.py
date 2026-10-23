@@ -37,7 +37,8 @@ def main():
     # Bundled wx is built without assertion/debug symbols, matching Studio.
     command=['clang++','-std=c++17','-DwxDEBUG_LEVEL=0','-arch',args.arch,'-mmacosx-version-min=12.0',
              '-I'+str(root/'src'),*flags(['--cxxflags']),
-             str(root/'tests/studio_assistant_chat.test.cpp'),'-o',str(next_binary),*libraries]
+             str(root/'tests/studio_assistant_chat.test.cpp'),
+             str(root/'src/slic3r/GUI/StudioAssistantAppearance.mm'),'-o',str(next_binary),*libraries]
     with (output/'build.log').open('w') as log:
         if subprocess.run(command,stdout=log,stderr=subprocess.STDOUT).returncode:
             raise SystemExit(f'Build failed; see {output / "build.log"}')

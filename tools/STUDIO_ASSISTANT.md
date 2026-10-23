@@ -56,6 +56,10 @@ shortcuts explain warnings or help with supports, without erasing an unsent
 draft. You can draft the next message while the assistant works. **Escape**
 also stops further steps. Completion leaves selected text focused for copying;
 longer transcripts reuse their layout while a new reply streams.
+On macOS the read-only native text views have transparent backgrounds, so the
+painted cards supply one continuous fill in light and dark mode. Keep that
+native appearance helper when changing the cards: separately filled Cocoa text
+views can render a visibly different shade despite identical RGB settings.
 
 The assistant favors short, everyday language and takes sensible, reversible
 steps without asking for every preference. For example, "make the internal
@@ -128,6 +132,13 @@ Only the explicit authorization action permits an OS dialog. The per-query
 `kSecUseAuthenticationUIFail` flag alone is insufficient for legacy file-based
 Keychain items on some macOS releases; it was not used as the sole protection.
 
+The Mac networking loader authenticates Bambu's networking plug-in independently
+of Studio's private signing identity. It verifies executable integrity across
+architectures, an Apple-anchored signature, Bambu's Developer ID team
+`T3UBR9Y3B2`, and identifier `libbambu_networking`. This avoids the old
+same-publisher assumption rejecting the official plug-in in certificate-signed
+private builds. The existing module-verification preference is unchanged.
+
 Project context is sent to OpenAI when a person sends a request. That can include
 object names, settings, warnings, library search results and requested model
 images. Conversation context is kept in memory for this window; model requests
@@ -190,6 +201,19 @@ the transport/guard worked; exit 78 means the check failed. It does not load an
 account, show authorization UI, or initialize Studio's GUI/network plugin.
 Run this native check outside a restricted execution sandbox: macOS must permit
 the child to inspect its parent's code signature.
+
+Native plug-in signature checks use the installed official dylib read-only and
+temporary copies. They reject a tampered library, a private-signed fixture with
+the official identifier, unrelated Apple code and a missing file:
+
+```sh
+python3 tools/run_network_signature_checks.py
+python3 tools/run_network_signature_checks.py --arch x86_64 --build-only
+```
+
+The existing private build identity must be initialized first. These checks do
+not load a networking library or access accounts; run outside the restricted
+sandbox so Security.framework can verify certificates.
 
 Native model/slicer checks, after building Studio with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`:

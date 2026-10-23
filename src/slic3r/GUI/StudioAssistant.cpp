@@ -137,11 +137,11 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     auto* panel = new wxPanel(this);
     auto* outer = new wxBoxSizer(wxVERTICAL);
     auto* model_row = new wxBoxSizer(wxHORIZONTAL);
-    m_models = new wxChoice(panel, wxID_ANY); model_row->Add(m_models, 1, wxRIGHT, FromDIP(4));
+    m_models = new wxChoice(panel, wxID_ANY); model_row->Add(m_models, 1, wxRIGHT|wxALIGN_CENTER_VERTICAL, FromDIP(8));
     m_models->SetName("Assistant model");
-    m_connect = new wxButton(panel, wxID_ANY, "Continue with ChatGPT"); model_row->Add(m_connect, 1, wxRIGHT, FromDIP(4));
+    m_connect = new wxButton(panel, wxID_ANY, "Continue with ChatGPT"); model_row->Add(m_connect, 1, wxRIGHT|wxALIGN_CENTER_VERTICAL, FromDIP(8));
     m_menu = new wxButton(panel, wxID_ANY, wxString::FromUTF8("⋯"), wxDefaultPosition, FromDIP(wxSize(38,-1)));
-    m_menu->SetName("Assistant options"); m_menu->SetToolTip("Accounts and conversation options"); model_row->Add(m_menu,0);
+    m_menu->SetName("Assistant options"); m_menu->SetToolTip("Accounts and conversation options"); model_row->Add(m_menu,0,wxALIGN_CENTER_VERTICAL);
     outer->Add(model_row, 0, wxEXPAND|wxALL, FromDIP(12));
     m_chat = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL|wxBORDER_NONE);
     m_chat->SetScrollRate(0, FromDIP(10)); m_messages=new wxBoxSizer(wxVERTICAL); m_chat->SetSizer(m_messages);
@@ -173,13 +173,23 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     panel->SetForegroundColour(foreground);
     for (auto* child : panel->GetChildren()) {
         child->SetForegroundColour(foreground);
+#ifdef __APPLE__
+        // Cocoa draws the bezel; a forced fill adds a second rectangular layer.
+        if (dynamic_cast<wxButton*>(child) || dynamic_cast<wxChoice*>(child)) continue;
+#endif
         child->SetBackgroundColour(background);
     }
     Bind(wxEVT_SYS_COLOUR_CHANGED,[this,panel](wxSysColourChangedEvent& event) {
         const auto background=StateColor::darkModeColorFor(*wxWHITE);
         const auto foreground=StateColor::darkModeColorFor(wxColour("#262e30"));
         SetBackgroundColour(background); panel->SetBackgroundColour(background);
-        for (auto* child:panel->GetChildren()) { child->SetBackgroundColour(background); child->SetForegroundColour(foreground); }
+        for (auto* child:panel->GetChildren()) {
+            child->SetForegroundColour(foreground);
+#ifdef __APPLE__
+            if (dynamic_cast<wxButton*>(child) || dynamic_cast<wxChoice*>(child)) continue;
+#endif
+            child->SetBackgroundColour(background);
+        }
         for (const auto& bubble:m_bubbles) bubble.first->theme(wxGetApp().dark_mode());
         Refresh(); event.Skip();
     });
