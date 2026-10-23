@@ -34,4 +34,9 @@ namespace Slic3r {
     std::optional<SignerSummary> SummarizeSelf();
 
     std::optional<SignerSummary> SummarizeModule(const std::string& path_utf8);
+#ifdef __APPLE__
+    // Private Studio builds have their own certificate; the networking plug-in
+    // must still be intact, Apple-anchored code from Bambu's official publisher.
+    bool IsOfficialBambuNetworkModule(const std::string& path_utf8);
+#endif
 }

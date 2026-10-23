@@ -164,6 +164,28 @@ namespace Slic3r {
 #include <Security/Security.h>
 #include <CommonCrypto/CommonCrypto.h>
 
+    bool IsOfficialBambuNetworkModule(const std::string& path_utf8) {
+        CFURLRef url=CFURLCreateFromFileSystemRepresentation(nullptr,
+            reinterpret_cast<const UInt8*>(path_utf8.data()),path_utf8.size(),false);
+        if (!url) return false;
+        SecStaticCodeRef code=nullptr;
+        const auto created=SecStaticCodeCreateWithPath(url,kSecCSDefaultFlags,&code);
+        CFRelease(url);
+        if (created!=errSecSuccess || !code) return false;
+        SecRequirementRef requirement=nullptr;
+        // Official networking dylibs use this Apple Developer ID team and code
+        // identifier. Check integrity as well as publisher metadata: merely
+        // reading a TeamIdentifier does not validate the signed executable.
+        const auto parsed=SecRequirementCreateWithString(CFSTR(
+            "anchor apple generic and certificate leaf[subject.OU] = \"T3UBR9Y3B2\" "
+            "and identifier \"libbambu_networking\""),kSecCSDefaultFlags,&requirement);
+        const bool valid=parsed==errSecSuccess && requirement &&
+            SecStaticCodeCheckValidity(code,kSecCSStrictValidate|kSecCSCheckAllArchitectures,requirement)==errSecSuccess;
+        if (requirement) CFRelease(requirement);
+        CFRelease(code);
+        return valid;
+    }
+
     static bool sha256_mac(const void* data, size_t len, std::array<uint8_t, 32>& out) {
         CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx);
         CC_SHA256_Update(&ctx, data, (CC_LONG)len);

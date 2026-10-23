@@ -253,6 +253,14 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
     library = plugin_folder.string() + "/" + std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + ".so";
     #endif
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", line %1%, loading network module, using_backup %2%\n")%__LINE__ %using_backup;
+#if defined(__WXMAC__)
+    // Our private signing identity is independent of Bambu's. Authenticate the
+    // official plug-in directly instead of comparing it with Studio's signer.
+    if (!validate_cert || IsOfficialBambuNetworkModule(library))
+        networking_module = dlopen(library.c_str(),RTLD_LAZY);
+    else
+        BOOST_LOG_TRIVIAL(warning) << "network module failed official Bambu signature validation";
+#else
     module_cert_summary = SummarizeModule(library);
     if (self_cert_summary) {
         module_cert_summary = SummarizeModule(library);
@@ -267,6 +275,7 @@ int NetworkAgent::initialize_network_module(bool using_backup, bool validate_cer
     }
     else
         networking_module = dlopen( library.c_str(), RTLD_LAZY);
+#endif
     if (!networking_module) {
         char* dll_error = dlerror();
         std::string err       = dll_error ? std::string(dll_error) : std::string("(null)");
