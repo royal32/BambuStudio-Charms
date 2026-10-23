@@ -77,14 +77,39 @@ public:
                 require(view(stream,"Studio actions")->IsShown(),"Action-only reply disappeared");
                 stream->delta("Colors updated.",false); stream->rewrap(260);
                 const int short_height=stream->GetMinSize().y;
+                auto* streamed_text=view(stream,"Assistant");
+                streamed_text->SetSelection(0,6);
                 stream->delta(long_text,true); stream->rewrap(260);
                 require(stream->GetMinSize().y>short_height,"Streaming failed to grow the reply");
-                require(view(stream,"Assistant")->GetValue()=="Colors updated.\n\n"+long_text,"Stream paragraphs changed");
+                require(streamed_text->GetValue()=="Colors updated.\n\n"+long_text,"Stream paragraphs changed");
+                long selected_from=0,selected_to=0; streamed_text->GetSelection(&selected_from,&selected_to);
+                require(selected_from==0 && selected_to==6 && streamed_text->GetStringSelection()=="Colors","Streaming replaced or expanded the reader's selected prefix");
+                streamed_text->SetSelection(20,35);
                 stream->text("Stopped."); stream->activity(""); stream->rewrap(260);
                 require(view(stream,"Assistant")->GetValue()=="Stopped." && !view(stream,"Studio actions")->IsShown(),"Final reply replacement left stale content");
+                streamed_text->GetSelection(&selected_from,&selected_to);
+                require(selected_from>=0 && selected_from==selected_to && selected_to<=streamed_text->GetLastPosition(),"Full reply replacement preserved a stale selection");
                 stream->Destroy();
+                wxString cjk,emoji,combining,zero_width;
+                for (int i=0;i<40;++i) { cjk+=wxString::FromUTF8("打印模型"); emoji+=wxString::FromUTF8("👩‍💻🌸"); combining+=wxString::FromUTF8("a\u0301\u200b"); zero_width+=wxString::FromUTF8("\u200b"); }
+                for (int width:{100,260,440}) for (const auto& token:std::vector<wxString>{wxString('a',400)+".3mf","https://example.invalid/"+wxString('b',400),cjk,emoji,combining,zero_width}) {
+                    auto* bubble=new AssistantBubble(frame,false,token,false);
+                    bubble->rewrap(width); bubble->SetSize(wxSize(width,bubble->GetMinSize().y)); bubble->Layout();
+                    auto* body=view(bubble,"Assistant");
+                    require(body->GetValue()==token,"Long-token measurement changed the original text");
+                    require(body->GetMinSize().y>0,"Zero-width glyph measurement produced an invalid height");
+                    if (body->GetTextExtent(token).x>body->GetMinSize().x)
+                        require(body->GetMinSize().y>body->GetCharHeight()*2,"Long token was measured as one visual line");
+                    if (token.EndsWith(".3mf") || token.StartsWith("https://")) {
+                        const int original_height=bubble->GetMinSize().y;
+                        auto font=body->GetFont(); font.SetPointSize(font.GetPointSize()+6); body->SetFont(font);
+                        bubble->rewrap(width);
+                        require(bubble->GetMinSize().y>original_height,"Larger long-token font did not grow the reply");
+                    }
+                    bubble->Destroy();
+                }
                 result=0;
-                std::cout<<"PASS: light/dark narrow/wide messages, Unicode, selection retention, font changes, action-only replies, streaming growth, and final replacement."<<std::endl;
+                std::cout<<"PASS: light/dark narrow/wide messages, Unicode, selection retention, font changes, action-only replies, streaming growth, final replacement, and long-token sizing."<<std::endl;
             } catch (const std::exception& error) { std::cerr<<"FAIL: "<<error.what()<<'\n'; }
             if (!review || result) frame->Destroy();
         });

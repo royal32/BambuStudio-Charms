@@ -10,6 +10,7 @@
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <algorithm>
+#include <cstdlib>
 
 namespace Slic3r { namespace GUI {
 
@@ -72,18 +73,56 @@ public:
         if (!m_dirty && m_wrap_width==width && m_wrap_text_font==text_font && m_wrap_activity_font==activity_font) return;
         m_dirty=false; m_wrap_width=width;
         m_wrap_text_font=text_font; m_wrap_activity_font=activity_font;
-        const int inner=std::max(FromDIP(80),width-FromDIP(24));
-        if (m_text->GetValue()!=m_body) m_text->ChangeValue(m_body);
+        const int inner=std::max(FromDIP(1),width-FromDIP(24));
+        const int wrap_width=std::max(FromDIP(1),inner-FromDIP(12));
+        if (const auto previous=m_text->GetValue(); previous!=m_body) {
+            long from=0,to=0; m_text->GetSelection(&from,&to);
+            // New stream text must not discard or extend the reader's range.
+            // A replacement reply keeps the native selection reset instead.
+            const bool preserve=from>=0 && from<to && to<=m_text->GetLastPosition() && m_body.StartsWith(previous);
+            m_text->ChangeValue(m_body);
+            if (preserve) m_text->SetSelection(from,to);
+        }
         if (m_activity->GetValue()!=m_steps) m_activity->ChangeValue(m_steps);
         m_text->Show(!m_body.empty()); m_activity->Show(!m_steps.empty());
         // Measure wrapped lines with the same font as each native text view.
         // Leave room for Cocoa/Windows' text-container insets and line leading.
         struct Lines : wxTextWrapper {
+            Lines(wxWindow* view,int width) : dc(view), width(width) { dc.SetFont(view->GetFont()); }
             int count{0};
-            void OnOutputLine(const wxString&) override { ++count; }
+            wxClientDC dc;
+            int width;
+            void OnOutputLine(const wxString& line) override {
+                if (dc.GetTextExtent(line).x<=width) { ++count; return; }
+                wxArrayInt extents;
+                if (!dc.GetPartialTextExtents(line,extents) || extents.size()!=line.length()) {
+                    // A port returning differently indexed metrics must not
+                    // index outside wxString or underestimate the text height.
+                    count+=std::max<size_t>(1,line.length()); return;
+                }
+                // Make advances monotonic even for combining/bidirectional
+                // glyph positions. Measure once, then count without substrings.
+                int advance=0,previous=0;
+                for (auto& extent:extents) { const int position=extent; advance+=std::abs(position-previous); extent=advance; previous=position; }
+                const wxString separators(" \t/\\-._?&=#");
+                size_t start=0;
+                do {
+                    ++count;
+                    // wxTextWrapper leaves an oversized word on one line.
+                    // Native text controls still wrap filenames, URLs and CJK.
+                    // Work in wxString characters, preserving the display text.
+                    const int origin=start?extents[start-1]:0;
+                    if (extents.back()-origin<=width) return;
+                    size_t cut=std::max(start+1,size_t(std::lower_bound(extents.begin()+start,extents.end(),origin+width)-extents.begin()));
+                    for (size_t boundary=cut;boundary>start;--boundary) {
+                        if (separators.Find(line[boundary-1])!=wxNOT_FOUND) { cut=boundary; break; }
+                    }
+                    start=cut;
+                } while (start<extents.size());
+            }
         };
         for (auto* view:{m_text,m_activity}) {
-            Lines lines; lines.Wrap(view,view->GetValue(),inner-FromDIP(12));
+            Lines lines(view,wrap_width); lines.Wrap(view,view->GetValue(),wrap_width);
             view->SetMinSize(wxSize(inner,std::max(1,lines.count)*(view->GetCharHeight()+FromDIP(2))+FromDIP(8)));
         }
         SetMinSize(wxDefaultSize);
