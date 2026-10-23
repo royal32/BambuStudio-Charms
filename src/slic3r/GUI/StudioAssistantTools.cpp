@@ -124,7 +124,7 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
     std::map<std::string,Json> schemas;
     for (const auto& definition : definitions.at(0).at("tools")) schemas[definition.at("name").get<std::string>()]=definition.at("parameters");
     size_t calls=0;
-    std::set<std::string> cancelled_actions, unconfirmed_actions;
+    std::set<std::string> cancelled_actions, unconfirmed_actions, failed_mutations;
     for (int step=0;step<32;++step) {
         check();
         Json request={{"model",model},{"instructions",instructions()},{"input",input},{"tools",definitions},
@@ -145,6 +145,8 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
             auto name=item.at("name").get<std::string>();
             if (name.rfind("studio.",0)==0) name.erase(0,7);
             std::string action_key=name;
+            std::string mutation_key;
+            bool dispatched_mutation=false;
             Json result;
             try {
                 if (item.value("namespace","studio")!="studio" || !schemas.count(name)) throw std::runtime_error("That tool is not available in Studio.");
@@ -157,16 +159,26 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
                 } else {
                     const auto arguments=Json::parse(item.at("arguments").get<std::string>());
                     validate(arguments,schemas.at(name));
+                    // Parsed object keys have a canonical order. Call IDs and
+                    // qualified-name aliases must not bypass a failed retry.
+                    if (changes_project(name)) mutation_key=name+":"+arguments.dump();
                     if (name=="document") action_key+=":"+arguments.at("action").get<std::string>();
                     if (name=="open_library_project") action_key+=":"+arguments.at("entry_id").get<std::string>();
                     if (cancelled_actions.count(action_key))
                         result={{"cancelled",true},{"skipped",true},{"message","This action was cancelled earlier in this request. Do not retry it without a new request from the person."}};
                     else if (unconfirmed_actions.count(action_key))
                         result={{"outcome","unconfirmed"},{"skipped",true},{"message","This file or project action was already requested, but Studio has not confirmed its result. Inspect the current state; do not repeat it without a new request from the person."}};
-                    else result=callbacks.tool(name,arguments);
+                    else if (!mutation_key.empty() && failed_mutations.count(mutation_key))
+                        result={{"skipped",true},{"error","This identical project-changing action already failed in this request and was not repeated."},
+                            {"instruction","Inspect the current project. Retry only with materially changed arguments or revision, or after a new request from the person."}};
+                    else {
+                        dispatched_mutation=!mutation_key.empty();
+                        result=callbacks.tool(name,arguments);
+                    }
                 }
             } catch (const std::exception& e) { check(); result={{"error",e.what()},{"instruction","Inspect the current state before choosing another action. Do not assume this operation succeeded."}}; }
             check();
+            if (dispatched_mutation && (result.contains("error") || result.contains("operation_error"))) failed_mutations.insert(mutation_key);
             if (result.value("cancelled",false)) cancelled_actions.insert(action_key);
             const bool unconfirmed=result.value("outcome","")=="unconfirmed";
             if (unconfirmed && (name=="document" || name=="open_library_project")) unconfirmed_actions.insert(action_key);

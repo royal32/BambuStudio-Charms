@@ -258,6 +258,79 @@ int main()
     };
     session.tool=[&](const std::string&,const Json&) -> Json { ++attempts; throw std::runtime_error("stale project"); };
     run_turn(Json::array(),Json::object(),"test","test-model",session); assert(attempts==1);
+    const Json rename_args={{"revision","r1"},{"object_id","object-a"},{"name","First"}};
+    // A model can retry on later responses even when parallel calls are off.
+    // Native exceptions and both failure-result forms must all stop exact repeats.
+    for (int failure_kind=0;failure_kind<3;++failure_kind) {
+        response_index=0; attempts=0; int inspections=0;
+        session.respond=[&](const Json& request) {
+            switch (response_index++) {
+            case 0: return call("rename",rename_args,"failed_first");
+            case 1: {
+                auto retry=call("studio.rename",rename_args,"failed_retry");
+                retry["output"][0]["arguments"]="{\"revision\":\"r1\",\"object_id\":\"object-a\",\"name\":\"First\"}";
+                return retry;
+            }
+            case 2: {
+                const auto skipped=Json::parse(request.at("input").back().at("output").get<std::string>());
+                assert(skipped.at("skipped")==true && skipped.contains("error"));
+                return call("inspect_project",Json::object(),"inspect_failed");
+            }
+            case 3: {
+                auto changed=rename_args; changed["revision"]="r2";
+                return call("rename",changed,"changed_revision");
+            }
+            case 4: {
+                auto changed=rename_args; changed["revision"]="r2"; changed["name"]="Second";
+                return call("rename",changed,"changed_arguments");
+            }
+            default: return final;
+            }
+        };
+        session.tool=[&](const std::string& name,const Json&) -> Json {
+            if (name=="inspect_project") { ++inspections; return Json{{"revision","r2"}}; }
+            assert(name=="rename"); ++attempts;
+            if (failure_kind==0) throw std::runtime_error("native rename failed");
+            return failure_kind==1?Json{{"error","native rename failed"}}:Json{{"operation_error","native rename failed"}};
+        };
+        const auto failure_history=run_turn(Json::array(),Json::object(),"Rename the object","test-model",session);
+        assert(attempts==3 && inspections==1);
+        // The failed-signature memory belongs to this user turn only.
+        response_index=0; attempts=0;
+        session.respond=[&](const Json&) { return response_index++==0?call("rename",rename_args,"new_user_retry"):final; };
+        run_turn(failure_history,Json::object(),"Try renaming again","test-model",session);
+        assert(attempts==1);
+    }
+    // Successful operations are not deduplicated merely because args repeat.
+    response_index=0; attempts=0;
+    session.respond=[&](const Json&) { return response_index++<2?call("rename",rename_args,"success_"+std::to_string(response_index)):final; };
+    session.tool=[&](const std::string&,const Json&) { ++attempts; return Json{{"revision","r2"}}; };
+    run_turn(Json::array(),Json::object(),"Rename the object","test-model",session);
+    assert(attempts==2);
+    // Validation failures never dispatch, and an untouched sibling skipped
+    // after such a failure remains eligible on the next response.
+    response_index=0; attempts=0;
+    session.respond=[&](const Json&) {
+        switch (response_index++) {
+        case 0: {
+            auto batch=call("rename",{{"name","First"}},"invalid_rename");
+            batch["output"].push_back(call("rename",rename_args,"skipped_rename").at("output").at(0));
+            return batch;
+        }
+        case 1: return call("rename",rename_args,"dispatch_after_skip");
+        default: return final;
+        }
+    };
+    run_turn(Json::array(),Json::object(),"Rename the object","test-model",session);
+    assert(attempts==1);
+    // Read-only inspections and slicing retain their existing retry behavior.
+    for (const auto& item : std::vector<std::pair<std::string,Json>>{{"inspect_settings",{{"query","support"}}},{"slice",Json::object()}}) {
+        response_index=0; attempts=0;
+        session.respond=[&](const Json&) { return response_index++<2?call(item.first,item.second,"retry_"+std::to_string(response_index)):final; };
+        session.tool=[&](const std::string&,const Json&) { ++attempts; return attempts==1?Json{{"error","temporary failure"}}:Json{{"revision","r2"}}; };
+        run_turn(Json::array(),Json::object(),"test","test-model",session);
+        assert(attempts==2);
+    }
     // A failed/cancelled action invalidates the rest of a preplanned batch.
     // Preserve one output per call so the model can reassess the actual state.
     for (const auto& failure : std::vector<Json>{{{"cancelled",true}},{{"error","stale project"}},{{"operation_error","Slicing failed"}}}) {
