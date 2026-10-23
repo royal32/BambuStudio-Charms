@@ -31,6 +31,7 @@ std::string action_label(const std::string& tool) {
     static const std::map<std::string,std::string> labels = {
         {"inspect_project","Inspect project and warnings"},{"inspect_settings","Look up process settings"},{"list_profiles","Find installed profiles"},
         {"use_profile","Choose a profile"},{"model_view","Look at the model"},{"set_settings","Change process settings"},{"select_objects","Focus objects"},
+        {"select_parts","Highlight model parts"},{"split_parts","Split disconnected pieces into parts"},{"assign_part_filament","Assign part colors"},{"set_filament_color","Change a project filament color"},
         {"select_plate","Select a plate"},{"view","Show a Studio view"},{"arrange","Arrange parts"},{"orient","Orient parts"},{"move_to_plate","Move parts to a plate"},
         {"slice","Slice and check warnings"},{"copies","Make copies"},{"rename","Rename an item"},{"new_plate","Create a plate"},{"transform","Move, rotate, or scale parts"},
         {"undo","Undo a change"},{"redo","Redo a change"},{"delete_selected","Delete selected parts"},{"search_library","Search the library"},
@@ -41,6 +42,8 @@ std::string confirmation_text(const std::string& tool,const Json& args) {
     if (tool=="delete_selected") return "Delete the selected parts? You can restore them with Undo.";
     if (tool=="open_library_project") return "Open this library item's editable source project? Studio will ask about any unsaved changes.";
     if (tool=="use_profile") return "Choose the profile “"+args.value("name",std::string())+"”? This changes the project's print or material settings.";
+    if (tool=="set_filament_color") return "Change project filament slot "+std::to_string(args.at("slot").get<int>())+" to "+args.at("color").get<std::string>()+"? All model parts using this slot will display that color. Physical AMS settings stay unchanged.";
+    if (tool=="assign_part_filament" && args.value("replace_color_paint",false)) return "Replace color painting on the selected model parts with one uniform filament color? Other parts and support painting stay unchanged. Undo is available.";
     if (tool=="set_settings") {
         std::string text="Apply these "+args.value("scope",std::string("project"))+" process settings?";
         const auto& config=wxGetApp().preset_bundle->prints.get_edited_preset().config;
@@ -333,7 +336,7 @@ void AssistantWindow::handle_tool(const Json& event) {
     try {
         // Confirm high-impact actions; the preference can also make all edits
         // reviewable. Inspection, selection, and slicing need no extra dialog.
-        if (requires_confirmation(tool) || (changes_project(tool) && !m_allow_changes->GetValue())) {
+        if (requires_confirmation(tool) || (tool=="assign_part_filament" && args.value("replace_color_paint",false)) || (changes_project(tool) && !m_allow_changes->GetValue())) {
             const std::string question = confirmation_text(tool,args);
             if (wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this) != wxYES) {
                 m_work->answer({{"cancelled", true}, {"message", "The person declined this action. Do not retry it without a new request."}}); return;

@@ -62,9 +62,14 @@ Json config_values(const DynamicPrintConfig& config) {
 }
 Json object_summary(const ModelObject& object) {
     Json volumes = Json::array(), instances = Json::array();
-    for (const auto* volume : object.volumes) volumes.push_back({{"id",std::to_string(volume->id().id)}, {"name", volume->name}, {"kind", int(volume->type())},
+    for (const auto* volume : object.volumes) {
+        const auto box=volume->mesh().transformed_bounding_box(volume->get_matrix());
+        volumes.push_back({{"id",std::to_string(volume->id().id)}, {"name", volume->name}, {"kind", int(volume->type())},
         {"model_part", volume->is_model_part()}, {"negative", volume->is_negative_volume()}, {"support_painted", !volume->supported_facets.empty()},
-        {"settings", config_values(volume->config.get())}});
+        {"color_painted", !volume->mmu_segmentation_facets.empty()}, {"filament_slot", volume->extruder_id()},
+        {"size_mm", vec(box.size())}, {"min_object_mm", vec(box.min)}, {"max_object_mm", vec(box.max)},
+        {"mesh_volume_mm3", std::abs(double(its_volume(volume->mesh().its))*volume->get_matrix().linear().determinant())}, {"settings", config_values(volume->config.get())}});
+    }
     for (const auto* instance : object.instances) {
         const auto matrix = instance->get_transformation().get_matrix();
         Json transform = Json::array();
@@ -234,6 +239,16 @@ Json Actions::inspect()
         if (full.has(key)) settings[key] = full.opt_serialize(key);
     Json revision_data = {{"model_id", std::to_string(p.model().id().id)}, {"objects", objects}, {"plates", plates}, {"settings", config_values(full)}, {"current_plate", list.get_curr_plate_index()}};
     Json selected = Json::array();
+    Json selected_parts=Json::array(); std::set<std::string> selected_part_ids;
+    const auto& selection=p.get_selection();
+    for (const auto index : selection.get_volume_idxs()) {
+        const auto* gl=selection.get_volume(index);
+        if (!gl || gl->object_idx()<0 || size_t(gl->object_idx())>=p.model().objects.size()) continue;
+        const auto* object=p.model().objects[gl->object_idx()];
+        if (gl->volume_idx()<0 || size_t(gl->volume_idx())>=object->volumes.size()) continue;
+        const auto part=std::to_string(object->volumes[gl->volume_idx()]->id().id);
+        if (selected_part_ids.insert(part).second) selected_parts.push_back({{"object_id",id(object)},{"part_id",part}});
+    }
     for (const auto& item : p.get_selection().get_content()) {
         if (item.first >= 0 && size_t(item.first) < p.model().objects.size()) selected.push_back(id(p.model().objects[item.first]));
     }
@@ -252,7 +267,7 @@ Json Actions::inspect()
     return {{"project", std::string(p.get_project_name().utf8_string())}, {"revision", base64url(sha256(revision_data.dump()))}, {"total_instances", total_instances},
         {"objects", objects}, {"plates", plates}, {"current_plate", list.get_curr_plate_index()+1}, {"settings", settings},
         {"warnings", warnings}, {"busy", p.is_background_process_slicing() || p.is_any_job_running() || p.is_background_process_update_scheduled()},
-        {"editable", !p.only_gcode_mode() && !p.is_gcode_3mf()}, {"selected_object_ids", selected}, {"can_undo", p.can_undo()}, {"can_redo", p.can_redo()},
+        {"editable", !p.only_gcode_mode() && !p.is_gcode_3mf()}, {"selected_object_ids", selected}, {"selected_parts",selected_parts}, {"can_undo", p.can_undo()}, {"can_redo", p.can_redo()},
         {"limitations", Json::array({"Physical filament colors/materials may differ from digital slots.", "No face-level support painting or geometry repair is automated.", "Warnings may be stale until resliced; absence of warnings does not prove printability."})}};
 }
 
@@ -323,11 +338,47 @@ Json Actions::execute(const std::string& tool, const Json& args)
     }
     if (tool == "search_library" || tool == "inspect_library_source") return start_library(tool,args);
     if (changes_project(tool)) editable(p);
-    static const std::set<std::string> revision_required = {"set_settings", "use_profile", "arrange", "orient", "move_to_plate", "copies", "rename", "new_plate", "transform", "delete_selected", "add_library_model"};
+    static const std::set<std::string> revision_required = {"set_settings", "use_profile", "arrange", "orient", "move_to_plate", "copies", "rename", "new_plate", "transform", "delete_selected", "add_library_model", "assign_part_filament", "split_parts", "set_filament_color"};
     if (revision_required.count(tool) && !args.contains("revision")) throw std::runtime_error("Inspect the project and provide its current revision before editing.");
     if (args.contains("revision") && args.at("revision") != inspect().at("revision"))
         throw std::runtime_error("The project changed since inspection. Inspect again before applying this action.");
     if (tool == "select_objects") { select(p, args.at("object_ids").get<std::vector<std::string>>()); return inspect(); }
+    if (tool=="select_parts" || tool=="assign_part_filament" || tool=="split_parts") {
+        auto* object=find_object(p,args.at("object_id"));
+        const auto parts=part_targets(*object,args.at("part_ids").get<std::vector<std::string>>());
+        if (tool=="assign_part_filament") {
+            const int slot=args.at("slot"); const bool replace=args.value("replace_color_paint",false);
+            validate_part_filament(parts,slot,wxGetApp().preset_bundle->filament_presets.size(),replace);
+            p.take_snapshot("Assistant: assign part filament");
+            assign_part_filament(parts,slot,replace);
+            p.sidebar().obj_list()->sync_filament_from_model();
+            // Match the native filament setter. Geometry-change notifications
+            // would unnecessarily realign intentionally sunk/floating models.
+            p.get_partplate_list().reset_thumbnail_assembly_view_data(); p.update();
+            return inspect();
+        }
+        if (tool=="split_parts" && (parts.size()!=1 || !parts.front()->is_splittable()))
+            throw std::runtime_error("Choose one part containing disconnected pieces. A single connected surface cannot be separated into colors by this operation; use manual color painting for that case.");
+        wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor); p.select_view_3D("3D");
+        std::vector<ObjectVolumeID> items; for (auto* part : parts) items.push_back({object,part});
+        p.sidebar().obj_list()->select_items(items); p.canvas3D()->zoom_to_selection();
+        if (tool=="split_parts") {
+            const auto before=object->volumes.size();
+            p.sidebar().obj_list()->split(true);
+            if (object->volumes.size()<=before) throw std::runtime_error("Studio did not split the selected mesh. Inspect it before continuing.");
+        }
+        return inspect();
+    }
+    if (tool=="set_filament_color") {
+        const int slot=args.at("slot"); const auto color=args.at("color").get<std::string>();
+        auto& bundle=*wxGetApp().preset_bundle;
+        auto* colors=bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+        if (!colors || slot<1 || size_t(slot)>colors->values.size() || !valid_color(color)) throw std::runtime_error("Choose an existing project filament slot and a hexadecimal color such as #FFFFFF.");
+        p.take_snapshot("Assistant: change project filament color");
+        colors->values[slot-1]=color; p.sidebar().update_presets(Preset::TYPE_FILAMENT);
+        p.on_config_change(bundle.full_config()); p.update_project_dirty_from_presets(); p.update();
+        return inspect();
+    }
     if (tool == "select_plate") { find_plate(p, args.at("plate")); p.select_plate(args.at("plate").get<int>()-1); return inspect(); }
     if (tool == "view") {
         const auto target = args.at("target").get<std::string>();

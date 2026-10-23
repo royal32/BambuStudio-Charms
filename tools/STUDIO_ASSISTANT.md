@@ -11,12 +11,27 @@ Try requests such as:
 - “Explain the warnings on this plate. Which ones matter?”
 - “This earring loop is unsupported. Inspect it, suggest a fix, then slice to check it.”
 - “Make three copies and arrange them on this plate.”
+- “Keep the largest outer shell white and make the smaller internal pieces black.”
 - “Find the Bee in the library and add it to this plate, keeping its model colors.”
 
 The assistant can inspect objects, parts, plate and object overrides, profiles,
 current slicing warnings, and model views. It can change supported process
 settings, choose installed printer/process/filament profiles, select objects,
 copy, transform, arrange or orient parts, move them between plates, and slice.
+It can highlight individual parts and assign their project filament slots. For
+an STL with disconnected pieces, it can use **Split to parts** to expose those
+pieces while keeping them assembled in the same object. It inspects each part's
+name, dimensions, bounds, effective filament and existing color painting.
+Assigning a part affects all instances of that object, while leaving other parts
+and material profiles unchanged. Existing color painting is preserved unless a
+person explicitly confirms replacing it with a uniform color. Negative volumes
+and modifiers cannot be assigned using the part-color tool.
+
+Changing a project filament's display color is a separate operation with a
+confirmation, because every part using that slot changes appearance. Physical
+AMS settings remain unchanged. For a color needed on only some parts, the
+assistant reuses an appropriate slot or adds one with a compatible profile.
+
 It can search the sliced library and import editable source models while
 preserving painted colors, support annotations and negative volumes. If the
 destination lacks matching material/color slots, it asks for an explicit mapping
@@ -112,6 +127,17 @@ iCloud import remains unverified. Make the shared library's
 `.charm-library/projects` metadata available locally when source lookup waits on
 iCloud. The existing library source resolver reads those records on a worker;
 the assistant's five-minute wait limit leaves the project unchanged on timeout.
+
+Part-color refinement: the assistant assigned Namaste's 14 inner pieces to the
+existing black slot and retained its largest outer shell on the white slot,
+then sliced successfully with no reported warnings. A saved local test copy has
+one part assigned to slot 1 and fourteen to slot 2. Comparing its 3MF with the
+before copy confirms identical mesh vertices/triangles, component and instance
+transforms, printer/process/filament profile IDs, and project slot colors. The
+original STL is unchanged. Native checks also split the raw Namaste STL into
+15 parts without changing its bounds, and exercise invalid slots, wrong-object
+part IDs, negative-volume rejection, and explicit replacement of existing color
+painting while retaining support painting and other parts' assignments.
 
 Official references: [sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in),
 [profiles and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions),

@@ -12,6 +12,33 @@
 #include <stdexcept>
 
 namespace Slic3r { namespace GUI { namespace Assistant {
+inline std::vector<ModelVolume*> part_targets(ModelObject& object,const std::vector<std::string>& ids)
+{
+    if (ids.empty() || ids.size()>256) throw std::runtime_error("Choose between 1 and 256 parts.");
+    std::set<std::string> seen; std::vector<ModelVolume*> result;
+    for (const auto& id : ids) {
+        if (!seen.insert(id).second) throw std::runtime_error("A part was selected more than once.");
+        ModelVolume* found=nullptr;
+        for (auto* part : object.volumes) if (std::to_string(part->id().id)==id) found=part;
+        if (!found) throw std::runtime_error("That part is no longer in this object. Inspect the project again.");
+        if (!found->is_model_part()) throw std::runtime_error("Choose printable model parts, not negative volumes or modifiers.");
+        result.push_back(found);
+    }
+    return result;
+}
+inline void validate_part_filament(const std::vector<ModelVolume*>& parts,int slot,size_t slots,bool replace_paint)
+{
+    if (slot<1 || size_t(slot)>slots) throw std::runtime_error("That project filament slot does not exist. Choose or add a project filament first.");
+    for (const auto* part : parts) if (!replace_paint && !part->mmu_segmentation_facets.empty())
+        throw std::runtime_error("A selected part has color painting that overrides its base filament. Ask whether to replace that painting for a uniform color, or leave it unchanged.");
+}
+inline void assign_part_filament(const std::vector<ModelVolume*>& parts,int slot,bool replace_paint)
+{
+    for (auto* part : parts) {
+        part->config.set("extruder",slot);
+        if (replace_paint) part->mmu_segmentation_facets.reset();
+    }
+}
 // These functions modify ModelConfig's global timestamp counter and therefore
 // run on Studio's UI thread (or in a standalone test process), never a worker.
 inline ModelObject* copy_source_object(Model& destination,const ModelObject& source)

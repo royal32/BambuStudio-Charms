@@ -40,6 +40,18 @@ int main(int argc,char** argv)
     assert(clone->id()!=object->id()); assert(clone->volumes.size()==object->volumes.size());
     assert(clone->volumes.at(0)->supported_facets.get_data()==original_supports); assert(clone->volumes.at(1)->is_negative_volume());
     assert(clone->volumes.at(0)->part_guid()!=original_guid); assert(volume->part_guid()==original_guid);
+    const auto parts=part_targets(*object,{std::to_string(volume->id().id)});
+    rejects([&] { validate_part_filament(parts,1,2,false); });
+    rejects([&] { validate_part_filament(parts,3,2,true); });
+    rejects([&] { part_targets(*object,{std::to_string(hole->id().id)}); });
+    rejects([&] { part_targets(*object,{std::to_string(clone->volumes[0]->id().id)}); });
+    rejects([&] { part_targets(*object,{std::to_string(volume->id().id),std::to_string(volume->id().id)}); });
+    assert(!volume->mmu_segmentation_facets.empty()); assert(volume->config.extruder()==1);
+    validate_part_filament(parts,2,2,true); assign_part_filament(parts,2,true);
+    assert(volume->config.extruder()==2); assert(volume->mmu_segmentation_facets.empty());
+    assert(volume->supported_facets.get_data()==original_supports); assert(object->config.extruder()==2);
+    assert(!clone->volumes[0]->mmu_segmentation_facets.empty());
+    volume->config.set("extruder",1); volume->mmu_segmentation_facets.set(check);
     target.set_key_value("filament_type",new ConfigOptionStrings({"PETG","PETG"}));
     rejects([&] { source_filament_mapping(*object,source,target,2); });
     assert(source_filament_mapping(*object,source,target,2,std::vector<int>{2,1}).at(1)==2);
@@ -73,6 +85,27 @@ int main(int argc,char** argv)
     std::cout << "Real slicer: unsupported-overhang warning detected; support generation and reslice produced support layers and refreshed diagnostics.\n";
     for (int i=1;i<argc;++i) {
         DynamicPrintConfig config; auto project=read_source_model(argv[i],config);
+        if (boost::filesystem::path(argv[i]).extension()==".stl") {
+            assert(project.objects.size()==1); auto* item=project.objects.front(); assert(item->volumes.size()==1);
+            auto* mesh=item->volumes.front(); const auto before=item->raw_mesh_bounding_box();
+            assert(mesh->is_splittable()); const auto count=mesh->split(4,1.0f); assert(count>1);
+            item->invalidate_bounding_box(); const auto after=item->raw_mesh_bounding_box();
+            assert((before.min-after.min).norm()<1e-4 && (before.max-after.max).norm()<1e-4);
+            size_t largest=0; double largest_volume=-1;
+            for (size_t j=0;j<item->volumes.size();++j) {
+                const auto* part=item->volumes[j]; const auto box=part->mesh().transformed_bounding_box(part->get_matrix());
+                const auto volume=std::abs(double(its_volume(part->mesh().its)));
+                if (volume>largest_volume) { largest_volume=volume; largest=j; }
+                std::cout<<"STL part "<<j+1<<": "<<part->name<<", size "<<box.size().transpose()<<", volume "<<volume<<" mm3\n";
+            }
+            for (size_t j=0;j<item->volumes.size();++j) {
+                auto target_parts=part_targets(*item,{std::to_string(item->volumes[j]->id().id)});
+                validate_part_filament(target_parts,j==largest?2:1,4,false); assign_part_filament(target_parts,j==largest?2:1,false);
+            }
+            for (size_t j=0;j<item->volumes.size();++j) assert(item->volumes[j]->config.extruder()==(j==largest?2:1));
+            std::cout<<"STL disconnected-shell split preserved placement; "<<count<<" parts assigned with largest part in white slot 2 and inner pieces in red slot 1; passed.\n";
+            continue;
+        }
         assert(!project.objects.empty()); assert(config.has("filament_colour")); assert(config.has("printer_model"));
         size_t volumes=0,painted=0,negatives=0;
         const auto* colors=config.option<ConfigOptionStrings>("filament_colour"); assert(colors && !colors->values.empty());

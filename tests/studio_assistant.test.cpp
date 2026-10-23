@@ -134,7 +134,10 @@ int main()
     assert(history.back().at("type")=="message");
 
     // A missing revision or an unsupported command never reaches the app.
-    for (const auto& invalid : std::vector<Json>{call("set_settings",{{"scope","global"},{"settings",Json::array()}}),call("shell",{{"command","anything"}}),call("copies",{{"revision","r1"},{"object_id","o"},{"additional",999}})}) {
+    for (const auto& invalid : std::vector<Json>{call("set_settings",{{"scope","global"},{"settings",Json::array()}}),call("shell",{{"command","anything"}}),call("copies",{{"revision","r1"},{"object_id","o"},{"additional",999}}),
+        call("assign_part_filament",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",0}}),
+        call("assign_part_filament",{{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",1}}),
+        call("split_parts",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v1","v2"})}})}) {
         response_index=0; bool executed_bad=false;
         session.respond=[&](const Json& request) {
             if (response_index++==0) return invalid;
