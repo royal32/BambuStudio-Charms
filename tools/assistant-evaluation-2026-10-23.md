@@ -103,16 +103,33 @@ no success signal. The session checks results before continuing a preplanned
 batch and prevents identical document-action dialog retries during that turn,
 while permitting inspection and different document actions. This avoids false
 import/export success and repeated choosers after cancellation.
+Native project opens follow the same rule: a selected filename or close-dialog
+return code does not establish loading success. Identical library-source opens
+also cannot repeat within that turn. Selection revisions include the exact
+selected volumes and selection mode, so switching between parts in one object
+invalidates a previously inspected revision before an edit.
+Identical failed native mutations are skipped within the turn, keyed by the
+validated arguments and normalized tool name. Changed arguments/revisions and
+new user turns remain usable; successful repeats, inspection and slicing keep
+their existing behavior. The pre-fix negative control executes an unchanged
+failing arrangement 32 times; the regression now permits one native attempt.
 
 Validation completed before adoption:
 
 - ARM and Intel Studio builds and strict persistent signature checks pass; the
   final Intel bundle audit reports no macOS 12.6 compatibility errors.
-- Pure client/session, worker race/order, and library-search targets pass locally.
-  The client and worker tests also pass on the macOS 12.6 Intel Mac.
+- Pure client/session, worker race/order, library-search and selection/result-state
+  targets pass locally. All four targets also pass on the macOS 12.6 Intel Mac.
 - Real native chat-widget checks pass locally and on the Intel Mac, covering light/dark
   contrast, narrow/wide wrapping, selection retention, action-only replies and
-  streaming growth. CUA visual inspection confirms readability and selected-text
+  streaming growth. Font changes invalidate cached heights; selected text in an
+  actively streaming reply survives appended chunks without selecting new text.
+  Long filenames, URLs and unbroken Unicode no longer receive a one-line height.
+  A separate native Cocoa layout probe fits all 30 default/larger-font cases
+  on both this Mac and the macOS 12.6 Intel Mac;
+  the portable widget fixture covers the same input families without changing
+  displayed or copied text.
+  CUA visual inspection confirms readability and selected-text
   versus whole-message copy menu items on the Apple Silicon Mac.
 - The old lock-free worker Stop setter fails the new concurrency regression in
   a disposable negative-control build; the fixed implementation passes.
@@ -120,7 +137,19 @@ Validation completed before adoption:
   and clear the unsupported-overhang warning. Five project fixtures (Band Mom,
   Wanda, Frappe, Bee, Namaste) plus the raw Namaste STL pass geometry/material
   checks; input SHA-256 values remain unchanged.
+- The signed full ARM app and full Intel app on the Intel Mac pass their invalid-service
+  private credential transport self-checks. The restricted Codex
+  sandbox blocks macOS signature inspection, so it cannot run that native check.
 
 The final app remains staged separately from the working installed apps. The Windows test machine
 did not answer an SSH connection attempt, so this follow-up has no fresh Windows
 build or live Windows UI validation.
+
+Review artifacts (code through `fd5a9f224`):
+
+- ARM: `build/arm64/Assistant-Experience-Ready/BambuStudio.app`.
+- Intel archive: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`, SHA-256
+  `dad5e8ea20f81d090c2a6a7df51e5c325e6df83ad030e62828d33f9b62b3dd00`.
+- Intel Mac: `~/Downloads/Charms-Assistant-Experience-Final-2026-10-23/BambuStudio.app`.
+  Its archive hash, strict signature, startup and private credential transport
+  were checked on the Intel Mac without launching its GUI or reading an account.

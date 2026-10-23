@@ -151,7 +151,8 @@ ctest --test-dir build/assistant-checks --output-on-failure
 ```
 
 These include native worker handoff, text-event ordering, cancellation races,
-failed/cancelled action batches, and synthetic connection/stream errors. No
+failed/cancelled/unconfirmed action batches, exact part-selection revisions,
+and synthetic connection/stream errors. No
 account or inference is used. Standalone native chat checks exercise the actual
 bubble widget in light/dark mode, narrow/wide layouts, streaming and copying:
 
@@ -163,6 +164,9 @@ python3 tools/run_studio_assistant_chat_checks.py --review
 The review fixture is an isolated app with synthetic text, no Studio profile,
 credential access, or networking. `--arch x86_64 --build-only` builds it for the
 Intel Mac; the checks themselves need a logged-in graphical desktop.
+The checks also cover font-size changes and retaining selected text while a
+reply streams, without retaining stale ranges when a reply is replaced. Long
+filenames, links and unbroken Unicode are measured as multiple visual lines.
 
 Opt-in native Keychain checks use synthetic values and automatically delete
 their disposable Keychain. Initialize the stable build identity once first:
@@ -184,6 +188,8 @@ exercises its own signed parent/child pipes using a fixed invalid service and
 expects the service guard to reject it before any Keychain query. Exit 0 means
 the transport/guard worked; exit 78 means the check failed. It does not load an
 account, show authorization UI, or initialize Studio's GUI/network plugin.
+Run this native check outside a restricted execution sandbox: macOS must permit
+the child to inspect its parent's code signature.
 
 Native model/slicer checks, after building Studio with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`:
