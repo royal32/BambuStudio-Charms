@@ -108,6 +108,8 @@ return code does not establish loading success. Identical library-source opens
 also cannot repeat within that turn. Selection revisions include the exact
 selected volumes and selection mode, so switching between parts in one object
 invalidates a previously inspected revision before an edit.
+File-action status uses specific Save, Import and Export labels. An unconfirmed
+native result receives a neutral “check result” marker instead of a success tick.
 Identical failed native mutations are skipped within the turn, keyed by the
 validated arguments and normalized tool name. Changed arguments/revisions and
 new user turns remain usable; successful repeats, inspection and slicing keep
@@ -145,11 +147,11 @@ The final app remains staged separately from the working installed apps. The Win
 did not answer an SSH connection attempt, so this follow-up has no fresh Windows
 build or live Windows UI validation.
 
-Review artifacts (code through `fd5a9f224`):
+Review artifacts (code through `ff3b4215b`):
 
 - ARM: `build/arm64/Assistant-Experience-Ready/BambuStudio.app`.
 - Intel archive: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`, SHA-256
-  `dad5e8ea20f81d090c2a6a7df51e5c325e6df83ad030e62828d33f9b62b3dd00`.
+  `6e0832119675598a82d1691858564b21f559c89503a2070746ee526d48a80b0f`.
 - Intel Mac: `~/Downloads/Charms-Assistant-Experience-Final-2026-10-23/BambuStudio.app`.
   Its archive hash, strict signature, startup and private credential transport
   were checked on the Intel Mac without launching its GUI or reading an account.
