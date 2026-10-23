@@ -68,8 +68,10 @@ public:
     void rewrap(int width) {
         // Streaming updates only need to measure the changing reply. Rewrapping
         // the entire transcript for every token makes longer chats sluggish.
-        if (!m_dirty && m_wrap_width==width) return;
+        const auto text_font=m_text->GetFont(), activity_font=m_activity->GetFont();
+        if (!m_dirty && m_wrap_width==width && m_wrap_text_font==text_font && m_wrap_activity_font==activity_font) return;
         m_dirty=false; m_wrap_width=width;
+        m_wrap_text_font=text_font; m_wrap_activity_font=activity_font;
         const int inner=std::max(FromDIP(80),width-FromDIP(24));
         if (m_text->GetValue()!=m_body) m_text->ChangeValue(m_body);
         if (m_activity->GetValue()!=m_steps) m_activity->ChangeValue(m_steps);
@@ -92,6 +94,7 @@ private:
     bool m_user;
     bool m_dirty{true};
     int m_wrap_width{0};
+    wxFont m_wrap_text_font, m_wrap_activity_font;
     wxString m_body, m_steps;
     wxTextCtrl *m_text, *m_activity;
 };

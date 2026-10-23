@@ -53,6 +53,20 @@ public:
                         samples[j]->theme(i==0); samples[j]->rewrap(width);
                         long from=0,to=0; text->GetSelection(&from,&to);
                         require(from==4 && to==18,"Unchanged rewrap/theme reset the reader's selection");
+                        const auto original_font=text->GetFont();
+                        const int original_height=samples[j]->GetMinSize().y;
+                        auto larger_font=original_font;
+                        larger_font.SetPointSize(original_font.GetPointSize()+6);
+                        text->SetFont(larger_font); samples[j]->rewrap(width);
+                        require(samples[j]->GetMinSize().y>original_height,"Larger message font did not grow the cached reply");
+                        text->SetFont(original_font); samples[j]->rewrap(width);
+                        auto* actions=view(samples[j],"Studio actions");
+                        const auto action_font=actions->GetFont();
+                        auto larger_actions=action_font;
+                        larger_actions.SetPointSize(action_font.GetPointSize()+6);
+                        actions->SetFont(larger_actions); samples[j]->rewrap(width);
+                        require(samples[j]->GetMinSize().y>original_height,"Larger action font did not grow the cached reply");
+                        actions->SetFont(action_font); samples[j]->rewrap(width);
                         samples[j]->theme(i!=0);
                     }
                 }
@@ -70,7 +84,7 @@ public:
                 require(view(stream,"Assistant")->GetValue()=="Stopped." && !view(stream,"Studio actions")->IsShown(),"Final reply replacement left stale content");
                 stream->Destroy();
                 result=0;
-                std::cout<<"PASS: light/dark narrow/wide messages, Unicode, selection retention, action-only replies, streaming growth, and final replacement."<<std::endl;
+                std::cout<<"PASS: light/dark narrow/wide messages, Unicode, selection retention, font changes, action-only replies, streaming growth, and final replacement."<<std::endl;
             } catch (const std::exception& error) { std::cerr<<"FAIL: "<<error.what()<<'\n'; }
             if (!review || result) frame->Destroy();
         });
