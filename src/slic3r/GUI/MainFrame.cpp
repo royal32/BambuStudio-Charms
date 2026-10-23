@@ -39,6 +39,7 @@
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
 #include "WebViewDialog.hpp"
+#include "StudioAssistant.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
 // BBS
@@ -2811,6 +2812,9 @@ static const wxString sep_space = "";
 static wxMenu* generate_help_menu()
 {
     wxMenu* helpMenu = new wxMenu();
+    append_menu_item(helpMenu, wxID_ANY, _L("Studio assistant") + "…", _L("Ask about this project or get help preparing a print"),
+        [](wxCommandEvent&) { show_studio_assistant(wxGetApp().mainframe); });
+    helpMenu->AppendSeparator();
 #ifdef __WINDOWS__
     // shortcut key
     auto alt = GUI::shortkey_alt_prefix();
@@ -3341,6 +3345,9 @@ void MainFrame::init_menubar_as_editor()
     wxMenu* viewMenu = nullptr;
     if (m_plater) {
         viewMenu = new wxMenu();
+        append_menu_item(viewMenu, wxID_ANY, _L("Studio assistant") + "\t" + ctrl + "Shift+A", _L("Get help with the current project"),
+            [this](wxCommandEvent&) { show_studio_assistant(this); });
+        viewMenu->AppendSeparator();
         add_common_view_menu_items(viewMenu, this, std::bind(&MainFrame::can_change_view, this));
         viewMenu->AppendSeparator();
 

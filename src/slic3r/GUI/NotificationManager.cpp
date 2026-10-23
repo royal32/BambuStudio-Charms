@@ -2838,6 +2838,18 @@ size_t NotificationManager::get_notification_count() const
 	return ret;
 }
 
+std::vector<NotificationManager::AssistantDiagnostic> NotificationManager::assistant_diagnostics() const
+{
+    std::vector<AssistantDiagnostic> diagnostics;
+    for (const auto& notice : m_pop_notifications) {
+        if (notice->is_finished() || notice->get_state() == PopNotification::EState::Hidden) continue;
+        const auto level = notice->get_data().level;
+        if (level != NotificationLevel::WarningNotificationLevel && level != NotificationLevel::SeriousWarningNotificationLevel && level != NotificationLevel::ErrorNotificationLevel) continue;
+        diagnostics.push_back({notice->get_text1(), level == NotificationLevel::ErrorNotificationLevel ? "error" : "warning", notice->is_gray()});
+    }
+    return diagnostics;
+}
+
 bool NotificationManager::is_point_over_any_notification(const ImVec2 &point) const
 {
 	for (const std::unique_ptr<PopNotification>& notification : m_pop_notifications) {

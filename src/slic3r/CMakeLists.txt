@@ -321,6 +321,13 @@ set(SLIC3R_GUI_SOURCES
     GUI/WebViewDialog.cpp
     GUI/WebViewDialog.hpp
     GUI/SlicedLibrary.cpp
+    GUI/StudioAssistant.cpp
+    GUI/StudioAssistant.hpp
+    GUI/StudioAssistantActions.cpp
+    GUI/StudioAssistantActions.hpp
+    GUI/StudioAssistantClient.cpp
+    GUI/StudioAssistantClient.hpp
+    GUI/StudioAssistantTools.cpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/WebDownPluginDlg.hpp

@@ -347,6 +347,10 @@ public:
 	bool update_notifications(GLCanvas3D& canvas);
 	// returns number of all notifications shown
 	size_t get_notification_count() const;
+    struct AssistantDiagnostic { std::string text; std::string level; bool stale; };
+    // A value snapshot, collected on the UI thread. No notification/window
+    // pointers are handed to the assistant's network worker.
+    std::vector<AssistantDiagnostic> assistant_diagnostics() const;
     // returns true if the given screen-space point is inside any notification
     bool is_point_over_any_notification(const ImVec2 &point) const;
 

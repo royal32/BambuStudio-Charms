@@ -35,6 +35,8 @@ On macOS, run `./charm-library` for the Omnitrix command browser: incremental A1
 
 The [Bambu Connect integration](BAMBU_CONNECT.md) supports Windows and macOS with Connect 2.5.0-beta.15. On Windows, sign in to the same account in both apps before printing.
 
+Open **Help → Studio assistant…** to connect ChatGPT and ask for help with warnings, supports, arranging models, and preparing plates. Project edits can be undone; printing remains in the normal print dialog. See [the assistant guide](tools/STUDIO_ASSISTANT.md) for account setup, capabilities, data handling, and validation.
+
 # How to compile
 Following platforms are currently supported to compile:
 - Windows 64-bit, [Compile Guide](https://github.com/bambulab/BambuStudio/wiki/Windows-Compile-Guide)
