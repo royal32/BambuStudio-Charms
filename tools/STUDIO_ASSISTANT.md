@@ -66,6 +66,11 @@ steps without asking for every preference. For example, "make the internal
 pieces a different color" reuses a contrasting compatible project color and
 reports its choice. It still asks when identifying the pieces is ambiguous or
 a physical material choice matters, and preserves existing color painting.
+For changes described by appearance, it is instructed to correlate a current
+model view with part bounds and transforms, then verify both the resulting
+appearance and the surrounding parts. A successful slice alone does not verify
+that the right feature was changed. These instructions apply to every model and
+project; there are no design-specific names, dimensions or part-order rules.
 
 Project edits use Studio's Undo history. Enable **⋯ → Confirm every project edit**
 to review each edit before it runs. Saving, opening another project, selecting
@@ -141,9 +146,12 @@ private builds. The existing module-verification preference is unchanged.
 
 Project context is sent to OpenAI when a person sends a request. That can include
 object names, settings, warnings, library search results and requested model
-images. Conversation context is kept in memory for this window; model requests
-use `store: false`. Closing the assistant stops its current task. New conversation
-clears its context without changing the project. ChatGPT conversations and memory
+images. Conversation text, tool arguments/results and rendered model images are
+not written to a persistent local transcript or Studio log. They are held in
+memory for this window; model requests use `store: false`. The compact action
+list is not a complete diagnostic trace. Closing the assistant stops its current
+task. New conversation clears its context without changing the project.
+ChatGPT conversations and memory
 are not imported.
 
 ## Development checks

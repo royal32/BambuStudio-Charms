@@ -196,3 +196,39 @@ Updated review artifacts:
   rejection and invalid-service private transport check pass on the Intel Mac.
   The Intel Mac's authenticated GUI was not launched by SSH. Installed working apps
   are unchanged. No subagents were used for this follow-up.
+
+## Target identification follow-up (late evening)
+
+The tester supplied two Luna Max screenshots for the same request to recolor the
+lettering. The first shows the decorative flower recolored while the reply
+incorrectly says the lettering changed and the flower was preserved. The second
+shows the intended lettering recolored. These are useful examples of a semantic
+targeting/verification failure, not a controlled model comparison: the initial
+project states and complete tool arguments/results are unavailable. The first
+also shows an earlier stopped request. The compact status list cannot establish
+which action caused the reported confirmation dialog. Native confirmations can
+come from a shared slot-color edit, profile selection/addition, replacement of
+paint, or the optional confirm-every-edit preference.
+
+The shared instructions and tool descriptions now require current visual
+evidence for visually described targets, correlated with stable IDs, bounds and
+instance transforms; minimal changes using existing compatible color slots; and
+post-edit comparison of both the intended feature and surrounding pieces.
+Successful slicing verifies slicing, not semantic target identity. Fresh state
+overrides old assistant claims and remembered IDs. No design names, dimensions,
+part ordering, expected part counts or model-specific rules were added. Existing
+confirmation policy and tool permissions remain unchanged.
+
+All four existing client/session, worker, library-search and state checks pass.
+They establish compatibility of the instruction/tool-schema changes, not a
+measured improvement in model decisions. No new live model comparison has been
+completed for these instructions. Future paired checks should use identical
+saved baselines and fresh chats, and compare actual part assignments and views,
+including a named visual feature, an inner/outer grouping, and a genuinely
+ambiguous target. Verify untouched parts as well as the requested feature.
+
+ARM and Intel builds are staged and certificate-signed at
+`build/<arch>/Assistant-Grounding-Review/BambuStudio.app`. The ARM startup and
+invalid-service credential transport checks pass; the Intel bundle passes the
+macOS 12.6 dependency audit. No running app or source project was replaced, and
+the existing Keychain migration limitation has not been changed by this work.
