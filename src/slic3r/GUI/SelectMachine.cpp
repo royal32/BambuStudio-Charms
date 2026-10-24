@@ -1,5 +1,6 @@
 #include "SelectMachine.hpp"
 #include "PlateVectorPreview.hpp"
+#include <filesystem>
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -7411,7 +7412,12 @@ bool SelectMachineDialog::is_used_filament(int fila_logic_id) const
 
  void ThumbnailPanel::load_vector_preview(const std::string& job, int plate_index)
  {
-     const std::string key = job + "\n" + std::to_string(plate_index);
+     std::error_code error;
+     const auto path=std::filesystem::u8path(job);
+     const auto modified=std::filesystem::last_write_time(path,error);
+     const auto stamp=error?0:modified.time_since_epoch().count();
+     const auto bytes=std::filesystem::file_size(path,error);
+     const std::string key = job + "\n" + std::to_string(plate_index)+"\n"+std::to_string(static_cast<int64_t>(stamp))+"\n"+std::to_string(error?0:bytes);
      if (key == m_vector_key) return;
      clear_vector_preview();
      m_vector_key = key;

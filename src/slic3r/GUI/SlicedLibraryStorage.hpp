@@ -9,12 +9,14 @@
 #include <iomanip>
 #include <random>
 #include <set>
+#include <map>
 #include <sstream>
 #include <ctime>
 #include <algorithm>
 #include <chrono>
 #include <vector>
 #include <cctype>
+#include "PlateJobName.hpp"
 
 namespace Slic3r { namespace GUI { namespace LibraryStorage {
 namespace fs = std::filesystem;
@@ -176,6 +178,154 @@ inline Json source_projects(const fs::path& root, const std::string& plate, cons
         }
     }
     return sources;
+}
+
+// Native exports use the same plate identities as deletion and source lookup.
+// Keep existing filenames (including aliases); allocate new names without
+// taking over another project's file, even on case-insensitive volumes.
+inline std::string folded(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return value;
+}
+
+inline std::string short_stem(const std::string& name)
+{
+    auto stem = plate_filename_component(name);
+    while (stem.size() > 210) {
+        size_t last = stem.size() - 1;
+        while ((static_cast<unsigned char>(stem[last]) & 0xc0) == 0x80) --last;
+        stem.resize(last);
+    }
+    return stem;
+}
+
+inline Json project_for_source(const fs::path& root, const fs::path& source, const std::string& preferred = {})
+{
+    const auto directory = child(root, ".charm-library/projects");
+    if (!fs::exists(directory)) {
+        if (!preferred.empty()) throw std::runtime_error("The library project registration changed. Refresh and try again.");
+        return Json();
+    }
+    Json match;
+    for (const auto& item : fs::directory_iterator(directory)) {
+        if (item.path().extension() != ".json") continue;
+        auto project = read(child(root, item.path().lexically_relative(root).generic_u8string()));
+        if (!preferred.empty()) {
+            if (project.at("id").get<std::string>() == preferred) return project;
+            continue;
+        }
+        auto path = fs::u8path(project.value("source", std::string()));
+        if (path.empty()) continue;
+        if (!path.is_absolute()) path = child(root, path.generic_u8string());
+        if (fs::weakly_canonical(path) == fs::weakly_canonical(source)) {
+            if (!match.is_null()) throw std::runtime_error("More than one library project uses this source. Regenerate from its library item instead.");
+            match = std::move(project);
+        }
+    }
+    if (!preferred.empty()) throw std::runtime_error("The library project registration changed. Refresh and try again.");
+    return match;
+}
+
+struct PlateExport { int index; std::string name; std::string relative; };
+struct PublicationPlan { Json project; std::vector<PlateExport> files; size_t excluded{0}; };
+
+inline bool plate_excluded(const std::vector<Json>& records, const Json& project, int index, const std::string& filename)
+{
+    for (const auto& record : records) {
+        if (folded(record.at("plate").get<std::string>()) == folded(filename)) return true;
+        for (const auto& target : record.at("targets"))
+            if (target.at("project_id") == project.at("id") && target.at("plate_index") == index) return true;
+    }
+    return false;
+}
+
+inline PublicationPlan plan_publication(const fs::path& root, Json project, const std::string& source,
+                                         const std::string& name, const std::vector<PlateExport>& plates)
+{
+    if (project.is_null()) project = {{"version", 1}, {"id", "studio-" + unique_id()}, {"name", name}, {"plates", Json::array()}};
+    const auto records = exclusions(root);
+    const auto id = project.at("id").get<std::string>();
+    // IDs become filenames; never accept a path from shared metadata here.
+    if (id.empty() || id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
+        throw std::runtime_error("Invalid library project identity.");
+    std::map<std::string, std::string> owners;
+    const auto directory = child(root, ".charm-library/projects");
+    if (fs::exists(directory)) for (const auto& item : fs::directory_iterator(directory)) {
+        if (item.path().extension() != ".json") continue;
+        const auto other = read(child(root, item.path().lexically_relative(root).generic_u8string()));
+        for (const auto& p : other.at("plates")) {
+            const auto filename = p.at("id").get<std::string>(); child(root, filename);
+            auto& owner = owners[folded(filename)];
+            const auto other_id = other.at("id").get<std::string>();
+            owner = owner.empty() || owner == other_id ? other_id : "<shared>";
+        }
+    }
+    std::set<std::string> taken;
+    for (const auto& item : fs::directory_iterator(root)) taken.insert(folded(item.path().filename().u8string()));
+    PublicationPlan plan; plan.project = project;
+    for (const auto& plate : plates) {
+        if (plate.index < 1) throw std::runtime_error("Invalid library plate index.");
+        bool known = false;
+        for (const auto& old : project.at("plates")) if (old.at("index") == plate.index) {
+            known = true;
+            const auto filename = old.at("id").get<std::string>();
+            const auto path = child(root, filename);
+            if (plate_excluded(records, project, plate.index, filename)) { ++plan.excluded; continue; }
+            if (owners[folded(filename)] != id) throw std::runtime_error("This sliced file belongs to more than one project. Give the projects separate library filenames first.");
+            if (fs::exists(path) && !fs::is_regular_file(path)) throw std::runtime_error("A sliced file destination is not a regular file.");
+            plan.files.push_back({plate.index, plate.name, filename});
+        }
+        if (known) continue;
+        auto stem = plate_filename_component(plate.name);
+        if (stem.empty()) stem = "Plate " + std::to_string(plate.index);
+        auto filename = stem + ".gcode.3mf";
+        if (plate_excluded(records, project, plate.index, filename)) { ++plan.excluded; continue; }
+        for (int n = 2; taken.count(folded(filename)) || owners.count(folded(filename)) || fs::exists(child(root, filename)); ++n)
+            filename = short_stem(stem) + " (" + std::to_string(n) + ").gcode.3mf";
+        child(root, filename);
+        taken.insert(folded(filename)); owners[folded(filename)] = id;
+        plan.files.push_back({plate.index, plate.name, filename});
+        plan.project["plates"].push_back({{"id", filename}, {"index", plate.index}, {"name", plate.name}});
+    }
+    plan.project["source"] = source;
+    plan.project["editable_source"] = true;
+    plan.project["native_export"] = true;
+    return plan;
+}
+
+class PublicationFailure : public std::runtime_error {
+public:
+    bool keep_backups;
+    PublicationFailure(const std::string& message, bool keep) : std::runtime_error(message), keep_backups(keep) {}
+};
+
+template<class Rename>
+void publish_staged(const fs::path& root, const fs::path& staging,
+                    const std::vector<std::pair<fs::path, std::string>>& files, Rename rename)
+{
+    struct Replacement { fs::path target, backup; bool existed; };
+    std::vector<Replacement> replaced;
+    try {
+        for (const auto& file : files) {
+            const auto target = child(root, file.second);
+            fs::create_directories(target.parent_path());
+            const auto backup = staging / ("backup-" + std::to_string(replaced.size()));
+            const bool existed = fs::exists(target);
+            if (existed) fs::copy_file(target, backup);
+            const auto error = rename(file.first, target);
+            if (error) throw std::runtime_error("A library file could not be replaced: " + error.message());
+            replaced.push_back({target, backup, existed});
+        }
+    } catch (...) {
+        bool recovered = true;
+        for (auto it = replaced.rbegin(); it != replaced.rend(); ++it) {
+            if (it->existed) recovered = !rename(it->backup, it->target) && recovered;
+            else { std::error_code error; fs::remove(it->target, error); recovered = !error && recovered; }
+        }
+        if (!recovered) throw PublicationFailure("Some files could not be restored. Recovery copies remain at: " + staging.u8string(), true);
+        throw;
+    }
 }
 
 inline std::string leave_feedback(const fs::path& root, const std::string& plate,

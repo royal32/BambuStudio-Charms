@@ -6,6 +6,20 @@ The existing collection is tracked in persistent state, with named standardized 
 
 ## Everyday use
 
+Studio can now maintain individual projects directly, on Mac or Windows:
+
+- After slicing, use the **Print plate ▾ → Add plate to library** or **Add all plates to library** actions. All requested nonempty printable plates must have valid slices. The first addition asks for a library folder if none is selected.
+- Studio saves an editable source in the shared library and exports one named `.gcode.3mf` per plate, with native vector artwork when supported. External inputs get a copy in **Projects/**; the open document continues editing that library copy. Existing projects already inside the library are saved in place. Current printer, filament, process, part colors and plate layout are preserved.
+- Right-click a library item → **Regenerate project in library** to open its saved source, slice the project again, and replace its registered sliced files. Normal unsaved-project prompts still apply when opening the source. New plates are added; excluded plates remain excluded. Existing filenames and aliases are retained. Successful regeneration returns to the library, with the editable source still open in Prepare; it never sends a print.
+- Repeat additions update the same project/plate identities. New filename collisions get a numbered suffix instead of replacing another project's file. Outputs are staged before publication, concurrent changes are checked, and failed replacements restore prior files. The library refreshes automatically after a successful addition.
+
+Projects exported this way are marked as managed by Studio. The terminal tool
+preserves their registrations and skips verified native outputs. If their source
+or outputs change, or a forced rebuild is requested, its plan directs you to
+**Regenerate project in library** rather than reapplying its normalization recipe.
+The following console workflow remains available for projects managed by the
+batch processor:
+
 1. Save new editable `.3mf` projects into `.charm-library/inbox/`, or use **Sources → Add** to register a file or a folder. Choose **Pair Eyewear** for frame projects; the inbox defaults to **Bogg Charm**. Folder discovery is recursive.
 2. Run **Library → Plan**. It reads and hashes the inputs and outputs without changing them.
 3. Run **Library → Update**. Leave the project filter blank for everything, or enter part of a name/ID. Limit `0` means all projects; use `10` for a small batch.

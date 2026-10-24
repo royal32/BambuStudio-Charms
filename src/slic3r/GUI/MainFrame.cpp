@@ -2267,184 +2267,58 @@ wxBoxSizer* MainFrame::create_side_tools()
         }
     );
 
-    m_print_option_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& event)
-        {
-            SidePopup* p = new SidePopup(this);
-
-            if (wxGetApp().preset_bundle
-                && !wxGetApp().preset_bundle->printers.get_edited_preset().is_bbl_vendor_preset(wxGetApp().preset_bundle)) {
-                // ThirdParty Buttons
-                SideButton* export_gcode_btn = new SideButton(p, _L("Export G-code file"), "");
-                export_gcode_btn->SetCornerRadius(0);
-                export_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Export G-code file"));
-                    m_print_select = eExportGcode;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                // upload and print
-                SideButton* send_gcode_btn = new SideButton(p, _L("Print"), "");
-                send_gcode_btn->SetCornerRadius(0);
-                send_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Print"));
-                    m_print_select = eSendGcode;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                // upload only
-                /*SideButton* upload_gcode_btn = new SideButton(p, _L("Send"), "");
-                upload_gcode_btn->SetCornerRadius(0);
-                upload_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Send"));
-                    m_print_select = eUploadGcode;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });*/
-
-                p->append_button(send_gcode_btn);
-                //p->append_button(upload_gcode_btn);
-                p->append_button(export_gcode_btn);
-            }
-            else {
-                //Bambu Studio Buttons
-                SideButton* print_plate_btn = new SideButton(p, _L("Print plate"), "");
-                print_plate_btn->SetCornerRadius(0);
-
-                SideButton* send_to_printer_btn = new SideButton(p, _L("Send"), "");
-                send_to_printer_btn->SetCornerRadius(0);
-
-                SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
-                export_sliced_file_btn->SetCornerRadius(0);
-
-                SideButton* export_all_sliced_file_btn = new SideButton(p, _L("Export all sliced file"), "");
-                export_all_sliced_file_btn->SetCornerRadius(0);
-
-                print_plate_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Print plate"));
-                    m_print_select = ePrintPlate;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                SideButton* print_all_btn = new SideButton(p, _L("Print all"), "");
-                print_all_btn->SetCornerRadius(0);
-                print_all_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Print all"));
-                    m_print_select = ePrintAll;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                send_to_printer_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Send"));
-                    m_print_select = eSendToPrinter;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                SideButton* send_to_printer_all_btn = new SideButton(p, _L("Send all"), "");
-                send_to_printer_all_btn->SetCornerRadius(0);
-                send_to_printer_all_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Send all"));
-                    m_print_select = eSendToPrinterAll;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                export_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Export plate sliced file"));
-                    m_print_select = eExportSlicedFile;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                export_all_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Export all sliced file"));
-                    m_print_select = eExportAllSlicedFile;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                    });
-
-                p->append_button(print_plate_btn);
-                p->append_button(print_all_btn);
-                p->append_button(send_to_printer_btn);
-                p->append_button(send_to_printer_all_btn);
-                p->append_button(export_sliced_file_btn);
-                p->append_button(export_all_sliced_file_btn);
-
-
-                if (check_bbl_farm_client_installed()) {
-                    SideButton *send_to_multi_app_btn = new SideButton(p, _L("Send to Bambu Farm Manager Client"), "");
-                    send_to_multi_app_btn->SetCornerRadius(0);
-                    p->append_button(send_to_multi_app_btn);
-
-                    send_to_multi_app_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent &) {
-                        m_print_btn->SetLabel(_L("Send to BFMC"));
-                        m_print_select = eSendMultiApp;
-                        m_print_enable = get_enable_print_status();
-                        m_print_btn->Enable(m_print_enable);
-                        this->Layout();
-                        p->Dismiss();
-                    });
-                }
-
-
+    m_print_option_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        // A native menu provides consistent popup placement, keyboard navigation
+        // and accessibility on macOS as well as Windows. Unwind mouse capture
+        // before showing it or opening any subsequent library dialogs.
+        CallAfter([this] {
+            wxMenu menu;
+            std::map<int, std::pair<int, wxString>> choices;
+            auto choice = [&](const wxString& label, int action, const wxString& button_label = wxString()) {
+                auto* item = menu.AppendCheckItem(wxID_ANY, label);
+                item->Check(m_print_select == action);
+                choices.emplace(item->GetId(), std::make_pair(action, button_label.empty() ? label : button_label));
+            };
+            const bool third_party = wxGetApp().preset_bundle &&
+                !wxGetApp().preset_bundle->printers.get_edited_preset().is_bbl_vendor_preset(wxGetApp().preset_bundle);
+            if (third_party) {
+                choice(_L("Print"), eSendGcode);
+                choice(_L("Export G-code file"), eExportGcode);
+            } else {
+                choice(_L("Print plate"), ePrintPlate);
+                choice(_L("Print all"), ePrintAll);
+                choice(_L("Send"), eSendToPrinter);
+                choice(_L("Send all"), eSendToPrinterAll);
+                choice(_L("Export plate sliced file"), eExportSlicedFile);
+                choice(_L("Export all sliced file"), eExportAllSlicedFile);
+                if (check_bbl_farm_client_installed())
+                    choice(_L("Send to Bambu Farm Manager Client"), eSendMultiApp, _L("Send to BFMC"));
 #ifdef __APPLE__
-                {
-                    const wxString connect_label = _L("Print in Connect");
+                choice(_L("Print in Connect"), ePrintMultiMachine);
 #else
-                if (enable_multi_machine) {
-                    const wxString connect_label = _L("Send to Multi-device");
+                if (enable_multi_machine) choice(_L("Send to Multi-device"), ePrintMultiMachine);
 #endif
-                    SideButton* print_multi_machine_btn = new SideButton(p, connect_label, "");
-                    print_multi_machine_btn->SetCornerRadius(0);
-                    print_multi_machine_btn->Bind(wxEVT_BUTTON, [this, p, connect_label](wxCommandEvent&) {
-                        m_print_btn->SetLabel(connect_label);
-                        m_print_select = ePrintMultiMachine;
-                        m_print_enable = get_enable_print_status();
-                        m_print_btn->Enable(m_print_enable);
-                        this->Layout();
-                        p->Dismiss();
-                        });
-                    p->append_button(print_multi_machine_btn);
-                }
             }
-
-            SideButton* export_plate_gcodes_btn = new SideButton(p, _L("Export sliced plates individually"), "");
-            export_plate_gcodes_btn->SetCornerRadius(0);
-            export_plate_gcodes_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export sliced plates individually"));
-                m_print_select = eExportPlateGcodes;
+            choice(_L("Export sliced plates individually"), eExportPlateGcodes);
+            menu.AppendSeparator();
+            auto* add_plate = menu.Append(wxID_ANY, _L("Add plate to library"));
+            auto* add_all = menu.Append(wxID_ANY, _L("Add all plates to library"));
+            add_plate->Enable(plater()->can_add_plates_to_library(false));
+            add_all->Enable(plater()->can_add_plates_to_library(true));
+            const auto position = ScreenToClient(m_print_btn->ClientToScreen(wxPoint(0, m_print_btn->GetSize().y)));
+            const int selected = GetPopupMenuSelectionFromUser(menu, position);
+            if (selected == add_plate->GetId() || selected == add_all->GetId()) {
+                const bool all = selected == add_all->GetId();
+                CallAfter([this, all] { plater()->add_plates_to_library(all); });
+            } else if (choices.count(selected)) {
+                m_print_select = choices.at(selected).first;
+                m_print_btn->SetLabel(choices.at(selected).second);
                 m_print_enable = get_enable_print_status();
                 m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-            p->append_button(export_plate_gcodes_btn);
-
-            p->Popup(m_print_btn);
-        }
-    );
+                Layout();
+            }
+        });
+    });
 
     /*
     Button * aux_btn = new Button(this, _L("Auxiliary"));

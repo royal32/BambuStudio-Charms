@@ -35,7 +35,7 @@ window.SlicedLibrary = (function () {
         el('Count').textContent = matches.length + (words.length ? ' of ' + entries.length : '') + (entries.length === 1 ? ' file' : ' files');
         el('Status').textContent = error || notice || (scanning ? 'Checking your folder…' : !folder ?
             'Choose a folder containing .gcode.3mf files to get started.' : !entries.length ?
-            'No sliced plates yet. Export sliced plates individually into this folder, then refresh.' : !matches.length ?
+            'No sliced plates yet. Slice a project, then choose Add plate to library from the Print plate menu.' : !matches.length ?
             'No plates match your search.' : '');
         el('Status').hidden = !el('Status').textContent;
         el('Folder').textContent = folder;
@@ -45,7 +45,7 @@ window.SlicedLibrary = (function () {
             var card = document.createElement('article');
             card.className = 'SlicedLibraryCard';
             card.tabIndex = 0;
-            card.setAttribute('aria-label', entry.name + '. Right-click to open the source project, show files in the file manager, delete, or leave feedback.');
+            card.setAttribute('aria-label', entry.name + '. Right-click to regenerate, open the source project, show files in the file manager, delete, or leave feedback.');
             function context(event) {
                 event.preventDefault();
                 event.stopPropagation();

@@ -108,7 +108,12 @@ class Library:
 
     def files(self):
         result = {}
-        for key, project in self.state['projects'].items():
+        catalog = copy.deepcopy(self.state['projects'])
+        for key, project in shared.native_projects(self.shared_root()).items():
+            entry = catalog.setdefault(key, {'outputs': {}})
+            entry['outputs'].update({str(shared.child(self.shared_root(), name)): sha
+                                     for name, sha in project.get('output_sha256', {}).items()})
+        for key, project in catalog.items():
             for path, sha in project['outputs'].items():
                 if path in result and result[path]['sha256'] != sha:
                     raise ValueError('Manifest has conflicting output owners: ' + path)
@@ -121,8 +126,11 @@ class Library:
 
     def excluded_output(self, path, project=None, records=None):
         records = shared.exclusions(self.shared_root()) if records is None else records
-        projects = [project] if project else self.state['projects'].values()
-        return any(shared.output_excluded(self.shared_root(), p, path, records) for p in projects)
+        catalog = [project] if project else list(self.state['projects'].values())
+        if not project:
+            catalog += [dict(p, plates=[dict(index=q['index'], filename=q['id']) for q in p['plates']])
+                        for p in shared.native_projects(self.shared_root()).values()]
+        return any(shared.output_excluded(self.shared_root(), p, path, records) for p in catalog)
 
     def discover(self):
         found = {}
@@ -150,6 +158,9 @@ class Library:
         for project in self.state['projects'].values():
             source = projects.source_path(self, project)
             found.setdefault(str(source), source)
+        for project in shared.native_projects(self.shared_root()).values():
+            source = Path(project['resolved_source'])
+            found.setdefault(str(source), source)
         retired = {p for project in self.state['projects'].values() for p in project.get('retired_sources', [])}
         return sorted(p for name, p in found.items() if name not in retired)
 
@@ -157,6 +168,8 @@ class Library:
         recipe, preview_recipe, presets = self.recipes()
         exclusions = shared.exclusions(self.shared_root())
         previous = {str(projects.source_path(self, p)): p for p in self.state['projects'].values()}
+        native = shared.native_projects(self.shared_root())
+        native_sources = {p['resolved_source']: p for p in native.values()}
         rows, hashes = [], {}
         seen = {p['source_sha256']: p['name'] for p in previous.values()
                 if projects.source_path(self, p).is_file() and digest(projects.source_path(self, p)) == p['source_sha256']}
@@ -164,6 +177,9 @@ class Library:
             old = previous.get(str(path))
             key = old['id'] if old else signature(str(path))[:16]
             name = old['name'] if old else path.stem
+            registration = native_sources.get(str(path)) or native.get(key)
+            if registration:
+                key, name = registration['id'], registration['name']
             if project_filter and project_filter.casefold() not in (name + ' ' + key).casefold():
                 continue
             category = old.get('category', 'Bogg Charm') if old else 'Bogg Charm'
@@ -171,6 +187,21 @@ class Library:
                 if path.is_relative_to(Path(source_root)):
                     category = source_category
             row = {'id': key, 'name': name, 'source': str(path), 'old': old, 'category': category}
+            if registration:
+                row.update(id=registration['id'], name=registration['name'])
+                current_source = Path(registration['resolved_source'])
+                changed = not current_source.is_file() or digest(current_source) != registration['source_sha256']
+                outputs = registration.get('output_sha256', {})
+                for plate in registration['plates']:
+                    candidate = dict(index=plate['index'], filename=plate['id'])
+                    if shared.plate_excluded(registration, candidate, exclusions):
+                        continue
+                    output = shared.child(self.shared_root(), plate['id'])
+                    changed |= not output.is_file() or digest(output) != outputs.get(plate['id'])
+                row.update(action='blocked' if changed or force else 'skip',
+                           reason='Use Studio → Regenerate project in library; this project preserves its Studio settings.')
+                rows.append(row)
+                continue
             if not path.is_file():
                 row.update(action='unavailable', reason='Source file is missing; outputs retained')
                 rows.append(row)

@@ -81,7 +81,8 @@ static int show_library_dialog(WebViewPanel* panel, wxDialog& dialog, const std:
     return dialog.ShowModal();
 }
 
-static std::string open_library_source(WebViewPanel* parent, LibraryJson sources, const std::string& plate, bool reveal = false)
+static std::string open_library_source(WebViewPanel* parent, LibraryJson sources, const std::string& plate, bool reveal = false,
+                                       bool regenerate = false, const std::string& library_folder = {}, bool* regenerated = nullptr)
 {
     wxWeakRef<WebViewPanel> weak(parent);
     auto* owner = wxGetTopLevelParent(parent);
@@ -98,6 +99,8 @@ static std::string open_library_source(WebViewPanel* parent, LibraryJson sources
         selected = static_cast<size_t>(dialog.GetSelection());
     }
     const auto& source = sources.at(selected);
+    if (regenerate && source.at("plate_index").get<int>() < 1)
+        return "This item has no registered source plate. Open its source project, slice it, and use Add plate to library to register it first.";
     auto path = source.at("path").get<std::string>();
     if (!source.at("available").get<bool>()) {
         wxFileDialog dialog(owner, _L("Locate the source 3MF project"), "", "",
@@ -117,13 +120,19 @@ static std::string open_library_source(WebViewPanel* parent, LibraryJson sources
         return desktop_reveal_file(path) ? std::string() : "The source project could not be shown in the file manager.";
     auto* plater = wxGetApp().plater();
     if (!plater || !wxGetApp().can_load_project()) return {};
-    if (plater->is_background_process_slicing()) return "Wait for slicing to finish before opening a source project.";
+    if (plater->is_background_process_slicing() || plater->is_any_job_running() || plater->is_export_gcode_scheduled())
+        return "Wait for the current operation to finish before opening a source project.";
     // Use the normal editable-document path, including unsaved-change prompts.
     if (plater->load_project(wxString::FromUTF8(path)) == wxID_CANCEL || !weak) return {};
     if (plater->get_3mf_filename() != path) return "The source project could not be opened.";
     const auto index = source.at("plate_index").get<int>() - 1;
     if (index >= 0 && index < plater->get_partplate_list().get_plate_count()) plater->select_plate(index);
     wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
+    if (regenerate && plater->regenerate_library_project(library_folder, source.at("id").get<std::string>())) {
+        if (regenerated) *regenerated = true;
+        if (index >= 0 && index < plater->get_partplate_list().get_plate_count()) plater->select_plate(index);
+        wxGetApp().mainframe->select_tab(MainFrame::tpHome);
+    }
     return {};
 }
 
@@ -236,11 +245,14 @@ void WebViewPanel::PollSlicedLibrary()
             CallAfter([weak, state, action] {
                 if (!weak || state->cancelled) return;
                 std::string error;
-                try { error = open_library_source(weak.get(), action.at("source_projects"), action.at("plate").get<std::string>(), action.value("reveal_source", false)); }
+                bool regenerated = false;
+                try { error = open_library_source(weak.get(), action.at("source_projects"), action.at("plate").get<std::string>(),
+                    action.value("reveal_source", false), action.value("regenerate", false), state->folder, &regenerated); }
                 catch (const std::exception& e) { error = std::string("The source project could not be opened: ") + e.what(); }
                 if (!weak) return;
                 weak->m_sliced_library_opening = false;
-                send_library_message(*weak, {{"command", "sliced_library_action_done"}, {"error", error}});
+                send_library_message(*weak, {{"command", "sliced_library_action_done"}, {"error", error},
+                    {"notice", regenerated ? "Project regenerated in the library." : ""}});
             });
             return;
         }
@@ -321,6 +333,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
             if (!weak) return true;
             wxMenu menu;
             const int source = menu.Append(wxID_ANY, _L("Open source project"))->GetId();
+            const int regenerate = menu.Append(wxID_ANY, _L("Regenerate project in library"))->GetId();
 #ifdef __APPLE__
             const int reveal_plate = menu.Append(wxID_ANY, _L("Show sliced file in Finder"))->GetId();
             const int reveal_source = menu.Append(wxID_ANY, _L("Show source project in Finder"))->GetId();
@@ -336,7 +349,10 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
             const int feedback = menu.Append(wxID_ANY, _L("Leave feedback…"))->GetId();
             const auto selection = GetPopupMenuSelectionFromUser(menu, ScreenToClient(wxGetMousePosition()));
             if (!weak) return true;
-            if (selection != source && selection != reveal_plate && selection != reveal_source && selection != remove && selection != feedback) { done(); return true; }
+            if (selection != source && selection != regenerate && selection != reveal_plate && selection != reveal_source && selection != remove && selection != feedback) { done(); return true; }
+            if (selection == regenerate)
+                send_library_message(*this, {{"command", "sliced_library_action_status"},
+                    {"notice", "Opening the source project and regenerating its sliced library files…"}});
             std::string note;
             if (selection == remove) {
                 MessageDialog dialog(wxGetTopLevelParent(this), wxString::FromUTF8("Delete “" + entry.name + "” from the library?\n\n"
@@ -370,7 +386,8 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                 state->action_running = true;
             }
             m_sliced_library_timer->Start(200);
-            std::thread([state, entry, note, overrides, opening = selection == source || selection == reveal_source,
+            std::thread([state, entry, note, overrides, opening = selection == source || selection == reveal_source || selection == regenerate,
+                         regenerating = selection == regenerate,
                          revealing_source = selection == reveal_source, revealing_plate = selection == reveal_plate, deleting = selection == remove] {
                 LibraryJson result = {{"rescan", deleting}};
                 try {
@@ -379,6 +396,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                         result["source_projects"] = LibraryStorage::source_projects(root, entry.id, overrides);
                         result["plate"] = entry.id;
                         result["reveal_source"] = revealing_source;
+                        result["regenerate"] = regenerating;
                     } else if (revealing_plate) {
                         const auto file = LibraryStorage::child(root, entry.id);
                         if (!fs::is_regular_file(file)) throw std::runtime_error("The sliced file is no longer available. Refresh the library and try again.");

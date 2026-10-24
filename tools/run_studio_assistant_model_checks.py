@@ -13,11 +13,13 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path("build/arm64"))
+    parser.add_argument("--test-source",type=pathlib.Path,default=pathlib.Path("tests/studio_assistant_model.test.cpp"))
+    parser.add_argument("--check-name",default="assistant-native-checks")
     parser.add_argument("fixtures", type=pathlib.Path, nargs="*")
     args = parser.parse_args()
     root = pathlib.Path(__file__).resolve().parents[1]
     build = args.build_dir.resolve()
-    output = build / "assistant-native-checks"
+    output = build / args.check_name
     output.mkdir(exist_ok=True)
 
     def commands(target):
@@ -47,7 +49,7 @@ def main():
     binary = output / "model-checks"
     filtered += ["-UNDEBUG", "-DPROJECT_RESOURCES=" + macro(root / "resources"),
                  "-DPROJECT_TEST_TMP=" + macro(output / "tmp"), "-c",
-                 str(root / "tests/studio_assistant_model.test.cpp"), "-o", str(obj)]
+                 str(args.test_source.resolve()), "-o", str(obj)]
     with (output / "compile.log").open("w") as log:
         subprocess.run(filtered, cwd=build, stdout=log, stderr=subprocess.STDOUT, check=True)
 

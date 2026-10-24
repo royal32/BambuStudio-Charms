@@ -1,5 +1,10 @@
 #include "Plater.hpp"
 #include "PlateJobName.hpp"
+#include "PlateVectorGeometry.hpp"
+#include "SlicedLibraryStorage.hpp"
+#include "WebViewDialog.hpp"
+#include <openssl/sha.h>
+#include <cerrno>
 #include "BambuConnect.hpp"
 #if defined(__APPLE__) || defined(_WIN32)
 #include "BambuConnectBridge.hpp"
@@ -6603,6 +6608,7 @@ public:
     //BBS: add a flag to ignore cancel event
     bool m_ignore_event{false};
     bool m_slice_all{false};
+    bool m_library_operation{false};
     bool m_is_slicing {false};
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
@@ -22415,7 +22421,7 @@ void Plater::stop_jobs() { p->m_ui_jobs.stop_all(); }
 
 bool Plater::is_any_job_running() const
 {
-    return p->m_ui_jobs.is_any_running();
+    return p->m_library_operation || p->m_ui_jobs.is_any_running();
 }
 
 void Plater::update_ui_from_settings() { p->update_ui_from_settings(); }
@@ -22923,6 +22929,226 @@ void Plater::export_sliced_plate_gcodes()
         }
         show_error(this, format_wxstr(_L("Export stopped after %d file(s)."), int(completed)) + "\n" + from_u8(ex.what()));
     }
+}
+
+namespace {
+std::string library_file_digest(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("A library file could not be read.");
+    SHA256_CTX hash; SHA256_Init(&hash);
+    std::array<char, 65536> buffer;
+    while (input) {
+        input.read(buffer.data(), buffer.size());
+        SHA256_Update(&hash, buffer.data(), size_t(input.gcount()));
+    }
+    if (!input.eof()) throw std::runtime_error("A library file could not be read completely.");
+    unsigned char digest[SHA256_DIGEST_LENGTH]; SHA256_Final(digest, &hash);
+    std::ostringstream text;
+    for (auto byte : digest) text << std::hex << std::setw(2) << std::setfill('0') << unsigned(byte);
+    return text.str();
+}
+struct LibraryOperation {
+    bool& flag;
+    explicit LibraryOperation(bool& value) : flag(value) { flag = true; }
+    ~LibraryOperation() { flag = false; }
+};
+struct LibraryStaging {
+    std::filesystem::path path;
+    ~LibraryStaging() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+};
+}
+
+bool Plater::can_add_plates_to_library(bool all_plates) const
+{
+    if (p->m_library_operation || m_exported_file || m_only_gcode || printer_technology() != ptFFF ||
+        is_background_process_slicing() || is_any_job_running() || is_background_process_update_scheduled() ||
+        p->background_process.running() || is_export_gcode_scheduled()) return false;
+    bool found = false;
+    for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
+        auto* plate = p->partplate_list.get_plate(i);
+        if (!all_plates && i != p->partplate_list.get_curr_plate_index()) continue;
+        if (!plate->has_printable_instances()) continue;
+        if (!plate->is_slice_result_ready_for_print()) return false;
+        found = true;
+    }
+    return found;
+}
+
+bool Plater::add_plates_to_library(bool all_plates, const std::string& folder, const std::string& project_id)
+{
+    namespace stdfs = std::filesystem;
+    namespace storage = LibraryStorage;
+    if (!can_add_plates_to_library(all_plates)) {
+        show_error(this, _L("Slice the requested plates and resolve their slicing errors before adding them to the library."));
+        return false;
+    }
+    auto& appconfig = *wxGetApp().app_config;
+    auto directory = folder.empty() ? appconfig.get("sliced_library_folder") : folder;
+    if (directory.empty()) {
+        wxDirDialog dialog(this, _L("Choose your sliced print library folder"), "", wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        if (dialog.ShowModal() != wxID_OK) return false;
+        directory = into_u8(dialog.GetPath());
+        appconfig.set("sliced_library_folder", directory); appconfig.save();
+    }
+    if (!can_add_plates_to_library(all_plates)) return false;
+    LibraryOperation operation(p->m_library_operation);
+    try {
+        const auto root = stdfs::canonical(stdfs::u8path(directory));
+        if (!stdfs::is_directory(root)) throw std::runtime_error("The library folder is unavailable.");
+        auto source = stdfs::u8path(into_u8(get_project_filename(".3mf")));
+        auto project = source.empty() ? json() : storage::project_for_source(root, source, project_id);
+        const auto project_name = into_u8(get_project_name());
+        auto relative = source.empty() ? stdfs::path() : stdfs::weakly_canonical(source).lexically_relative(root);
+        // Publish an editable copy into the shared folder for new external/STL
+        // inputs. Continue editing that copy, so both Macs use the same source.
+        if (relative.empty() || *relative.begin() == ".." || !storage::is_source_project(source)) {
+            auto stem = plate_filename_component(project_name);
+            if (stem.empty()) stem = "Project";
+            relative = stdfs::u8path("Projects/" + stem + ".3mf");
+            for (int n = 2; stdfs::exists(storage::child(root, relative.generic_u8string())); ++n)
+                relative = stdfs::u8path("Projects/" + storage::short_stem(stem) + " (" + std::to_string(n) + ").3mf");
+        }
+        source = storage::child(root, relative.generic_u8string());
+        std::vector<storage::PlateExport> candidates;
+        for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
+            auto* plate = p->partplate_list.get_plate(i);
+            if ((!all_plates && i != p->partplate_list.get_curr_plate_index()) || !plate->has_printable_instances()) continue;
+            if (!plate->is_slice_result_ready_for_print()) throw std::runtime_error("A plate changed. Slice it again before adding it to the library.");
+            const auto gcode = stdfs::u8path(plate->get_gcode_filename());
+            if (!stdfs::is_regular_file(gcode) || stdfs::file_size(gcode) == 0) throw std::runtime_error("Sliced data is missing. Slice the plate again.");
+            candidates.push_back({i + 1, plate_job_name(project_name, plate->get_plate_name(), i, p->partplate_list.get_plate_count()), {}});
+        }
+        auto plan = storage::plan_publication(root, project, relative.generic_u8string(), project_name, candidates);
+        if (plan.files.empty()) {
+            MessageDialog(this, _L("These plates are excluded from library updates. Restore them before adding them again."), _L("Sliced library"), wxOK).ShowModal();
+            return false;
+        }
+        std::map<std::string, std::string> output_before;
+        for (const auto& file : plan.files) {
+            const auto path = storage::child(root, file.relative);
+            output_before[file.relative] = stdfs::exists(path) ? library_file_digest(path) : std::string();
+        }
+        const auto transaction = ".charm-library/staging/" + storage::unique_id();
+        LibraryStaging staging{storage::child(root, transaction)};
+        stdfs::create_directories(staging.path);
+        const auto source_before = stdfs::exists(source) ? library_file_digest(source) : std::string();
+        wxProgressDialog progress(_L("Add plates to library"), _L("Saving the editable project and sliced plates…"),
+            int(plan.files.size() + 1), this, wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT);
+        const auto project_stage = staging.path / "project.3mf";
+        if (export_3mf(fs::path(project_stage.u8string()), SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::ShareMesh) < 0)
+            throw std::runtime_error("The editable project could not be saved. No library files were replaced.");
+        plan.project["source_sha256"] = library_file_digest(project_stage);
+        plan.project["updated_at"] = storage::timestamp();
+        if (!plan.project.value("output_sha256", json()).is_object()) plan.project["output_sha256"] = json::object();
+        std::vector<std::pair<stdfs::path, std::string>> staged;
+        std::map<int, stdfs::path> exported;
+        int count = 0;
+        for (const auto& file : plan.files) {
+            if (!progress.Update(count++, from_u8("Preparing “" + file.name + "”…"))) return false;
+            auto job = staging.path / ("plate-" + std::to_string(file.index) + ".gcode.3mf");
+            if (!exported.count(file.index)) {
+                const auto strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel;
+                if (export_3mf(fs::path(job.u8string()), strategy, file.index - 1) < 0 || !stdfs::is_regular_file(job) || stdfs::file_size(job) == 0)
+                    throw std::runtime_error("A sliced plate could not be exported. No library files were replaced.");
+                exported[file.index] = job;
+            }
+            // Each destination needs its own staged inode, including aliases.
+            const auto copy = staging.path / ("output-" + std::to_string(count) + ".gcode.3mf");
+            stdfs::copy_file(exported.at(file.index), copy);
+            staged.emplace_back(copy, file.relative);
+            plan.project["output_sha256"][file.relative] = library_file_digest(copy);
+        }
+        if (!progress.Update(count, _L("Updating the library…"))) return false;
+        // Recheck after modal event processing and before any replacements.
+        if (is_background_process_slicing() || is_background_process_update_scheduled())
+            throw std::runtime_error("The project changed during export. Slice it again before adding it to the library.");
+        for (const auto& plate : candidates)
+            if (!p->partplate_list.get_plate(plate.index - 1)->is_slice_result_ready_for_print())
+                throw std::runtime_error("A plate changed during export. Slice it again before adding it to the library.");
+        if (stdfs::exists(source) ? library_file_digest(source) != source_before : !source_before.empty())
+            throw std::runtime_error("The source project changed on disk. Reopen it before regenerating the library.");
+        if (!project.is_null()) {
+            const auto current = storage::read(storage::child(root, ".charm-library/projects/" + project.at("id").get<std::string>() + ".json"));
+            if (current != project) throw std::runtime_error("The library project changed during export. Refresh and try again.");
+        }
+        const auto exclusions = storage::exclusions(root);
+        for (const auto& file : plan.files) {
+            if (storage::plate_excluded(exclusions, plan.project, file.index, file.relative))
+                throw std::runtime_error("A plate was excluded during export. Refresh and try again.");
+            const auto path = storage::child(root, file.relative);
+            if ((stdfs::exists(path) ? library_file_digest(path) : std::string()) != output_before.at(file.relative))
+                throw std::runtime_error("A library file changed during export. Refresh and try again.");
+        }
+        const auto metadata = staging.path / "project.json";
+        { std::ofstream out(metadata); out.exceptions(std::ios::failbit | std::ios::badbit); out << plan.project.dump(2) << '\n'; out.close(); }
+        staged.emplace_back(project_stage, relative.generic_u8string());
+        staged.emplace_back(metadata, ".charm-library/projects/" + plan.project.at("id").get<std::string>() + ".json");
+        try {
+            storage::publish_staged(root, staging.path, staged, [](const stdfs::path& from, const stdfs::path& to) {
+#ifdef _WIN32
+                return Slic3r::rename_file(from.u8string(), to.u8string());
+#else
+                // The generic Utils helper unlinks the destination first on
+                // POSIX. Use rename directly to keep each replacement atomic.
+                if (boost::nowide::rename(from.u8string().c_str(), to.u8string().c_str()) == 0) return std::error_code();
+                return std::error_code(errno, std::generic_category());
+#endif
+            });
+        } catch (const storage::PublicationFailure& error) {
+            if (error.keep_backups) staging.path.clear();
+            throw;
+        }
+        set_project_filename(from_u8(source.u8string()));
+        m_3mf_path = source.u8string();
+        up_to_date(true, false); up_to_date(true, true);
+        wxGetApp().update_saved_preset_from_current_preset();
+        reset_project_dirty_after_save();
+        progress.Update(int(plan.files.size() + 1));
+        if (wxGetApp().mainframe->m_webview) wxGetApp().mainframe->m_webview->StartSlicedLibraryScan(root.u8string());
+        p->notification_manager->push_notification(NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::RegularNotificationLevel,
+            into_u8(format_wxstr(_L("Added %d sliced file(s) to the library. %d excluded plate(s) skipped.\nThe editable project is saved in the library."), int(plan.files.size()), int(plan.excluded))));
+        return true;
+    } catch (const std::exception& error) {
+        show_error(this, from_u8(error.what()));
+        return false;
+    }
+}
+
+bool Plater::regenerate_library_project(const std::string& folder, const std::string& project_id)
+{
+    if (p->m_library_operation || using_exported_file() || only_gcode_mode() || printer_technology() != ptFFF ||
+        is_background_process_slicing() || is_any_job_running() || is_export_gcode_scheduled()) {
+        show_error(this, _L("Wait for the current operation to finish before regenerating this project.")); return false;
+    }
+    {
+        LibraryOperation operation(p->m_library_operation);
+        wxProgressDialog progress(_L("Regenerate library project"), _L("Slicing the saved source project…"), 100,
+            this, wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT);
+        SimpleEvent event(EVT_GLTOOLBAR_SLICE_ALL);
+        GetEventHandler()->ProcessEvent(event);
+        auto idle_since = std::chrono::steady_clock::now();
+        const auto started = idle_since;
+        while (true) {
+            // ProgressDialog's restricted yield doesn't deliver the slicer's
+            // custom completion events. Pump them too, so the GUI consumes the
+            // finished result and advances to the next plate. The app-modal
+            // dialog and operation guard keep project editing disabled.
+            wxGetApp().Yield(true);
+            if (!progress.Pulse(format_wxstr(_L("Slicing plate %d of %d…"), p->partplate_list.get_curr_plate_index() + 1, p->partplate_list.get_plate_count())) ||
+                std::chrono::steady_clock::now() - started > std::chrono::minutes(30)) {
+                p->m_slice_all = false; p->background_process.stop();
+                return false;
+            }
+            const bool busy = is_background_process_slicing() || p->background_process.running() || is_background_process_update_scheduled();
+            if (busy) idle_since = std::chrono::steady_clock::now();
+            else if (std::chrono::steady_clock::now() - idle_since > std::chrono::milliseconds(400)) break;
+            wxMilliSleep(50);
+        }
+        progress.Update(100);
+    }
+    return add_plates_to_library(true, folder, project_id);
 }
 
 void Plater::export_gcode(bool prefer_removable)
@@ -23913,6 +24139,29 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     }
 
     bool store_result = Slic3r::store_bbs_3mf(store_params);
+    if (store_result && (strategy & SaveStrategy::WithGcode) && !using_exported_file() && !(strategy & SaveStrategy::Backup)) {
+        // Generate from the exact live model/config/instance selection exported
+        // above, including unsaved edits. Artwork failure never changes printing.
+        try {
+            std::vector<nlohmann::json> artwork;
+            for (const auto* plate:plate_data_list) {
+                if (!plate->is_sliced_valid || (export_plate_idx>=0 && plate->plate_index!=export_plate_idx) || !plate->mixed_filaments_info.empty()) continue;
+                std::set<int> used;
+                for (const auto& filament:plate->slice_filaments_info) if(filament.used_g>0) used.insert(filament.id);
+                try {
+                    auto effective=cfg;effective.apply(plate->config);
+                    auto preview=generate_plate_vector_geometry(p->model,effective,plate->objects_and_instances,plate->plate_index+1,used);
+                    if (!preview.empty()) artwork.push_back(std::move(preview));
+                } catch (const std::exception& error) {
+                    BOOST_LOG_TRIVIAL(warning)<<"Vector artwork unavailable for plate "<<plate->plate_index+1<<"; keeping its PNG: "<<error.what();
+                }
+            }
+            if (!artwork.empty() && !embed_plate_vector_previews(path_u8,artwork))
+                BOOST_LOG_TRIVIAL(warning)<<"Vector artwork packaging failed; keeping exported print data and PNG thumbnails.";
+        } catch (const std::exception& error) {
+            BOOST_LOG_TRIVIAL(warning)<<"Vector artwork unavailable; keeping PNG thumbnails: "<<error.what();
+        }
+    }
     // reset designed info
     if (!has_design_info)
         p->model.design_info = nullptr;

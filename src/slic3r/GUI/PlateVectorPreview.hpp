@@ -150,5 +150,10 @@ struct PlateVectorPreview {
 // Returns null for missing, stale or malformed embedded artwork. Never changes a job.
 std::unique_ptr<PlateVectorPreview> load_plate_vector_preview(const std::string& job, int plate_index = -1);
 
+// Package freshly generated geometry into a staged archive, verify it, then
+// atomically replace the job. Never modifies G-code, print settings or PNGs.
+// A failed update leaves the original export available with its PNG fallback.
+bool embed_plate_vector_previews(const std::string& job,const std::vector<nlohmann::json>& previews);
+
 }}
 #endif

@@ -514,6 +514,9 @@ public:
     void export_gcode(bool prefer_removable);
     bool can_export_sliced_plate_gcodes() const;
     void export_sliced_plate_gcodes();
+    bool can_add_plates_to_library(bool all_plates) const;
+    bool add_plates_to_library(bool all_plates, const std::string& folder = {}, const std::string& project_id = {});
+    bool regenerate_library_project(const std::string& folder, const std::string& project_id);
     void export_gcode_3mf(bool export_all = false);
     void send_gcode_finish(wxString name);
     void export_core_3mf();

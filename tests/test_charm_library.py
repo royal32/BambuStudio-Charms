@@ -91,6 +91,48 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.slices, 1)
         self.assertEqual(before, {p: (digest(p), Path(p).stat().st_mtime_ns) for p in files})
 
+    def test_native_studio_exports_keep_their_source_settings_and_registration(self):
+        self.assertEqual(self.run_update(), 0)
+        entry = self.entry()
+        root = self.lib.shared_root()
+        record_path = root / '.charm-library/projects' / (entry['id'] + '.json')
+        record = json.loads(record_path.read_text())
+        # Studio exported a newer slice using the editable project's own settings.
+        output = Path(next(iter(entry['outputs'])))
+        output.write_bytes(b'native slice with project settings')
+        record.update(native_export=True, output_sha256={output.name: digest(output)})
+        atomic_json(record_path, record)
+        self.assertEqual(self.lib.files()[str(output)]['sha256'], digest(output))
+        self.assertEqual(self.action(), 'skip')
+        self.recipe = 'different old normalization recipe'
+        self.assertEqual(self.run_update(), 0)
+        self.assertEqual(json.loads(record_path.read_text()), record)
+        self.assertEqual(output.read_bytes(), b'native slice with project settings')
+        self.assertEqual(self.slices, 1)
+        # Changed source needs regeneration in Studio, not silent normalization.
+        self.source.write_bytes(b'edited native project')
+        self.assertEqual(self.action(), 'blocked')
+        self.assertEqual(self.run_update(), 1)
+        self.assertEqual(self.slices, 1)
+
+    def test_new_native_registration_is_discovered_without_a_cli_manifest(self):
+        root = self.lib.shared_root()
+        root.mkdir()
+        source = root / 'Projects/Native Bee.3mf'
+        source.parent.mkdir()
+        source.write_bytes(b'native project')
+        output = root / 'Native Bee.gcode.3mf'
+        output.write_bytes(b'native job')
+        record = dict(version=1, id='studio-native-bee', name='Native Bee', source='Projects/Native Bee.3mf',
+                      source_sha256=digest(source), native_export=True,
+                      output_sha256={output.name: digest(output)}, plates=[dict(index=1, id=output.name)])
+        shared.write_json(root, '.charm-library/projects/studio-native-bee.json', record)
+        rows, _ = self.lib.plan(project_filter='studio-native-bee')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['action'], 'skip')
+        self.assertEqual(rows[0]['source'], str(source))
+        self.assertEqual(self.slices, 0)
+
     def test_source_change_and_profile_change_rebuild_and_archive(self):
         self.run_update()
         self.source.write_bytes(b'new geometry')

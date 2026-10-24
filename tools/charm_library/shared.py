@@ -85,6 +85,21 @@ def write_json(root, relative, value):
     atomic_json(path, value)
 
 
+def native_projects(root):
+    """Studio owns native exports; the old normalizing recipe must not replace them."""
+    directory = child(root, '.charm-library/projects')
+    if not directory.exists():
+        return {}
+    result = {}
+    for path in directory.glob('*.json'):
+        record = read(child(root, path.relative_to(root).as_posix()))
+        if record.get('native_export'):
+            source = Path(record['source'])
+            source = source if source.is_absolute() else child(root, record['source'])
+            result[record['id']] = dict(record, resolved_source=str(source.resolve()))
+    return result
+
+
 def sync_projects(root, projects):
     directories = {}
 
@@ -102,6 +117,11 @@ def sync_projects(root, projects):
 
     for project in projects.values():
         if not any(Path(p).is_relative_to(root) for p in project['outputs']):
+            continue
+        registered = child(root, '.charm-library/projects/' + project['id'] + '.json')
+        if registered.exists() and read(registered).get('native_export'):
+            # Native export updates both shared source and output identities.
+            # A stale local CLI manifest must not erase that registration.
             continue
         record = dict(version=1, id=project['id'], name=project['name'], source_sha256=project['source_sha256'],
                       plates=[dict(id=actual_id(p['filename']), index=p['index'], name=p['name']) for p in project['plates']])
