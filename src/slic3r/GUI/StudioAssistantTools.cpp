@@ -93,6 +93,32 @@ For combinations, search the library, inspect editable source models, import the
 }
 
 namespace {
+void trace(const SessionCallbacks& callbacks,const std::string& event,const Json& data) noexcept
+{
+    try { if (callbacks.trace) callbacks.trace(event,data); } catch (...) {}
+}
+void trace_response(const SessionCallbacks& callbacks,const Json& response,int step) noexcept
+{
+    try {
+        // Deliberate allowlist: no reasoning, encrypted state or raw HTTP body.
+        Json output=Json::array();
+        for (const auto& item:response.value("output",Json::array())) {
+            const auto type=item.value("type",std::string());
+            if (type=="message") {
+                std::string text;
+                for (const auto& part:item.value("content",Json::array()))
+                    if (part.value("type","")=="output_text") text+=part.value("text",std::string());
+                output.push_back({{"type","message"},{"text",text}});
+            } else if (type=="function_call") {
+                output.push_back({{"type",type},{"name",item.value("name",std::string())},
+                    {"namespace",item.value("namespace",std::string("studio"))},{"call_id",item.value("call_id",std::string())},
+                    {"arguments",item.value("arguments",std::string())}});
+            }
+        }
+        trace(callbacks,"model_response",{{"step",step},{"status",response.value("status",std::string())},
+            {"response_id",response.value("id",std::string())},{"usage",response.value("usage",Json::object())},{"output",output}});
+    } catch (...) {}
+}
 void validate(const Json& value, const Json& schema)
 {
     const auto type = schema.value("type", "");
@@ -119,7 +145,7 @@ void validate(const Json& value, const Json& schema)
     }
 }
 }
-Json run_turn(Json input, const Json& context, const std::string& message, const std::string& model, const SessionCallbacks& callbacks)
+static Json run_turn_impl(Json input, const Json& context, const std::string& message, const std::string& model, const SessionCallbacks& callbacks)
 {
     auto check = [&] { if (callbacks.cancelled()) throw std::runtime_error("Stopped. Changes already applied can be undone."); };
     input.push_back({{"role","user"},{"content",message}});
@@ -136,7 +162,9 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
         // Luna is offered as a deliberate Max-effort option. Other models keep
         // their existing defaults; switching models never silently upgrades Sol.
         if (model == "gpt-6-luna") request["reasoning"]={{"effort","max"}};
+        trace(callbacks,"model_request",{{"step",step+1}});
         const auto response=callbacks.respond(request);
+        trace_response(callbacks,response,step+1);
         check();
         if (response.value("status","")!="completed" || !response.contains("output") || !response.at("output").is_array()) throw std::runtime_error("The assistant response did not complete. No incomplete actions were executed.");
         const auto& output=response.at("output");
@@ -148,6 +176,8 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
             called=true;
             auto name=item.at("name").get<std::string>();
             if (name.rfind("studio.",0)==0) name.erase(0,7);
+            const auto call_id=item.at("call_id");
+            trace(callbacks,"tool_call",{{"call_id",call_id},{"name",name},{"arguments",item.at("arguments")}});
             std::string action_key=name;
             std::string mutation_key;
             bool dispatched_mutation=false;
@@ -181,6 +211,9 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
                     }
                 }
             } catch (const std::exception& e) { check(); result={{"error",e.what()},{"instruction","Inspect the current state before choosing another action. Do not assume this operation succeeded."}}; }
+            // Preserve a result that arrived just before Stop, even though the
+            // model must not act on it after cancellation.
+            trace(callbacks,"tool_result",{{"call_id",call_id},{"name",name},{"result",result}});
             check();
             if (dispatched_mutation && (result.contains("error") || result.contains("operation_error"))) failed_mutations.insert(mutation_key);
             if (result.value("cancelled",false)) cancelled_actions.insert(action_key);
@@ -207,5 +240,31 @@ Json run_turn(Json input, const Json& context, const std::string& message, const
         }
     }
     throw std::runtime_error("This task reached its step limit. Review the changes and ask me to continue if needed.");
+}
+Json run_turn(Json history,const Json& context,const std::string& message,const std::string& model,const SessionCallbacks& callbacks)
+{
+    trace(callbacks,"turn_start",{{"model",model},{"reasoning_effort",model=="gpt-6-luna"?"max":"default"},
+        {"history_items",history.size()},{"message",message},{"context",context},{"instructions",instructions()}});
+    try {
+        auto result=run_turn_impl(std::move(history),context,message,model,callbacks);
+        trace(callbacks,"turn_end",{{"status","completed"}});
+        return result;
+    } catch (const RequestError& error) {
+        bool cancelled=false;
+        try { cancelled=callbacks.cancelled(); } catch (...) {}
+        trace(callbacks,"turn_end",{{"status",cancelled?"cancelled":"error"},{"message",error.what()},{"details",error.diagnostics()}});
+        throw;
+    } catch (const Json::exception&) {
+        trace(callbacks,"turn_end",{{"status","error"},{"message","Invalid assistant response data"}});
+        throw;
+    } catch (const std::exception& error) {
+        bool cancelled=false;
+        try { cancelled=callbacks.cancelled(); } catch (...) {}
+        trace(callbacks,"turn_end",{{"status",cancelled?"cancelled":"error"},{"message",error.what()}});
+        throw;
+    } catch (...) {
+        trace(callbacks,"turn_end",{{"status","error"},{"message","Unexpected assistant failure"}});
+        throw;
+    }
 }
 }}}

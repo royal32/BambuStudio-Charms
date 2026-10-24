@@ -232,3 +232,30 @@ ARM and Intel builds are staged and certificate-signed at
 invalid-service credential transport checks pass; the Intel bundle passes the
 macOS 12.6 dependency audit. No running app or source project was replaced, and
 the existing Keychain migration limitation has not been changed by this work.
+
+## Persistent local diagnostics
+
+The logging review records each submitted request, model/effort, fresh context,
+instructions, visible model output, proposed tool calls, actual tool results,
+native confirmation questions/decisions and interrupted/error outcomes in
+per-conversation `events.jsonl` files. Exact rendered model views are separate
+PNG attachments. New conversation preserves older files. Authentication traffic
+and opaque reasoning state do not enter the sink; defensive redaction operates
+on copies without changing data passed to Studio or the model. A failed log
+does not prevent a tool action and receives a visible notice.
+
+All five assistant test targets pass. New checks cover flushed files before
+logger destruction, PNG attachments, credential-field redaction, concurrent
+event ordering, retained prior conversations, invalid/colliding attachments,
+nonfatal storage/observer failures, cancellation records and exclusion of opaque
+model state. The persistence test also passes on the actual macOS 12.6 Intel Mac using
+only disposable synthetic files. No account, model inference or GUI is needed
+for those tests.
+
+Both architectures build and are certificate-signed at
+`build/<arch>/Assistant-Logging-Review/BambuStudio.app`; the Intel package passes
+the macOS 12.6 dependency audit. Running and installed apps have not been
+replaced. No fresh Windows build or authenticated live conversation was run.
+Logs begin with future requests in the new build; earlier in-memory chats
+cannot be recovered by this change. The known Keychain migration limitation
+is unchanged.

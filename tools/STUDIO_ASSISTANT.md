@@ -6,6 +6,7 @@ browser sign-in, and authorize ChatGPT plan usage for **Charms Studio Assistant*
 The model menu lists the models available to that account. **GPT-6 Luna (Max)**
 explicitly uses maximum reasoning effort; other models retain their defaults.
 The **⋯** menu contains account selection, sign-in/out, **New conversation**,
+**Open conversation logs…**,
 and the option to confirm every edit. **Manage usage** in that menu opens
 ChatGPT's usage settings. This uses the connected ChatGPT plan, not a separately
 billed API key. Availability and allowance depend on that account.
@@ -146,13 +147,49 @@ private builds. The existing module-verification preference is unchanged.
 
 Project context is sent to OpenAI when a person sends a request. That can include
 object names, settings, warnings, library search results and requested model
-images. Conversation text, tool arguments/results and rendered model images are
-not written to a persistent local transcript or Studio log. They are held in
-memory for this window; model requests use `store: false`. The compact action
-list is not a complete diagnostic trace. Closing the assistant stops its current
-task. New conversation clears its context without changing the project.
-ChatGPT conversations and memory
-are not imported.
+images. Model requests continue to use `store: false`. ChatGPT conversations and
+memory are not imported. Closing the assistant stops its current task; New
+conversation clears its context without changing the project.
+
+### Persistent local conversation logs
+
+Logging is enabled for submitted assistant requests. **⋯ → Open conversation
+logs…** opens `<Studio data directory>/assistant/conversations`. On the Mac,
+production profiles normally use
+`~/Library/Application Support/BambuStudio/assistant/conversations`; internal
+review builds use `BambuStudioInternal` instead. Windows uses the equivalent
+per-user Studio data directory. Custom `--datadir` profiles keep their own logs.
+
+Each conversation has a unique UTC-named folder containing `events.jsonl` and
+any `image-N.png` attachments. Each JSON line records an event sequence, UTC
+timestamp and elapsed milliseconds. Records include the build version, actual
+instructions/tool schemas, selected model and reasoning effort, user text,
+initial project snapshot, streamed reply fragments and completed replies,
+proposed tool calls, tool arguments and results (including refused, invalid,
+failed or skipped actions), and confirmation questions/decisions. Turn and
+tool-call IDs connect the records. Rendered model views are stored as PNGs and
+referenced by relative path in the result; no desktop screenshots are captured.
+Unsupported images or image payloads over 16 MiB are marked as omitted.
+
+Events are flushed as they arrive, so interrupted/failed turns remain available
+without waiting for a successful final response. Stop and pending native
+operations are recorded; a native operation that may finish after Stop is not
+claimed to have completed. App termination can leave a turn without an ending
+record. New conversation starts another folder without deleting old logs.
+An error that resets model context is recorded, while the visible chat and its
+log remain part of the same conversation. These files are diagnostic records,
+not an automatic chat-restoration mechanism, and are never uploaded by Studio.
+
+No OAuth requests, authentication headers, credential-store values, raw HTTP
+bodies or opaque reasoning/encrypted model state are sent to the logger.
+Sensitive credential fields in structured event data and obvious bearer/API-key
+strings are redacted defensively. User text, project names, geometry metadata
+and tool results are intentionally retained: these are local diagnostic files,
+so avoid putting passwords into chat. On macOS/POSIX the log directories/files
+are restricted to the current user. Windows inherits the per-user profile ACL.
+Logs have no automatic expiry. File-creation/write failures stop that log and
+produce a notice without stopping assistant work; a new conversation retries
+logging. No global process logging or credential behavior is changed.
 
 ## Development checks
 
@@ -171,7 +208,8 @@ ctest --test-dir build/assistant-checks --output-on-failure
 
 These include native worker handoff, text-event ordering, cancellation races,
 failed/cancelled/unconfirmed action batches, exact part-selection revisions,
-and synthetic connection/stream errors. No
+synthetic connection/stream errors, persistent log flushing and image
+attachments, redaction, concurrent event ordering and nonfatal logging failures. No
 account or inference is used. Standalone native chat checks exercise the actual
 bubble widget in light/dark mode, narrow/wide layouts, streaming and copying:
 

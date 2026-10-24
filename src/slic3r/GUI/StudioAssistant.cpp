@@ -3,6 +3,7 @@
 #include "StudioAssistantChat.hpp"
 #include "StudioAssistantKeychain.hpp"
 #include "StudioAssistantWork.hpp"
+#include "StudioAssistantLog.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
@@ -82,7 +83,10 @@ std::string confirmation_text(const std::string& tool,const Json& args) {
 class AssistantWindow : public wxFrame {
 public:
     explicit AssistantWindow(wxWindow* parent);
-    ~AssistantWindow() override { m_timer.Stop(); if (m_work) m_work->stop(); }
+    ~AssistantWindow() override {
+        m_timer.Stop(); if (m_work) m_work->stop();
+        if (m_log) m_log->append("window_destroyed",{{"turn",m_log_turn},{"task_running",m_logging_turn}});
+    }
     void focus_composer() { m_input->SetFocus(); }
 private:
     void poll();
@@ -103,9 +107,13 @@ private:
     void handle_tool(const Json& event);
     Json registration() const;
     void save_accounts();
+    void check_log();
     Actions m_actions;
     std::shared_ptr<Client> m_client;
     std::shared_ptr<Work> m_work;
+    std::shared_ptr<ConversationLog> m_log;
+    size_t m_log_turn{0};
+    bool m_logging_turn{false},m_log_warned{false};
     wxTimer m_timer;
     wxTextCtrl* m_input;
     wxChoice* m_models;
@@ -274,6 +282,8 @@ void AssistantWindow::append(const std::string& who, const std::string& text)
     layout_chat();
 }
 void AssistantWindow::clear_chat() {
+    if (m_log) m_log->append("conversation_reset");
+    m_log.reset(); m_log_turn=0; m_logging_turn=false; m_log_warned=false;
     m_reply=nullptr; m_bubbles.clear(); m_steps.clear(); m_messages->Clear(true);
     m_history=Json::array(); m_problem=Json::object(); m_streaming=false; layout_chat();
 }
@@ -326,6 +336,15 @@ void AssistantWindow::menu() {
         options.Bind(wxEVT_MENU,[action](wxCommandEvent&) { action(); },item->GetId());
     };
     add("New conversation",[this] { clear_chat(); append("Assistant","Ready for something new."); },!m_busy);
+    add("Open conversation logs…",[] {
+        const auto folder=std::filesystem::u8path(data_dir())/"assistant"/"conversations";
+        std::error_code error; std::filesystem::create_directories(folder,error);
+#ifndef _WIN32
+        if (!error) std::filesystem::permissions(folder,std::filesystem::perms::owner_all,std::filesystem::perm_options::replace,error);
+#endif
+        if (error || !wxLaunchDefaultApplication(wxString::FromUTF8(folder.u8string())))
+            wxMessageBox("The conversation log folder could not be opened.","Studio assistant",wxOK|wxICON_INFORMATION);
+    });
     auto* confirm=options.AppendCheckItem(wxID_ANY,"Confirm every project edit"); confirm->Check(!m_allow_changes); confirm->Enable(!m_busy);
     options.Bind(wxEVT_MENU,[this](wxCommandEvent& event) {
         m_allow_changes=!event.IsChecked(); wxGetApp().app_config->set_bool("studio_assistant_allow_changes",m_allow_changes); wxGetApp().app_config->save();
@@ -380,6 +399,8 @@ void AssistantWindow::update_composer() {
 void AssistantWindow::stop() {
     if (!m_busy || !m_work || m_work->cancel) return;
     m_stopped_native=!m_pending.empty() && m_pending!="library";
+    if (m_logging_turn && m_log) m_log->append("stop_requested",{{"turn",m_log_turn},{"pending_operation",m_pending},
+        {"native_operation_may_finish",m_stopped_native}});
     m_work->stop(); m_actions.cancel_library(); m_pending.clear();
     update_composer();
     status("Stopping further steps. An operation already running in Studio may finish.");
@@ -426,20 +447,41 @@ void AssistantWindow::send(const std::string& text, bool clear_draft) {
     if (text.size() > 16000) { append("Studio", "Please shorten the message to 16,000 characters."); return; }
     const int selected = m_models->GetSelection();
     if (m_active < 0 || selected < 0) { append("Studio", "Connect ChatGPT and select an available model first."); return; }
+    if (!m_log) {
+        m_log=std::make_shared<ConversationLog>(std::filesystem::u8path(data_dir())/"assistant"/"conversations");
+        Json metadata={{"tools",tool_definitions()},{"app_version",SLIC3R_VERSION}};
+#ifdef SLIC3R_COMPILE_VERSION
+        metadata["build_version"]=SLIC3R_COMPILE_VERSION;
+#endif
+        m_log->append("conversation_start",metadata);
+    }
+    check_log();
+    const auto log=m_log; const auto turn=++m_log_turn;
+    const auto model = m_model_catalog.at(selected).at("slug").get<std::string>();
+    log->append("user_message",{{"turn",turn},{"model",model},{"text",text}});
+    log->append("turn_options",{{"turn",turn},{"confirm_every_project_edit",!m_allow_changes}});
     Json context;
-    try { context = m_actions.inspect(); } catch (const std::exception& e) { append("Studio", e.what()); return; }
+    try { context = m_actions.inspect(); }
+    catch (const std::exception& error) {
+        log->append("turn_end",{{"turn",turn},{"status","error"},{"phase","initial_inspection"},{"message",error.what()}});
+        append("Assistant",error.what());check_log();return;
+    }
+    m_logging_turn=true;
     append("You", text); append("Assistant", ""); activity("Thinking…");
     if (clear_draft) m_input->Clear();
     m_streaming = false;
     auto client = m_client; const auto account = registration(), history = m_history;
-    const auto model = m_model_catalog.at(selected).at("slug").get<std::string>();
     status("Inspecting the project and working on your request…");
-    start([client, account, history, context, text, model](const auto& work) {
+    start([client, account, history, context, text, model,log,turn](const auto& work) {
         SessionCallbacks callbacks;
+        callbacks.trace=[log,turn](const std::string& event,Json data) { data["turn"]=turn;log->append(event,data); };
         callbacks.cancelled=[work] { return work->cancel.load(); };
         callbacks.tool=[work](const std::string& name,const Json& args) { return work->tool(name,args); };
-        callbacks.respond=[client,account,work](const Json& request) {
-            return client->respond(account,request,work->cancel,[work](const std::string& delta) { work->post({{"event","delta"},{"text",delta}}); });
+        callbacks.respond=[client,account,work,log,turn](const Json& request) {
+            return client->respond(account,request,work->cancel,[work,log,turn](const std::string& delta) {
+                log->append("assistant_delta",{{"turn",turn},{"text",delta}});
+                work->post({{"event","delta"},{"text",delta}});
+            });
         };
         const auto input=run_turn(history,context,text,model,callbacks);
         work->post({{"event","done"},{"history",input}});
@@ -454,7 +496,10 @@ void AssistantWindow::handle_tool(const Json& event) {
         // reviewable. Inspection, selection, and slicing need no extra dialog.
         if (requires_confirmation(tool) || (tool=="assign_part_filament" && args.value("replace_color_paint",false)) || (changes_project(tool) && !m_allow_changes)) {
             const std::string question = confirmation_text(tool,args);
-            if (wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this) != wxYES) {
+            if (m_log) m_log->append("confirmation_requested",{{"turn",m_log_turn},{"tool",tool},{"arguments",args},{"question",question}});
+            const bool approved=wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this)==wxYES;
+            if (m_log) m_log->append("confirmation_decision",{{"turn",m_log_turn},{"tool",tool},{"approved",approved}});
+            if (!approved) {
                 if (m_steps.size()==1 && m_steps.front().first=="Thinking…") m_steps.clear();
                 activity(action_label(tool,args)+" skipped",true,true);
                 m_work->answer({{"cancelled", true}, {"message", "The person declined this action. Do not retry it without a new request."}}); return;
@@ -465,7 +510,11 @@ void AssistantWindow::handle_tool(const Json& event) {
         activity(action_label(tool,args));
         status(wxString::FromUTF8(action_label(tool,args)+"…"));
         auto result = m_actions.execute(tool, args);
-        if (result.contains("pending")) { m_pending = result.at("pending"); m_pending_since = std::chrono::steady_clock::now(); return; }
+        if (result.contains("pending")) {
+            m_pending = result.at("pending"); m_pending_since = std::chrono::steady_clock::now();
+            if (m_log) m_log->append("tool_pending",{{"turn",m_log_turn},{"tool",tool},{"operation",m_pending}});
+            return;
+        }
         activity("",true,result.contains("error") || result.contains("operation_error") || result.value("cancelled",false),result.value("outcome","")=="unconfirmed"); m_work->answer(result);
     } catch (const std::exception& e) {
         activity("",true,true); m_work->answer({{"error", e.what()}, {"instruction", "Inspect the current state before deciding whether another action is appropriate."}});
@@ -534,7 +583,11 @@ void AssistantWindow::poll() {
             m_history = event.at("history");
             // Never silently trim tool-call pairs. A fresh conversation is safer
             // than replaying orphan outputs or sending unbounded project history.
-            if (m_history.dump().size() > 1500000) { m_history = Json::array(); append("Studio", "This chat got long. Your next message will start a fresh conversation."); }
+            if (m_history.dump().size() > 1500000) {
+                m_history = Json::array();
+                if (m_log) m_log->append("context_reset",{{"turn",m_log_turn},{"reason","history_size_limit"}});
+                append("Studio", "This chat got long. Your next message will start a fresh conversation.");
+            }
             status("Ready. Review changes in Studio; Undo is available.");
         } else if (type == "error") {
             // Cancellation is acknowledged once at idle, after all queued text
@@ -551,6 +604,7 @@ void AssistantWindow::poll() {
             if (m_reply && m_reply->empty()) { m_reply->text(wxString::FromUTF8(message)); layout_chat(); }
             else append("Assistant",message);
             m_streaming = false; m_history = Json::array();
+            if (m_logging_turn && m_log) m_log->append("context_reset",{{"turn",m_log_turn},{"reason","error"}});
             status("Stopped. Review the current project before retrying. Changes already applied remain available through Undo.");
         } else if (type == "idle") {
             if (m_work->cancel) {
@@ -563,10 +617,17 @@ void AssistantWindow::poll() {
                 m_history=Json::array(); m_streaming=false;
                 status("Stopped. Ready for your next message.");
             }
-            m_fetching_models=false; busy(false); m_pending.clear();
+            m_logging_turn=false; m_fetching_models=false; busy(false); m_pending.clear();
         }
     }
     if (m_deferred_models_refresh.take(m_busy,m_work->cancel.load())) fetch_models();
+    if (!m_busy) check_log();
+}
+void AssistantWindow::check_log() {
+    if (!m_log || m_log_warned) return;
+    const auto problem=m_log->problem();
+    if (problem.empty()) return;
+    m_log_warned=true; append("Assistant",problem+" Your assistant can still work; this conversation's log may be incomplete.");
 }
 }
 

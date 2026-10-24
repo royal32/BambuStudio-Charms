@@ -88,6 +88,8 @@ struct SessionCallbacks {
     std::function<Json(const Json&)> respond;
     std::function<Json(const std::string&, const Json&)> tool;
     std::function<bool()> cancelled;
+    // Optional local diagnostics; failures must never alter task execution.
+    std::function<void(const std::string&,const Json&)> trace;
 };
 Json run_turn(Json history, const Json& context, const std::string& message, const std::string& model, const SessionCallbacks& callbacks);
 

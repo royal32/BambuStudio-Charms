@@ -197,6 +197,8 @@ int main()
     std::vector<Json> responses={call("inspect_project",Json::object()),call("set_settings",{{"revision","r1"},{"scope","global"},{"settings",Json::array({{{"key","enable_support"},{"value","1"}}})}}),call("slice",Json::object()),final};
     size_t response_index=0; std::vector<std::string> executed;
     SessionCallbacks session;
+    std::vector<Json> trace_events;
+    session.trace=[&](const std::string& event,const Json& data) { trace_events.push_back({{"event",event},{"data",data}}); };
     session.cancelled=[] { return false; };
     session.respond=[&](const Json& request) {
         assert(request.at("store")==false); assert(request.at("stream")==true);
@@ -214,6 +216,36 @@ int main()
     const auto history=run_turn(Json::array(),{{"revision","r1"}},"Help with this warning","test-model",session);
     assert((executed==std::vector<std::string>{"inspect_project","set_settings","slice"}));
     assert(history.back().at("type")=="message");
+    assert(trace_events.front().at("event")=="turn_start");
+    assert(trace_events.front().at("data").at("context").at("revision")=="r1");
+    assert(trace_events.back().at("event")=="turn_end");
+    assert(trace_events.back().at("data").at("status")=="completed");
+    std::vector<std::string> traced_tools;
+    for(const auto& entry:trace_events) if(entry.at("event")=="tool_result") {
+        traced_tools.push_back(entry.at("data").at("name"));
+        assert(entry.at("data").at("call_id")=="call_1");
+        assert(entry.at("data").at("result").at("warnings").size()==1);
+    }
+    assert(traced_tools==executed);
+    // A diagnostic sink failure must not prevent the response or tool action.
+    session.trace=[](const std::string&,const Json&){throw std::runtime_error("Disk full");};
+    response_index=0;executed.clear();
+    run_turn(Json::array(),{{"revision","r1"}},"Help with this warning","test-model",session);
+    assert((executed==std::vector<std::string>{"inspect_project","set_settings","slice"}));
+
+    // Keep visible replies and proposed tools, but never persist opaque model
+    // reasoning/encrypted state from an otherwise valid provider response.
+    trace_events.clear();session.trace=[&](const std::string& event,const Json& data){trace_events.push_back({{"event",event},{"data",data}});};
+    session.respond=[&](const Json&) {
+        auto response=final;
+        response["output"].push_back({{"type","reasoning"},{"encrypted_content","private-opaque-state"}});
+        return response;
+    };
+    run_turn(Json::array(),Json::object(),"test","test-model",session);
+    const auto logged=Json(trace_events).dump();
+    assert(logged.find("Resliced. The loop still needs inspection.")!=std::string::npos);
+    assert(logged.find("private-opaque-state")==std::string::npos);
+    session.trace={};
 
     // The Luna option is explicitly Max, while Sol retains the existing default.
     session.respond=[&](const Json& request) {
@@ -247,8 +279,11 @@ int main()
     rejects([&] { run_turn(Json::array(),Json::object(),"test","test-model",session); }); assert(!executed_partial);
     // Stop between inference and execution must prevent the pending action.
     bool cancelled=false; session.cancelled=[&] { return cancelled; };
+    trace_events.clear();session.trace=[&](const std::string& event,const Json& data){trace_events.push_back({{"event",event},{"data",data}});};
     session.respond=[&](const Json&) { cancelled=true; return call("slice",Json::object()); };
     rejects([&] { run_turn(Json::array(),Json::object(),"test","test-model",session); }); assert(!executed_partial);
+    assert(trace_events.back().at("data").at("status")=="cancelled");
+    session.trace={};
     session.cancelled=[] { return false; };
     // Native-tool failure is returned as an error, not converted into success or automatically replayed.
     response_index=0; int attempts=0;
