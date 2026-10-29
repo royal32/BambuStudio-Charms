@@ -5,6 +5,7 @@
 #include <curl/curl.h>
 #include <cassert>
 #include <iostream>
+#include <set>
 
 using namespace Slic3r::GUI::Assistant;
 namespace Slic3r { namespace GUI { namespace Assistant {
@@ -189,6 +190,11 @@ int main()
     });
     const auto tools = tool_definitions(); assert(tools.at(0).at("type") == "namespace"); assert(tools.at(0).at("name") == "studio");
     assert(changes_project("set_settings")); assert(!changes_project("inspect_project")); assert(requires_confirmation("document"));
+    assert(changes_project("plane_cut") && changes_project("add_primitive") && changes_project("delete_parts"));
+    assert(!changes_project("model_section") && requires_confirmation("delete_parts"));
+    std::set<std::string> geometry_names;
+    for (const auto& tool:tools.at(0).at("tools")) geometry_names.insert(tool.at("name").get<std::string>());
+    for (const auto* name:{"plane_cut","add_primitive","delete_parts","model_section"}) assert(geometry_names.count(name));
     for (const auto& tool : tools.at(0).at("tools")) assert(tool.at("name") != "send_print");
     auto call=[](const std::string& name,const Json& args,const std::string& call_id="call_1") {
         return Json{{"status","completed"},{"output",Json::array({{{"type","function_call"},{"namespace","studio"},{"name",name},{"call_id",call_id},{"arguments",args.dump()}}})}};
@@ -262,7 +268,10 @@ int main()
         call("assign_part_filament",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",0}}),
         call("assign_part_filament",{{"object_id","o"},{"part_ids",Json::array({"v"})},{"slot",1}}),
         call("document",{{"action","unknown"}}),
-        call("split_parts",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v1","v2"})}})}) {
+        call("split_parts",{{"revision","r1"},{"object_id","o"},{"part_ids",Json::array({"v1","v2"})}}),
+        call("plane_cut",{{"object_id","o"},{"instance_id","i"},{"part_ids",{"v"}},{"point_mm",{0,0,0}},{"normal",{0,1,0}},{"keep","negative"}}),
+        call("add_primitive",{{"revision","r1"},{"object_id","o"},{"instance_id","i"},{"shape","cylinder"},{"type","negative"},{"center_mm",{0,0}},{"size_mm",{2,2,4}},{"axis",{0,0,1}}}),
+        call("delete_parts",{{"object_id","o"},{"part_ids",{"v"}}})}) {
         response_index=0; bool executed_bad=false;
         session.respond=[&](const Json& request) {
             if (response_index++==0) return invalid;

@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--build-dir", type=pathlib.Path, default=pathlib.Path("build/arm64"))
     parser.add_argument("--test-source",type=pathlib.Path,default=pathlib.Path("tests/studio_assistant_model.test.cpp"))
     parser.add_argument("--check-name",default="assistant-native-checks")
+    parser.add_argument("--build-only",action="store_true",help="Build a native fixture for execution on another Mac of the target architecture")
     parser.add_argument("fixtures", type=pathlib.Path, nargs="*")
     args = parser.parse_args()
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -70,6 +71,9 @@ def main():
         raise RuntimeError("Could not identify Studio's entry-point object in the generated link command")
     with (output / "link.log").open("w") as log:
         subprocess.run(link, cwd=build, stdout=log, stderr=subprocess.STDOUT, check=True)
+    if args.build_only:
+        print(f"Built native checks: {binary}")
+        return
     with (output / "results.log").open("w") as log:
         subprocess.run([str(binary), *(str(p.resolve()) for p in args.fixtures)], cwd=root,
                        stdout=log, stderr=subprocess.STDOUT, check=True)

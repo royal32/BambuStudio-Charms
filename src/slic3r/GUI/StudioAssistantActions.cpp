@@ -1,5 +1,6 @@
 #include "StudioAssistantActions.hpp"
 #include "StudioAssistantModel.hpp"
+#include "StudioAssistantGeometry.hpp"
 #include "StudioAssistantLibrarySearch.hpp"
 #include "StudioAssistantState.hpp"
 #include "GUI_App.hpp"
@@ -43,6 +44,12 @@ Plater& plater() {
 }
 std::string lower(std::string value) { std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return value; }
 Json vec(const Vec3d& v) { return Json::array({v.x(), v.y(), v.z()}); }
+Vec3d geometry_arg(const Json& args,const char* key) {
+    const auto& value=args.at(key);
+    if (!value.is_array() || value.size()!=3) throw std::runtime_error("Supply exactly three coordinates.");
+    Vec3d result(value.at(0).get<double>(),value.at(1).get<double>(),value.at(2).get<double>());
+    geometry_vector(result); return result;
+}
 std::string id(const ModelObject* object) { return std::to_string(object->id().id); }
 ModelObject* find_object(Plater& p, const std::string& value) {
     for (auto* object : p.model().objects) if (id(object) == value) return object;
@@ -76,7 +83,12 @@ Json object_summary(const ModelObject& object) {
         const auto matrix = instance->get_transformation().get_matrix();
         Json transform = Json::array();
         for (int row=0; row<4; ++row) for (int col=0; col<4; ++col) transform.push_back(matrix(row,col));
-        instances.push_back({{"id", std::to_string(instance->id().id)}, {"offset_mm", vec(instance->get_offset())}, {"transform", transform}, {"printable", instance->printable}});
+        Json part_bounds=Json::array();
+        for (const auto* volume:object.volumes) {
+            const auto bounds=volume->mesh().transformed_bounding_box(matrix*volume->get_matrix());
+            part_bounds.push_back({{"part_id",std::to_string(volume->id().id)},{"min_mm",vec(bounds.min)},{"max_mm",vec(bounds.max)}});
+        }
+        instances.push_back({{"id", std::to_string(instance->id().id)}, {"offset_mm", vec(instance->get_offset())}, {"transform", transform}, {"printable", instance->printable},{"part_bounds_plate_mm",part_bounds}});
     }
     const auto box = object.bounding_box();
     return {{"id", id(&object)}, {"name", object.name}, {"size_mm", vec(box.size())}, {"min_mm", vec(box.min)},
@@ -270,7 +282,7 @@ Json Actions::inspect()
         {"objects", objects}, {"plates", plates}, {"current_plate", list.get_curr_plate_index()+1}, {"settings", settings},
         {"warnings", warnings}, {"busy", p.is_background_process_slicing() || p.is_any_job_running() || p.is_background_process_update_scheduled()},
         {"editable", !p.only_gcode_mode() && !p.is_gcode_3mf()}, {"selected_object_ids", selected}, {"selected_parts",selected_parts}, {"can_undo", p.can_undo()}, {"can_redo", p.can_redo()},
-        {"limitations", Json::array({"Physical filament colors/materials may differ from digital slots.", "No face-level support painting or geometry repair is automated.", "Warnings may be stale until resliced; absence of warnings does not prove printability."})}};
+        {"limitations", Json::array({"Physical filament colors/materials may differ from digital slots.", "Simple plane cuts, primitive parts/negative volumes and part removal are available. Arbitrary sculpting and face-level support painting are not automated.", "Warnings may be stale until resliced; absence of warnings does not prove printability."})}};
 }
 
 std::string Actions::library_source(const std::string& value)
@@ -296,7 +308,8 @@ Json Actions::execute(const std::string& tool, const Json& args)
         if (p.is_background_process_slicing() || p.is_any_job_running()) throw std::runtime_error("Wait for Studio's current operation before rendering a model view.");
         const auto direction = args.value("direction", "iso");
         const std::map<std::string, Camera::ViewAngleType> views = {{"iso", Camera::ViewAngleType::Iso}, {"top", Camera::ViewAngleType::Top},
-            {"bottom", Camera::ViewAngleType::Bottom}, {"front", Camera::ViewAngleType::Front}};
+            {"bottom", Camera::ViewAngleType::Bottom}, {"front", Camera::ViewAngleType::Front},
+            {"rear",Camera::ViewAngleType::Rear},{"left",Camera::ViewAngleType::Left},{"right",Camera::ViewAngleType::Right}};
         if (!views.count(direction)) throw std::runtime_error("Unknown model-view direction.");
         wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
         p.select_view_3D("3D");
@@ -340,7 +353,7 @@ Json Actions::execute(const std::string& tool, const Json& args)
     }
     if (tool == "search_library" || tool == "inspect_library_source") return start_library(tool,args);
     if (changes_project(tool)) editable(p);
-    static const std::set<std::string> revision_required = {"set_settings", "use_profile", "arrange", "orient", "move_to_plate", "copies", "rename", "new_plate", "transform", "delete_selected", "add_library_model", "assign_part_filament", "split_parts", "set_filament_color"};
+    static const std::set<std::string> revision_required = {"set_settings", "use_profile", "arrange", "orient", "move_to_plate", "copies", "rename", "new_plate", "transform", "delete_selected", "add_library_model", "assign_part_filament", "split_parts", "set_filament_color", "plane_cut", "add_primitive", "delete_parts"};
     if (revision_required.count(tool) && !args.contains("revision")) throw std::runtime_error("Inspect the project and provide its current revision before editing.");
     if (args.contains("revision") && args.at("revision") != inspect().at("revision"))
         throw std::runtime_error("The project changed since inspection. Inspect again before applying this action.");
@@ -351,6 +364,65 @@ Json Actions::execute(const std::string& tool, const Json& args)
         p.select_view_3D("3D");
     }
     if (tool == "select_objects") { select(p, args.at("object_ids").get<std::vector<std::string>>()); return inspect(); }
+    if (tool=="model_section") {
+        const auto* object=find_object(p,args.at("object_id"));
+        const auto point=geometry_arg(args,"point_mm"), normal=geometry_arg(args,"normal");
+        const auto frame=geometry_frame(point,normal);
+        const auto section=model_section(*object,args.at("instance_id"),point,normal);
+        Json contours=Json::array(); double area=0; size_t count=0; bool truncated=false;
+        auto append=[&](const Polygon& ring,bool hole) {
+            Json points=Json::array();
+            for (const auto& pt:ring.points) {
+                if (++count>6000) { truncated=true;break; }
+                points.push_back({unscale<double>(pt.x()),unscale<double>(pt.y())});
+            }
+            if (!points.empty()) contours.push_back({{"hole",hole},{"points_mm",points}});
+        };
+        for (const auto& shape:section) {
+            area+=shape.area();append(shape.contour,false);
+            for (const auto& hole:shape.holes) append(hole,true);
+        }
+        return {{"origin_plate_mm",vec(point)},{"basis_u",vec(frame.linear().col(0))},{"basis_v",vec(frame.linear().col(1))},
+            {"normal",vec(normal.normalized())},{"area_mm2",area*SCALING_FACTOR*SCALING_FACTOR},{"contours",contours},{"contours_truncated",truncated}};
+    }
+    if (tool=="plane_cut" || tool=="add_primitive" || tool=="delete_parts") {
+        auto* object=find_object(p,args.at("object_id"));
+        const auto index=size_t(std::find(p.model().objects.begin(),p.model().objects.end(),object)-p.model().objects.begin());
+        Json details;
+        if (tool=="plane_cut") {
+            const auto side=args.at("keep").get<std::string>();
+            if (side!="positive" && side!="negative") throw std::runtime_error("Choose the positive or negative half-space to keep.");
+            auto prepared=prepare_plane_cut(*object,args.at("instance_id"),args.at("part_ids").get<std::vector<std::string>>(),geometry_arg(args,"point_mm"),geometry_arg(args,"normal"),side=="positive");
+            details={{"removed_mm3",prepared.removed_mm3},{"paint_note","Paint on rebuilt and capped faces is approximate; inspect the result."}};
+            p.take_snapshot("Assistant: plane cut"); prepared.apply(*object);
+        } else if (tool=="add_primitive") {
+            const auto type=args.at("type").get<std::string>();
+            if (type!="model_part" && type!="negative") throw std::runtime_error("Choose printable model_part or negative.");
+            auto prepared=prepare_primitive(*object,args.at("instance_id"),args.at("shape"),type=="negative",geometry_arg(args,"center_mm"),geometry_arg(args,"size_mm"),geometry_arg(args,"axis"));
+            const auto name=args.value("name",type=="negative"?std::string("Negative ")+args.at("shape").get<std::string>():args.at("shape").get<std::string>());
+            if (name.empty() || name.size()>200) throw std::runtime_error("Use a short part name.");
+            p.take_snapshot("Assistant: add primitive part");
+            auto* volume=object->add_volume(std::move(prepared.mesh),prepared.type);
+            volume->set_transformation(Geometry::Transformation(prepared.transform)); volume->name=name;
+            volume->source.is_from_builtin_objects=true; object->invalidate_bounding_box();
+            details={{"added_part_id",std::to_string(volume->id().id)},{"type",type},{"size_mm",args.at("size_mm")},{"center_plate_mm",args.at("center_mm")}};
+        } else {
+            const auto indices=removable_parts(*object,args.at("part_ids").get<std::vector<std::string>>());
+            p.take_snapshot("Assistant: remove parts");
+            for (const auto i:indices) object->delete_volume(i);
+            object->invalidate_bounding_box(); details={{"parts_removed",indices.size()}};
+        }
+        wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor); p.select_view_3D("3D");
+        p.canvas3D()->get_selection().clear();
+        p.sidebar().obj_list()->add_volumes_to_object_in_list(index);
+        // changed_object() would silently drop the model to the bed. Mesh
+        // refresh invalidates slicing while retaining the inspected placement.
+        p.changed_mesh(int(index));
+        p.get_partplate_list().reset_thumbnail_assembly_view_data();
+        select(p,{id(object)});
+        auto result=inspect();result["geometry_edit"]=details;result["geometry_edit"]["affected_instances"]=object->instances.size();
+        return result;
+    }
     if (tool=="select_parts" || tool=="assign_part_filament" || tool=="split_parts") {
         auto* object=find_object(p,args.at("object_id"));
         const auto parts=part_targets(*object,args.at("part_ids").get<std::vector<std::string>>());
