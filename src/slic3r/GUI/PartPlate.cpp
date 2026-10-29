@@ -7356,7 +7356,7 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 					//parse filament info
                     // Reopened sliced archives have no live slicer filament
                     // statistics. Preserve their metadata for export and Connect.
-                    if (wxGetApp().plater()->is_gcode_3mf())
+                    if (m_plater && m_plater->is_gcode_3mf())
                         plate_data_item->slice_filaments_info = m_plate_list[i]->slice_filaments_info;
                     else
                         plate_data_item->parse_filament_info(m_plate_list[i]->get_slice_result());
