@@ -44,6 +44,22 @@ std::string action_label(const std::string& tool, const Json& args = Json::objec
         {"use_profile","Choose a profile"},{"model_view","Look at the model"},{"set_settings","Change process settings"},{"select_objects","Focus objects"},
         {"select_parts","Highlight model parts"},{"split_parts","Split disconnected pieces into parts"},{"assign_part_filament","Assign part colors"},{"set_filament_color","Change a project filament color"},
         {"plane_cut","Trim model with a plane"},{"add_primitive","Add a model or negative part"},{"delete_parts","Remove model parts"},{"model_section","Measure a model cross-section"},
+        {"inspect_surfaces","Identify model surfaces"},{"paint_surfaces","Paint the chosen surfaces"},{"clear_paint","Clear a painting layer"},
+        {"surface_view","Look at numbered surfaces"},
+        {"mesh_boolean","Combine or subtract model geometry"},{"simplify_mesh","Reduce mesh detail"},
+        {"inspect_slice","Inspect sliced layers and supports"},{"slice_layer_view","Look at a sliced layer"},
+        {"slice_all","Slice all project plates"},{"delete_plate","Remove a project plate"},
+        {"select_instances","Focus individual copies"},{"layout_selection","Align or space models"},{"part_properties","Change part properties"},
+        {"instance_printable","Choose printable copies"},{"object_structure","Split or assemble objects"},{"plate_operation","Manage a plate"},
+        {"detach_instances","Make linked copies independent"},
+        {"create_object","Create a printable shape"},
+        {"list_fonts","Find a lettering font"},{"add_text","Add lettering or engraving"},
+        {"inspect_printers","Check available printers and reported filament"},
+        {"inspect_profile_settings","Check material or printer settings"},
+        {"part_map_view","Identify the model's pieces"},
+        {"load_model_file","Open or import the requested model"},
+        {"reset_overrides","Restore inherited settings"},{"open_editor","Open a detailed editor"},{"library_export","Add plates to the library"},{"review_print","Open print review"},
+        {"transform_item","Move or resize parts"},{"place_on_bed","Place model on the bed"},{"place_on_face","Lay the chosen face flat"},
         {"select_plate","Select a plate"},{"view","Show a Studio view"},{"arrange","Arrange parts"},{"orient","Orient parts"},{"move_to_plate","Move parts to a plate"},
         {"slice","Slice and check warnings"},{"copies","Make copies"},{"rename","Rename an item"},{"new_plate","Create a plate"},{"transform","Move, rotate, or scale parts"},
         {"undo","Undo a change"},{"redo","Redo a change"},{"delete_selected","Delete selected parts"},{"search_library","Search the library"},
@@ -53,6 +69,7 @@ std::string action_label(const std::string& tool, const Json& args = Json::objec
 std::string confirmation_text(const std::string& tool,const Json& args) {
     if (tool=="delete_selected") return "Delete the selected parts? You can restore them with Undo.";
     if (tool=="delete_parts") return "Remove the chosen pieces from this object? You can restore them with Undo.";
+    if (tool=="delete_plate") return "Remove plate "+std::to_string(args.at("plate").get<int>())+" and its contents? Undo is available.";
     if (tool=="open_library_project") return "Open this library item's editable source project? Studio will ask about any unsaved changes.";
     if (tool=="use_profile") return "Choose the profile “"+args.value("name",std::string())+"”? This changes the project's print or material settings.";
     if (tool=="set_filament_color") return "Change project filament slot "+std::to_string(args.at("slot").get<int>())+" to "+args.at("color").get<std::string>()+"? All model parts using this slot will display that color. Physical AMS settings stay unchanged.";
@@ -400,10 +417,10 @@ void AssistantWindow::update_composer() {
 }
 void AssistantWindow::stop() {
     if (!m_busy || !m_work || m_work->cancel) return;
-    m_stopped_native=!m_pending.empty() && m_pending!="library";
+    m_stopped_native=!m_pending.empty() && m_pending!="library" && m_pending!="model_work";
     if (m_logging_turn && m_log) m_log->append("stop_requested",{{"turn",m_log_turn},{"pending_operation",m_pending},
         {"native_operation_may_finish",m_stopped_native}});
-    m_work->stop(); m_actions.cancel_library(); m_pending.clear();
+    m_work->stop(); m_actions.cancel_library(); m_actions.cancel_model_work(); m_pending.clear();
     update_composer();
     status("Stopping further steps. An operation already running in Studio may finish.");
 }
@@ -496,7 +513,7 @@ void AssistantWindow::handle_tool(const Json& event) {
     try {
         // Confirm high-impact actions; the preference can also make all edits
         // reviewable. Inspection, selection, and slicing need no extra dialog.
-        if (requires_confirmation(tool) || (tool=="assign_part_filament" && args.value("replace_color_paint",false)) || (changes_project(tool) && !m_allow_changes)) {
+        if (requires_confirmation(tool,args) || (tool=="assign_part_filament" && args.value("replace_color_paint",false)) || (changes_project(tool) && !m_allow_changes)) {
             const std::string question = confirmation_text(tool,args);
             if (m_log) m_log->append("confirmation_requested",{{"turn",m_log_turn},{"tool",tool},{"arguments",args},{"question",question}});
             const bool approved=wxMessageBox(wxString::FromUTF8(question), "Studio assistant", wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION, this)==wxYES;
@@ -527,16 +544,24 @@ void AssistantWindow::poll() {
     if (!m_pending.empty() && !m_work->cancel) {
         const auto elapsed = std::chrono::steady_clock::now() - m_pending_since;
         auto* p = wxGetApp().plater();
-        if (elapsed > std::chrono::minutes(5)) { m_actions.cancel_library(); m_pending.clear(); activity("",true,true); m_work->answer({{"error", "Studio's operation did not finish within five minutes. Check Studio before trying again."}}); }
+        if (elapsed > std::chrono::minutes(5)) { m_actions.cancel_library(); m_actions.cancel_model_work(); m_pending.clear(); activity("",true,true); m_work->answer({{"error", "Studio's operation did not finish within five minutes. Check Studio before trying again."}}); }
+        else if(m_pending=="model_work") {
+            try{if(auto result=m_actions.poll_model_work()){m_pending.clear();activity("",true,result->contains("operation_error") || result->value("cancelled",false));m_work->answer(*result);}}
+            catch(const std::exception& error){m_actions.cancel_model_work();m_pending.clear();activity("",true,true);m_work->answer({{"error",error.what()}});}
+        }
         else if (m_pending == "library") {
             try { if (auto result = m_actions.poll_library()) { m_pending.clear(); activity("",true,result->contains("error") || result->contains("operation_error") || result->value("cancelled",false)); m_work->answer(*result); } }
             catch (const std::exception& e) { m_pending.clear(); activity("",true,true); m_work->answer({{"error",e.what()}}); }
         }
-        else if (elapsed > std::chrono::milliseconds(700) && p && !p->is_background_process_slicing() && !p->is_any_job_running() && !p->is_background_process_update_scheduled()) {
+        else if (elapsed > std::chrono::milliseconds(700) && p && !p->is_loading_project() && !p->is_background_process_slicing() && !p->is_any_job_running() && !p->is_background_process_update_scheduled()) {
             const auto pending = m_pending; m_pending.clear();
             try {
                 auto result = m_actions.inspect();
                 if (pending == "slice" && !p->get_partplate_list().get_curr_plate()->is_slice_result_valid()) result["operation_error"] = "Slicing did not produce a valid result. Inspect diagnostics; do not claim success.";
+                if(pending=="slice_all") {
+                    Json missing=Json::array();auto& plates=p->get_partplate_list();for(int i=0;i<plates.get_plate_count();++i){auto* plate=plates.get_plate(i);if(plate->is_printable() && !plate->get_obj_and_inst_set().empty() && !plate->is_slice_result_valid())missing.push_back(i+1);}
+                    result["plates_without_valid_slices"]=missing;if(!missing.empty())result["operation_error"]="Slice All left plates without valid results. Inspect their warnings before claiming readiness.";
+                }
                 activity("",true,result.contains("operation_error")); m_work->answer(result);
             } catch (const std::exception& e) { activity("",true,true); m_work->answer({{"error", e.what()}}); }
         }

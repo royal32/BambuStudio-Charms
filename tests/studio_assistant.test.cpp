@@ -1,4 +1,5 @@
 #include "slic3r/GUI/StudioAssistantClient.hpp"
+#include "slic3r/GUI/StudioAssistantProfiles.hpp"
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/bn.h>
@@ -195,6 +196,27 @@ int main()
     std::set<std::string> geometry_names;
     for (const auto& tool:tools.at(0).at("tools")) geometry_names.insert(tool.at("name").get<std::string>());
     for (const auto* name:{"plane_cut","add_primitive","delete_parts","model_section"}) assert(geometry_names.count(name));
+    assert(geometry_names.size()==tools.at(0).at("tools").size() && geometry_names.size()<=128);
+    for(const auto* name:{"inspect_surfaces","surface_view","paint_surfaces","clear_paint","transform_item","place_on_bed","place_on_face","create_object","list_fonts","add_text","select_instances","detach_instances","layout_selection","instance_printable","object_structure","part_properties","plate_operation","delete_plate","reset_overrides","load_model_file","mesh_boolean","simplify_mesh","inspect_slice","slice_layer_view","slice_all","library_export","review_print"})assert(geometry_names.count(name));
+    for(const auto& definition:workbench_tool_definitions())if(changes_project(definition.at("name"))) {
+        const auto& schema=definition.at("parameters");assert(schema.at("properties").contains("revision"));
+        const auto required=schema.at("required").get<std::vector<std::string>>();assert(std::find(required.begin(),required.end(),"revision")!=required.end());
+    }
+    assert(!requires_confirmation("plate_operation") && requires_confirmation("delete_plate"));
+    assert(!requires_confirmation("use_profile",{{"kind","filament"},{"slot",0}}));
+    assert(requires_confirmation("use_profile",{{"kind","filament"},{"slot",1}}));
+    assert(requires_confirmation("use_profile",{{"kind","printer"}}));
+    assert(geometry_names.count("inspect_printers") && !changes_project("inspect_printers"));
+    assert(geometry_names.count("inspect_profile_settings") && !changes_project("inspect_profile_settings"));
+    assert(geometry_names.count("part_map_view") && !changes_project("part_map_view"));
+    const auto profile_config=Slic3r::DynamicPrintConfig::full_print_config();
+    assert(readable_profile_parameter("nozzle_temperature",*profile_config.def()->get("nozzle_temperature")));
+    assert(readable_profile_parameter("filament_type",*profile_config.def()->get("filament_type")));
+    Slic3r::ConfigOptionDef text_parameter;text_parameter.type=Slic3r::coString;
+    assert(!readable_profile_parameter("bed_custom_model",text_parameter));
+    assert(!readable_profile_parameter("printhost_apikey",text_parameter));
+    assert(!readable_profile_parameter("machine_start_gcode",text_parameter));
+    assert(!changes_project("surface_view") && !changes_project("slice_layer_view") && !changes_project("review_print"));
     for (const auto& tool : tools.at(0).at("tools")) assert(tool.at("name") != "send_print");
     auto call=[](const std::string& name,const Json& args,const std::string& call_id="call_1") {
         return Json{{"status","completed"},{"output",Json::array({{{"type","function_call"},{"namespace","studio"},{"name",name},{"call_id",call_id},{"arguments",args.dump()}}})}};
@@ -501,6 +523,19 @@ int main()
     session.respond=[&](const Json&) { return response_index++==0?call("open_library_project",{{"entry_id","source-a"}},"library_new_turn"):final; };
     run_turn(library_history,Json::object(),"Try opening that source again","test-model",session);
     assert((executed==std::vector<std::string>{"open_library_project:source-a"}));
+    // Explicit file loads cannot reopen an uncertain native workflow by
+    // refreshing the revision. A genuinely different requested file is usable.
+    response_index=0;executed.clear();
+    session.respond=[&](const Json& request) {
+        const int step=response_index++;
+        if(step==0)return call("load_model_file",{{"revision","r1"},{"path","/tmp/a.3mf"},{"mode","project"}},"file_first");
+        if(step==1)return call("studio.load_model_file",{{"revision","r2"},{"path","/tmp/a.3mf"},{"mode","project"}},"file_retry");
+        if(step==2){const auto skipped=Json::parse(request.at("input").back().at("output").get<std::string>());assert(skipped.at("skipped")==true && skipped.at("outcome")=="unconfirmed");return call("load_model_file",{{"revision","r2"},{"path","/tmp/b.3mf"},{"mode","project"}},"different_file");}
+        return final;
+    };
+    session.tool=[&](const std::string& name,const Json& args){executed.push_back(name+":"+args.at("path").get<std::string>());return unconfirmed;};
+    run_turn(Json::array(),Json::object(),"Open the requested files","test-model",session);
+    assert((executed==std::vector<std::string>{"load_model_file:/tmp/a.3mf","load_model_file:/tmp/b.3mf"}));
     // Images use multimodal tool results, not a base64 blob in ordinary text.
     response_index=0;
     session.respond=[&](const Json& request) {

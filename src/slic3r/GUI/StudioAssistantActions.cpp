@@ -29,7 +29,7 @@
 namespace Slic3r { namespace GUI { namespace Assistant {
 struct Actions::LibraryTransfer {
     std::atomic<bool> cancel{false}, done{false};
-    std::string tool, temporary, source, error;
+    std::string tool, temporary, source, error, folder;
     Json args, result;
     ~LibraryTransfer() {
         if (!temporary.empty()) { std::error_code ec; std::filesystem::remove(std::filesystem::u8path(temporary),ec); }
@@ -73,9 +73,10 @@ Json object_summary(const ModelObject& object) {
     Json volumes = Json::array(), instances = Json::array();
     for (const auto* volume : object.volumes) {
         const auto box=volume->mesh().transformed_bounding_box(volume->get_matrix());
-        volumes.push_back({{"id",std::to_string(volume->id().id)}, {"name", volume->name}, {"kind", int(volume->type())},
+        Json text=Json();if(volume->is_text()){const auto& info=volume->get_text_info();text={{"content",info.m_text},{"font",info.m_font_name},{"nominal_size_mm",info.m_font_size},{"thickness_mm",info.m_thickness},{"surface_wrapped",info.m_surface_type!=TextInfo::HORIZONAL}};}
+        volumes.push_back({{"id",std::to_string(volume->id().id)}, {"name", volume->name}, {"kind", int(volume->type())},{"text",text},
         {"model_part", volume->is_model_part()}, {"negative", volume->is_negative_volume()}, {"support_painted", !volume->supported_facets.empty()},
-        {"color_painted", !volume->mmu_segmentation_facets.empty()}, {"filament_slot", volume->extruder_id()},
+        {"color_painted", !volume->mmu_segmentation_facets.empty()}, {"seam_painted",!volume->seam_facets.empty()}, {"fuzzy_painted",!volume->fuzzy_skin_facets.empty()}, {"filament_slot", volume->extruder_id()},
         {"size_mm", vec(box.size())}, {"min_object_mm", vec(box.min)}, {"max_object_mm", vec(box.max)},
         {"mesh_volume_mm3", std::abs(double(its_volume(volume->mesh().its))*volume->get_matrix().linear().determinant())}, {"settings", config_values(volume->config.get())}});
     }
@@ -115,7 +116,7 @@ bool valid_color(const std::string& color) {
 }
 }
 
-Actions::~Actions() { cancel_library(); }
+Actions::~Actions() { cancel_library(); cancel_model_work(); }
 void Actions::cancel_library() { if (m_transfer) m_transfer->cancel = true; m_transfer.reset(); }
 
 Json Actions::start_library(const std::string& tool, const Json& args)
@@ -128,11 +129,12 @@ Json Actions::start_library(const std::string& tool, const Json& args)
     if (!overrides.is_object()) overrides = Json::object();
     std::string name;
     if (tool != "search_library") {
+        if(m_library_folder!=folder)throw std::runtime_error("The library folder changed. Search the current library before using an earlier result.");
         const auto found = m_library_entries.find(args.at("entry_id").get<std::string>());
         if (found == m_library_entries.end()) throw std::runtime_error("Search the library again before using that entry.");
         name = found->second;
     } else if (args.at("query").get<std::string>().size() < 2) throw std::runtime_error("Use at least two characters to search the library.");
-    auto transfer = std::make_shared<LibraryTransfer>(); transfer->tool = tool; transfer->args = args;
+    auto transfer = std::make_shared<LibraryTransfer>(); transfer->tool = tool; transfer->args = args;transfer->folder=folder;
     if (tool != "search_library") {
         const auto temporary = std::string(wxFileName::CreateTempFileName("studio-assistant-").utf8_string());
         if (!temporary.empty()) {
@@ -193,8 +195,9 @@ std::optional<Json> Actions::poll_library()
     auto transfer = std::move(m_transfer);
     if (transfer->cancel) return Json{{"cancelled",true}};
     if (!transfer->error.empty()) throw std::runtime_error(transfer->error);
+    if(transfer->folder!=wxGetApp().app_config->get("sliced_library_folder"))throw std::runtime_error("The library folder changed while reading. Search the current library again before using those results.");
     if (transfer->tool == "search_library") {
-        m_library_entries.clear();
+        m_library_entries.clear();m_library_folder=transfer->folder;
         for (auto& entry : transfer->result.at("entries")) { m_library_entries[entry.at("entry_id").get<std::string>()] = entry.at("filename").get<std::string>(); entry.erase("filename"); }
         return transfer->result;
     }
@@ -210,6 +213,7 @@ std::optional<Json> Actions::poll_library()
 
 Json Actions::inspect()
 {
+    static const auto toolset=base64url(sha256(tool_definitions().dump()));
     auto& p = plater();
     const auto full = wxGetApp().preset_bundle->full_config();
     Json objects = Json::array(), plates = Json::array(), warnings = Json::array();
@@ -275,18 +279,19 @@ Json Actions::inspect()
         Json transform = Json::array();
         for (int row=0;row<4;++row) for (int col=0;col<4;++col) transform.push_back(matrix(row,col));
         geometry.push_back({{"id", volume->id().id}, {"mesh", reinterpret_cast<uintptr_t>(volume->mesh_ptr())}, {"transform", transform},
-            {"support", volume->supported_facets.timestamp()}, {"color", volume->mmu_segmentation_facets.timestamp()}, {"seam", volume->seam_facets.timestamp()}});
+            {"support", volume->supported_facets.timestamp()}, {"color", volume->mmu_segmentation_facets.timestamp()}, {"seam", volume->seam_facets.timestamp()}, {"fuzzy",volume->fuzzy_skin_facets.timestamp()}});
     }
     revision_data["geometry"] = geometry;
-    return {{"project", std::string(p.get_project_name().utf8_string())}, {"revision", base64url(sha256(revision_data.dump()))}, {"total_instances", total_instances},
+    return {{"project", std::string(p.get_project_name().utf8_string())}, {"revision", base64url(sha256(revision_data.dump()))}, {"assistant_toolset",toolset}, {"total_instances", total_instances},
         {"objects", objects}, {"plates", plates}, {"current_plate", list.get_curr_plate_index()+1}, {"settings", settings},
         {"warnings", warnings}, {"busy", p.is_background_process_slicing() || p.is_any_job_running() || p.is_background_process_update_scheduled()},
-        {"editable", !p.only_gcode_mode() && !p.is_gcode_3mf()}, {"selected_object_ids", selected}, {"selected_parts",selected_parts}, {"can_undo", p.can_undo()}, {"can_redo", p.can_redo()},
-        {"limitations", Json::array({"Physical filament colors/materials may differ from digital slots.", "Simple plane cuts, primitive parts/negative volumes and part removal are available. Arbitrary sculpting and face-level support painting are not automated.", "Warnings may be stale until resliced; absence of warnings does not prove printability."})}};
+        {"editable", !p.only_gcode_mode() && !p.is_gcode_3mf() && !p.is_assemble_undo_stack_active()}, {"assembly_view_active",p.is_assemble_undo_stack_active()}, {"selected_object_ids", selected}, {"selected_parts",selected_parts}, {"can_undo", p.can_undo()}, {"can_redo", p.can_redo()},
+        {"limitations", Json::array({"Physical filament colors/materials may differ from reported digital slots.", "Measured surface/brush painting, plane cuts, primitive/text additions, negative volumes, mesh booleans, simplification and part removal are available through the declared native tools. Advanced sculpting, conformal text and cut-connector setup still need native interactive editors.", "Warnings may be stale until resliced; absence of warnings does not prove printability."})}};
 }
 
 std::string Actions::library_source(const std::string& value)
 {
+    if(m_library_folder!=wxGetApp().app_config->get("sliced_library_folder"))throw std::runtime_error("The library folder changed. Search the current library before opening a source.");
     auto found = m_library_entries.find(value);
     if (found == m_library_entries.end()) throw std::runtime_error("Search the library again before opening that entry.");
     const auto root = std::filesystem::u8path(wxGetApp().app_config->get("sliced_library_folder"));
@@ -327,17 +332,26 @@ Json Actions::execute(const std::string& tool, const Json& args)
     if (tool == "inspect_settings") {
         const auto query = lower(args.at("query").get<std::string>());
         if (query.empty()) throw std::runtime_error("Specify a setting to search for.");
-        const auto& print = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        auto print = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        const auto scope=args.value("scope","global");const DynamicPrintConfig* overrides=nullptr;
+        if(scope=="plate")overrides=find_plate(p,args.at("plate"))->config();
+        else if(scope=="object" || scope=="part") {
+            const auto* object=find_object(p,args.at("object_id"));print.apply(object->config.get());overrides=&object->config.get();
+            if(scope=="part") {overrides=nullptr;for(const auto* part:object->volumes)if(std::to_string(part->id().id)==args.at("part_id").get<std::string>())overrides=&part->config.get();if(!overrides)throw std::runtime_error("That part is stale. Inspect again.");}
+        }else if(scope!="global")throw std::runtime_error("Unknown settings scope.");
+        if(overrides)print.apply(*overrides);
+        const PrintObjectConfig object_options;const PrintRegionConfig part_options;
         Json results = Json::array();
         for (const auto& key : print.keys()) {
             auto* def = print.def()->get(key);
             if (!def || def->is_code || def->readonly) continue;
             if (lower(key + " " + def->label + " " + def->category).find(query) == std::string::npos) continue;
+            Json scopes={"global","plate"};if(object_options.has(key)||part_options.has(key))scopes.push_back("object");if(part_options.has(key))scopes.push_back("part");
             results.push_back({{"key", key}, {"label", def->label}, {"description", def->tooltip}, {"value", print.opt_serialize(key)},
-                {"type", int(def->type)}, {"min", def->min}, {"max", def->max}, {"enum_values", def->enum_values}, {"category", def->category}});
+                {"type", int(def->type)}, {"min", def->min}, {"max", def->max}, {"enum_values", def->enum_values}, {"category", def->category},{"valid_scopes",scopes},{"overridden",overrides && overrides->has(key)}});
             if (results.size() >= 50) break;
         }
-        return {{"settings", results}, {"note", "These are global process values. Inspect object and plate overrides before editing."}};
+        return {{"settings", results},{"scope",scope}, {"note", "Effective process values for the supplied scope. Plate overrides apply only when its plate is specified; check the project's plate/object/part overrides too."}};
     }
     if (tool == "list_profiles") {
         const auto kind = args.at("kind").get<std::string>(), query = lower(args.at("query").get<std::string>());
@@ -352,11 +366,17 @@ Json Actions::execute(const std::string& tool, const Json& args)
         return {{"profiles", matches}, {"project_filaments", bundle.filament_presets}};
     }
     if (tool == "search_library" || tool == "inspect_library_source") return start_library(tool,args);
-    if (changes_project(tool)) editable(p);
+    if (changes_project(tool)) {
+        const bool replace_project=tool=="open_library_project" || (tool=="document" && args.value("action",std::string())=="open") || (tool=="load_model_file" && args.value("mode",std::string())=="project");
+        const bool export_slice=tool=="document" && args.value("action",std::string())=="export_sliced";
+        if(replace_project || export_slice){if(p.is_background_process_slicing() || p.is_any_job_running() || (export_slice && p.is_background_process_update_scheduled()))throw std::runtime_error("Wait for Studio's active operation before opening or exporting a file.");}
+        else editable(p);
+    }
     static const std::set<std::string> revision_required = {"set_settings", "use_profile", "arrange", "orient", "move_to_plate", "copies", "rename", "new_plate", "transform", "delete_selected", "add_library_model", "assign_part_filament", "split_parts", "set_filament_color", "plane_cut", "add_primitive", "delete_parts"};
-    if (revision_required.count(tool) && !args.contains("revision")) throw std::runtime_error("Inspect the project and provide its current revision before editing.");
+    if ((revision_required.count(tool) || workbench_changes_project(tool)) && !args.contains("revision")) throw std::runtime_error("Inspect the project and provide its current revision before editing.");
     if (args.contains("revision") && args.at("revision") != inspect().at("revision"))
         throw std::runtime_error("The project changed since inspection. Inspect again before applying this action.");
+    if (auto result=execute_workbench(tool,args)) return *result;
     if (tool == "orient" || tool == "move_to_plate" || tool == "transform" || tool == "delete_selected") {
         // Inspection reports Prepare's selection. Preview has its own canvas
         // and selection, so bind Prepare before acting on the inspected items.
@@ -397,8 +417,10 @@ Json Actions::execute(const std::string& tool, const Json& args)
             p.take_snapshot("Assistant: plane cut"); prepared.apply(*object);
         } else if (tool=="add_primitive") {
             const auto type=args.at("type").get<std::string>();
-            if (type!="model_part" && type!="negative") throw std::runtime_error("Choose printable model_part or negative.");
+            const std::map<std::string,ModelVolumeType> types={{"model_part",ModelVolumeType::MODEL_PART},{"negative",ModelVolumeType::NEGATIVE_VOLUME},{"modifier",ModelVolumeType::PARAMETER_MODIFIER},{"support_enforcer",ModelVolumeType::SUPPORT_ENFORCER},{"support_blocker",ModelVolumeType::SUPPORT_BLOCKER}};
+            if(!types.count(type))throw std::runtime_error("Choose a printable, negative, settings-modifier or support-modifier type.");
             auto prepared=prepare_primitive(*object,args.at("instance_id"),args.at("shape"),type=="negative",geometry_arg(args,"center_mm"),geometry_arg(args,"size_mm"),geometry_arg(args,"axis"));
+            prepared.type=types.at(type);
             const auto name=args.value("name",type=="negative"?std::string("Negative ")+args.at("shape").get<std::string>():args.at("shape").get<std::string>());
             if (name.empty() || name.size()>200) throw std::runtime_error("Use a short part name.");
             p.take_snapshot("Assistant: add primitive part");
@@ -438,7 +460,7 @@ Json Actions::execute(const std::string& tool, const Json& args)
             return inspect();
         }
         if (tool=="split_parts" && (parts.size()!=1 || !parts.front()->is_splittable()))
-            throw std::runtime_error("Choose one part containing disconnected pieces. A single connected surface cannot be separated into colors by this operation; use manual color painting for that case.");
+            throw std::runtime_error("Choose one part containing disconnected pieces. For a connected surface, inspect its measured surfaces and use color painting instead of splitting.");
         wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor); p.select_view_3D("3D");
         std::vector<ObjectVolumeID> items; for (auto* part : parts) items.push_back({object,part});
         p.sidebar().obj_list()->select_items(items); p.canvas3D()->zoom_to_selection();
@@ -506,7 +528,13 @@ Json Actions::execute(const std::string& tool, const Json& args)
                     throw std::runtime_error("That project filament slot does not exist.");
             }
         }
-        ModelObject* object = scope == "object" ? find_object(p, args.at("object_id")) : nullptr;
+        ModelObject* object = scope == "object" || scope=="part" ? find_object(p, args.at("object_id")) : nullptr;
+        ModelVolume* part=nullptr;
+        if(scope=="part") {
+            for(auto* volume:object->volumes)if(std::to_string(volume->id().id)==args.at("part_id").get<std::string>())part=volume;
+            if(!part || (!part->is_model_part() && !part->is_modifier()))throw std::runtime_error("Choose a printable or modifier part for region settings.");
+            const PrintRegionConfig region;for(const auto& key:changes.keys())if(!region.has(key))throw std::runtime_error("This setting is not read from a part: "+key+". Use object/global scope.");
+        }
         PartPlate* plate = scope == "plate" ? find_plate(p, args.at("plate")) : nullptr;
         if (scope != "global" && !object && !plate) throw std::runtime_error("Unknown settings scope.");
         if (object) validate_object_settings(changes);
@@ -514,13 +542,15 @@ Json Actions::execute(const std::string& tool, const Json& args)
         auto candidate = wxGetApp().preset_bundle->full_config();
         if (plate) candidate.apply(*plate->config());
         if (object) candidate.apply(object->config.get());
+        if(part)candidate.apply(part->config.get());
         const auto previous_validation = candidate.validate();
         candidate.apply(changes);
         const auto validation = candidate.validate();
         for (const auto& problem : validation) if (!previous_validation.count(problem.first) || previous_validation.at(problem.first) != problem.second)
             throw std::runtime_error("Studio rejected these settings: " + problem.second);
         p.take_snapshot("Assistant: change process settings");
-        if (object) {
+        if(part){part->config.apply(changes);p.sidebar().obj_list()->object_config_options_changed({object,part});}
+        else if (object) {
             object->config.apply(changes);
             p.sidebar().obj_list()->object_config_options_changed({object, nullptr});
             // Refresh settings and slicing without changed_object(), which

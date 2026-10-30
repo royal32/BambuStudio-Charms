@@ -81,9 +81,13 @@ private:
 };
 
 Json tool_definitions();
+Json workbench_tool_definitions();
+bool workbench_changes_project(const std::string& name);
+bool workbench_requires_confirmation(const std::string& name);
 std::string instructions();
 bool changes_project(const std::string& tool);
 bool requires_confirmation(const std::string& tool);
+bool requires_confirmation(const std::string& tool, const Json& arguments);
 struct SessionCallbacks {
     std::function<Json(const Json&)> respond;
     std::function<Json(const std::string&, const Json&)> tool;
