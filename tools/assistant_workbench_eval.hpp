@@ -140,6 +140,15 @@ inline Json verify(const State& state,const Model& initial_model,const std::stri
     }
     report["passed"]=passed;return report;
 }
+inline void save_geometry_fixture(State& state,const std::filesystem::path& path)
+{
+    // Fixture-only Print options have no GUI preset metadata/enum maps for
+    // project-settings serialization. Export editable geometry separately;
+    // measured settings/results remain in report.json, not a fake print profile.
+    DynamicPrintConfig geometry_settings;
+    StoreParams saved;const auto target=path.string();saved.path=target.c_str();saved.model=&state.model;saved.config=&geometry_settings;
+    if(!store_bbs_3mf(saved))throw std::runtime_error("Could not export the synthetic geometry fixture.");
+}
 inline Json run(Client& client,const Json& account,const std::string& model_name,const std::string& scenario,const std::filesystem::path& root)
 {
     State state;state.output=root;std::filesystem::create_directories(root);std::filesystem::permissions(root,std::filesystem::perms::owner_all);set_resources_dir(PROJECT_RESOURCES);set_data_dir(root.string());set_temporary_dir(root.string());
@@ -157,8 +166,8 @@ inline Json run(Client& client,const Json& account,const std::string& model_name
     report["scenario"]=scenario;report["model"]=model_name;report["tool_calls"]=calls;report["elapsed_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();report["prompt"]=prompt;report["before"]=before;report["after"]=state.snapshot();
     const auto checked=verify(state,initial_model,scenario,report.value("completed",false));for(const auto& item:checked.items())report[item.key()]=item.value();const bool passed=checked.at("passed");report["fixture_limitations"]=state.fixture_limitations;report["comparison_eligible"]=state.fixture_limitations.empty();report["evaluation_status"]=passed?"native_goals_verified":state.fixture_limitations.empty()?"failed":"inconclusive_fixture_limitation";
     auto compact=[](Json& value,auto&& self)->void{if(value.is_string() && value.get_ref<const std::string&>().rfind("data:image/",0)==0)value="[native view saved in the PNG artifacts]";else if(value.is_structured())for(auto& child:value)self(child,self);};compact(history,compact);
+    save_geometry_fixture(state,root/"Result.3mf");report["artifact_geometry_only"]=true;
     report["passed"]=passed;std::ofstream(root/"report.json")<<report.dump(2)<<'\n';std::ofstream(root/"history.json")<<history.dump(2)<<'\n';
-    StoreParams saved;const auto target=(root/"Result.3mf").string();saved.path=target.c_str();saved.model=&state.model;saved.config=&state.config;store_bbs_3mf(saved);
     return {{"scenario",scenario},{"model",model_name},{"passed",passed},{"completed",report.at("completed")},{"tool_calls",calls},{"elapsed_seconds",report.at("elapsed_seconds")},{"report",(root/"report.json").string()}};
 }
 }

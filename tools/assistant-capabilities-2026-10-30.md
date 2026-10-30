@@ -145,6 +145,27 @@ separate, differently built Apple-signed executable successfully fetched the
 real model catalog without another authorization prompt. This verifies real
 cross-build access, in addition to the synthetic regressions.
 
+Two real model trials used the same disposable loop-to-hole task. Luna Max
+passed the measured native goals in 87.8 seconds/12 tool calls; Sol High passed
+in 44.9 seconds/9 calls. Both preserved the 20×30×3 mm body and placement and
+produced the 2 mm hole verified at three depths, with no fixture-tool limitation.
+These single runs do not establish overall comparative reliability.
+
+After Luna's completed verification, an optional fixture-project export crashed
+while serializing generic default enum options. That was a diagnostic-harness
+failure, not a successful end-to-end process exit. The corrected harness exports
+geometry separately from its fixture-only print settings and now checks that
+export in all three scripted workflows. Sol's subsequent run exited successfully
+and produced its geometry artifact. No additional Luna request was made merely
+to repeat its already-recorded geometry result. The model-catalog diagnostic was
+also corrected to report the client's actual model-array shape.
+
+Finally, the installed Apple-signed app was reopened normally, fetched its
+models without another prompt, and completed a read-only Luna request in its
+actual assistant window: it correctly reported the current empty plate and
+left the project unchanged. This is an in-app connection/context check, not
+coverage of every mutating GUI binding.
+
 The Intel test machine's signed/audited review is staged at
 `~/Downloads/Charms-Assistant-Capabilities-20261030/BambuStudio.app`. Its executable
 is hash-checked against the local Intel artifact. The working Applications app

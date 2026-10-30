@@ -34,6 +34,7 @@ int main()
         state.execute("slice_layer_view",{{"print_z_mm",1.5}});
         reports.push_back({{"scenario",scenario},{"verification",report}});
         std::cout<<scenario<<": "<<report.dump()<<'\n';assert(report.at("passed").get<bool>());
+        save_geometry_fixture(state,state.output/"Result.3mf");assert(std::filesystem::file_size(state.output/"Result.3mf")>0);
     }
     std::ofstream(std::filesystem::path(assistant_test_tmp())/"scripted-summary.json")<<reports.dump(2)<<'\n';
     std::cout<<"Scripted native workbench fixture driver and outcome checks passed; no real-model or GUI trial was performed.\n";

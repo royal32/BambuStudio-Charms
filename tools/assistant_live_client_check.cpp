@@ -48,7 +48,7 @@ int main(int argc,char** argv){
         callbacks.delete_secret=[](const std::string&){return false;};
         Client client(host,callbacks,std::string(argv[1])+"/assistant/credentials.lock");std::atomic<bool> canceled{false};const auto result=client.models(account,canceled);
         if(evaluate){const auto report=CharmsWorkbenchEval::run(client,account,argv[5],argv[3],std::filesystem::absolute(argv[4]));std::cout<<report.dump()<<"\n";return report.at("passed").get<bool>()?0:3;}
-        Json names=Json::array();if(result.contains("data"))for(const auto& model:result.at("data"))if(model.is_object()&&model.contains("id"))names.push_back(model.at("id"));
+        Json names=Json::array();for(const auto& model:result)names.push_back(model.at("slug"));
         std::cout<<Json({{"connection","passed"},{"models",names}}).dump()<<"\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<"\n";return 1;}
 #else
