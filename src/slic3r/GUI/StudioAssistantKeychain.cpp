@@ -98,7 +98,8 @@ std::string executable_path() {
     if (_NSGetExecutablePath(value.data(),&size)!=0) throw std::runtime_error("Studio's credential helper could not be located.");
     value.resize(strlen(value.c_str())); return value;
 }
-Json credential_process(const Json& input) {
+Json credential_process(const Json& input,const std::function<bool()>& cancelled={}) {
+    if(cancelled && cancelled())throw std::runtime_error("Keychain authorization canceled.");
     const auto packet=input.dump()+"\n";
     if (packet.size()>message_limit) throw std::runtime_error("The saved ChatGPT connection is too large.");
     struct Pipe {
@@ -137,9 +138,13 @@ Json credential_process(const Json& input) {
     to_child.close(0); from_child.close(1);
     fcntl(to_child.fd[1],F_SETNOSIGPIPE,1);
     fcntl(to_child.fd[1],F_SETFL,fcntl(to_child.fd[1],F_GETFL)|O_NONBLOCK);
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(input.value("interaction",false)?180:10);
+    // Explicit approval may arrive after switching devices or reading an alert.
+    // Keep that single user-requested dialog alive; background access still
+    // fails promptly and never opens authorization UI.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(input.value("interaction",false)?900:10);
     size_t written=0;
     while (written<packet.size()) {
+        if(cancelled && cancelled())throw std::runtime_error("Keychain authorization canceled.");
         if (std::chrono::steady_clock::now()>=deadline) throw std::runtime_error("Studio's credential helper did not accept its request in time.");
         const auto count=write(to_child.fd[1],packet.data()+written,packet.size()-written);
         if (count<0 && errno==EINTR) continue;
@@ -150,6 +155,7 @@ Json credential_process(const Json& input) {
     to_child.close(1);
     std::string response;
     for (;;) {
+        if(cancelled && cancelled())throw std::runtime_error("Keychain authorization canceled.");
         if (std::chrono::steady_clock::now()>=deadline) throw std::runtime_error("Keychain did not respond. No further authorization requests will be opened automatically.");
         pollfd descriptor{from_child.fd[0],POLLIN|POLLHUP,0};
         const auto ready=poll(&descriptor,1,100);
@@ -212,8 +218,9 @@ void add_signed_secret(const std::string& service,const Json& value,SecKeychainR
     else check(status);
 }
 }
-Json keychain_load(const std::string& service,bool interaction,SecKeychainRef keychain) {
-    if (!keychain && !in_credential_child) return credential_process({{"operation","load"},{"service",service},{"interaction",interaction}});
+Json keychain_load(const std::string& service,bool interaction,SecKeychainRef keychain,const std::function<bool()>& cancelled) {
+    if(cancelled && cancelled())throw std::runtime_error("Keychain authorization canceled.");
+    if (!keychain && !in_credential_child) return credential_process({{"operation","load"},{"service",service},{"interaction",interaction}},cancelled);
     if(auto current=read_secret(stable_service(service),interaction,keychain))return *current;
     auto legacy=read_secret(service,interaction,keychain);if(!legacy)return Json::object();
     // Migrate only after an authorized read. Keep the original encrypted item

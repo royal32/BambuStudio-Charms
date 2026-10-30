@@ -9,6 +9,14 @@ using namespace Slic3r::GUI::Assistant;
 #endif
 int main(int argc,char** argv) {
     if (argc==2 && std::string(argv[1])=="--internal-charms-keychain") return keychain_child_main();
+    if(argc==2 && std::string(argv[1])=="--ipc-cancel-check") {
+        Boolean before=false,after=false;if(SecKeychainGetUserInteractionAllowed(&before)!=errSecSuccess)return 68;
+        // Cancel before spawning, before writing, and while awaiting a reply.
+        // Invalid service names can never reach a real credential or OS prompt.
+        for(int threshold:{1,3,4}){int checks=0;bool canceled=false;try{keychain_load("not-an-assistant-service",true,nullptr,[&]{return ++checks>=threshold;});}catch(const std::exception& error){canceled=std::string(error.what())=="Keychain authorization canceled.";}if(!canceled)return 72;}
+        if(SecKeychainGetUserInteractionAllowed(&after)!=errSecSuccess || before!=after)return 71;
+        return 0;
+    }
     if (argc==2 && (std::string(argv[1])=="--ipc-check" || std::string(argv[1])=="--ipc-check-reaped")) {
         if (std::string(argv[1])=="--ipc-check-reaped") signal(SIGCHLD,SIG_IGN);
         Boolean before=false,after=false;

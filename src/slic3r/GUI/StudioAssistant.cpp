@@ -234,7 +234,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     callbacks.load_secret=[service_prefix](const std::string& client) { return keychain_load(service_prefix+base64url(sha256(client))); };
     callbacks.save_secret=[service_prefix](const std::string& client,const Json& data) { keychain_save(service_prefix+base64url(sha256(client)),data); };
     callbacks.delete_secret=[service_prefix](const std::string& client) { return keychain_delete(service_prefix+base64url(sha256(client))); };
-    callbacks.authorize_secret=[service_prefix](const std::string& client) { return keychain_load(service_prefix+base64url(sha256(client)),true); };
+    callbacks.authorize_secret=[service_prefix](const std::string& client,std::atomic<bool>& cancel) { return keychain_load(service_prefix+base64url(sha256(client)),true,nullptr,[&cancel]{return cancel.load();}); };
 #else
     callbacks.load_secret = [service_prefix](const std::string& client) {
         auto store = wxSecretStore::GetDefault(); wxString user; wxSecretValue secret;

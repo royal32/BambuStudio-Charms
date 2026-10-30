@@ -120,6 +120,15 @@ is preserved at `build/arm64/Installed-Backup-20261030/BambuStudio.app`. Quit th
 already-running older review instance and reopen Applications to load the new
 64-tool build. The one-time legacy credential approval remains pending.
 
+Follow-up: a late approval reply arrived after the original three-minute
+request had timed out; a fresh three-minute request also expired. The explicit
+approval window is now fifteen minutes and Stop interrupts/reaps its private
+helper. Background access remains noninteractive with its ten-second bound.
+Disposable credential/signature/cancellation checks and the client contract
+suite pass. This follow-up is staged in the review builds; the Mac locked again
+before Studio could be quit and its installed executable updated. Real account
+access across builds remains unverified until a fresh protected approval.
+
 The Intel test machine's signed/audited review is staged at
 `~/Downloads/Charms-Assistant-Capabilities-20261030/BambuStudio.app`. Its executable
 is hash-checked against the local Intel artifact. The working Applications app

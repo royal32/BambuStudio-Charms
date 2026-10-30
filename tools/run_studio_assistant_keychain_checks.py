@@ -33,6 +33,7 @@ def main():
     signing.sign(first,'org.charmsstudio.keychain-test'); signing.sign(second,'org.charmsstudio.keychain-test')
     run([first,'--ipc-check']) # Signed self-child, anonymous pipes, service validation.
     run([first,'--ipc-check-reaped']) # Host SIGCHLD handling cannot break a valid response.
+    run([first,'--ipc-cancel-check']) # Explicit authorization can stop without leaving a child/dialog.
     run([first,'--internal-charms-keychain'],77) # No trusted parent/pipes: no access.
     shutil.copy2(second,foreign)
     run(['/usr/bin/codesign','--force','--sign','-',foreign])

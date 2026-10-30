@@ -33,7 +33,7 @@ struct Callbacks {
     std::function<void(const std::string&, const Json&)> save_secret;
     std::function<bool(const std::string&)> delete_secret;
     // Optional, explicit user action. Automatic loads/saves must not show OS UI.
-    std::function<Json(const std::string&)> authorize_secret;
+    std::function<Json(const std::string&, std::atomic<bool>&)> authorize_secret;
 };
 
 std::string random_string(size_t bytes = 32);

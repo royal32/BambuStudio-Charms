@@ -553,7 +553,7 @@ void Client::authorize_credentials(const Json& registration,std::atomic<bool>& c
     if (!m_callbacks.authorize_secret) throw std::runtime_error("Keychain authorization is not needed on this platform.");
     const auto client=registration.value("client_id","");
     CredentialLock guard(m_credential_lock,cancel);
-    auto saved=m_callbacks.authorize_secret(client);
+    auto saved=m_callbacks.authorize_secret(client,cancel);
     check_cancel(cancel);
     if (client.empty() || saved.value("access_token","").empty() || saved.value("subject","")!=registration.value("subject",""))
         throw RequestError::sign_in("No saved ChatGPT connection was found for this account. Sign in to ChatGPT again.");

@@ -118,7 +118,8 @@ int main()
         int automatic_reads=0,explicit_authorizations=0;
         Callbacks callbacks;
         callbacks.load_secret=[&](const std::string&) -> Json { ++automatic_reads; throw std::runtime_error("Keychain authorization needed"); };
-        callbacks.authorize_secret=[&](const std::string& client) {
+        callbacks.authorize_secret=[&](const std::string& client,std::atomic<bool>& cancellation) {
+            assert(!cancellation.load());
             ++explicit_authorizations;
             return Json{{"subject",client},{"access_token","synthetic"},{"expires_at",INT64_C(4102444800)}};
         };
