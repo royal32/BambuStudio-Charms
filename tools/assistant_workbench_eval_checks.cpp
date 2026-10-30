@@ -9,7 +9,7 @@ using namespace CharmsWorkbenchEval;
 int main()
 {
     configure_assistant_test_paths();Json reports=Json::array();
-    for(const std::string scenario:{"supports","loop","keychain"}) {
+    for(const std::string scenario:{"supports","loop","keychain","challenge"}) {
         State state;state.output=std::filesystem::path(assistant_test_tmp())/scenario;
         std::filesystem::create_directories(state.output);const auto prompt=prepare_fixture(state,scenario);const Model before=state.model;
         auto mutate=[&](const std::string& name,Json args){args["revision"]=state.revision();return state.execute(name,args);};
@@ -19,6 +19,15 @@ int main()
             Json surfaces=Json::array();for(const auto& s:survey.at("surfaces"))if(s.at("area_mm2").get<double>()>100)surfaces.push_back(s.at("surface_id"));assert(!surfaces.empty());
             state.execute("surface_view",{{"surface_ids",surfaces},{"direction","bottom"}});
             mutate("paint_surfaces",{{"surface_ids",surfaces},{"layer","support"},{"action","enforce"}});
+            mutate("set_settings",{{"scope","global"},{"settings",Json::array({{{"key","enable_support"},{"value","1"}},{{"key","support_type"},{"value","normal(manual)"}},{{"key","support_on_build_plate_only"},{"value","1"}}})}});
+        }else if(scenario=="challenge") {
+            auto* e=state.model.objects[0];auto* i=e->instances[0];const auto matrix=i->get_matrix();const auto oid=std::to_string(e->id().id),iid=std::to_string(i->id().id);
+            state.execute("part_map_view",{{"object_id",oid},{"instance_id",iid},{"direction","top"}});
+            mutate("plane_cut",{{"object_id",oid},{"instance_id",iid},{"part_ids",{std::to_string(e->volumes[0]->id().id)}},{"point_mm",vec(matrix*Vec3d(0,30,0))},{"normal",vec(matrix.linear()*Vec3d::UnitY())},{"keep","negative"}});
+            mutate("add_primitive",{{"object_id",oid},{"instance_id",iid},{"shape","cylinder"},{"type","negative"},{"name","Hole"},{"center_mm",vec(matrix*Vec3d(10,27,1.5))},{"size_mm",{2,2,5}},{"axis",{0,0,1}}});
+            auto* stand=state.model.objects[1];const auto sid=std::to_string(stand->id().id),siid=std::to_string(stand->instances[0]->id().id);
+            const auto surfaces=state.execute("inspect_surfaces",{{"object_id",sid},{"instance_id",siid},{"part_ids",{std::to_string(stand->volumes[0]->id().id)}},{"filter","downward"}});Json ids=Json::array();for(const auto& s:surfaces.at("surfaces"))if(s.at("area_mm2").get<double>()>100)ids.push_back(s.at("surface_id"));assert(!ids.empty());
+            mutate("paint_surfaces",{{"surface_ids",ids},{"layer","support"},{"action","enforce"}});
             mutate("set_settings",{{"scope","global"},{"settings",Json::array({{{"key","enable_support"},{"value","1"}},{{"key","support_type"},{"value","normal(manual)"}},{{"key","support_on_build_plate_only"},{"value","1"}}})}});
         }else if(scenario=="loop") {
             auto* object=state.model.objects.front();auto* instance=object->instances.front();const auto oid=std::to_string(object->id().id),iid=std::to_string(instance->id().id);
@@ -34,6 +43,11 @@ int main()
         state.execute("slice_layer_view",{{"print_z_mm",1.5}});
         reports.push_back({{"scenario",scenario},{"verification",report}});
         std::cout<<scenario<<": "<<report.dump()<<'\n';assert(report.at("passed").get<bool>());
+        if(scenario=="challenge") {
+            auto* cutter=state.model.objects[0]->volumes.back();assert(cutter->is_negative_volume());cutter->set_type(ModelVolumeType::MODEL_PART);assert(!verify(state,before,scenario,true).at("passed").get<bool>());cutter->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+            state.config.set_key_value("enable_support",new ConfigOptionBool(false));assert(!verify(state,before,scenario,true).at("passed").get<bool>());state.config.set_key_value("enable_support",new ConfigOptionBool(true));assert(verify(state,before,scenario,true).at("passed").get<bool>());
+            DynamicPrintConfig scoped;scoped.option("enable_support",true)->deserialize("1");scoped.option("support_type",true)->deserialize("normal(manual)");state.model.objects[1]->config.apply(scoped);state.config.set_key_value("enable_support",new ConfigOptionBool(false));state.execute("slice",Json::object());assert(verify(state,before,scenario,true).at("passed").get<bool>());assert(state.snapshot().at("objects").at(1).at("overrides").at("enable_support")=="1");
+        }
         save_geometry_fixture(state,state.output/"Result.3mf");assert(std::filesystem::file_size(state.output/"Result.3mf")>0);
     }
     std::ofstream(std::filesystem::path(assistant_test_tmp())/"scripted-summary.json")<<reports.dump(2)<<'\n';

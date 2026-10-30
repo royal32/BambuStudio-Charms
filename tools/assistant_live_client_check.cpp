@@ -16,7 +16,9 @@ int main(int argc,char** argv){
 #ifdef __APPLE__
     if(argc==2 && std::strcmp(argv[1],"--internal-charms-keychain")==0)return keychain_child_main();
     try {
-        const bool evaluate=argc==6 && std::strcmp(argv[2],"--evaluate")==0;
+        const bool evaluate=(argc==6 || argc==7) && std::strcmp(argv[2],"--evaluate")==0;
+        const std::string effort=evaluate&&argc==7?argv[6]:"";
+        if(!effort.empty()&&effort!="medium"&&effort!="high"&&effort!="max")throw std::runtime_error("Use an explicit medium, high, or max benchmark effort.");
         if(argc!=2 && !evaluate && !(argc==3 && (std::strcmp(argv[2],"--inspect-keychain-access")==0 || std::strcmp(argv[2],"--inspect-signed-storage")==0)))throw std::runtime_error("Usage: assistant-client-check PROFILE_DIRECTORY [--inspect-keychain-access|--inspect-signed-storage|--evaluate CASE OUTPUT_DIRECTORY MODEL]");
         set_data_dir(argv[1]);AppConfig config;const auto error=config.load();if(!error.empty())throw std::runtime_error("Could not load the selected Studio profile.");
         const auto registrations=Json::parse(config.get("studio_assistant_accounts"));Json account;
@@ -47,7 +49,7 @@ int main(int argc,char** argv){
         callbacks.save_secret=[prefix](const std::string& id,const Json& data){keychain_save(prefix+base64url(sha256(id)),data);};
         callbacks.delete_secret=[](const std::string&){return false;};
         Client client(host,callbacks,std::string(argv[1])+"/assistant/credentials.lock");std::atomic<bool> canceled{false};const auto result=client.models(account,canceled);
-        if(evaluate){const auto report=CharmsWorkbenchEval::run(client,account,argv[5],argv[3],std::filesystem::absolute(argv[4]));std::cout<<report.dump()<<"\n";return report.at("passed").get<bool>()?0:3;}
+        if(evaluate){bool available=false;for(const auto& item:result)available|=item.at("slug")==argv[5];if(!available)throw std::runtime_error("Requested benchmark model is unavailable; no model was substituted.");const auto report=CharmsWorkbenchEval::run(client,account,argv[5],argv[3],std::filesystem::absolute(argv[4]),effort);std::cout<<report.dump()<<"\n";return report.at("passed").get<bool>()?0:3;}
         Json names=Json::array();for(const auto& model:result)names.push_back(model.at("slug"));
         std::cout<<Json({{"connection","passed"},{"models",names}}).dump()<<"\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<"\n";return 1;}
