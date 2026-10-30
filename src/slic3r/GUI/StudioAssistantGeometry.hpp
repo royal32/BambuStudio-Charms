@@ -80,9 +80,18 @@ inline PreparedPlaneCut prepare_plane_cut(ModelObject& object,const std::string&
         part.removed=keep_positive?bounds.max.z()<=0:bounds.min.z()>=0;
         if (part.removed) { --remaining; result.removed_mm3+=before; }
         else {
+            // Equivalent plane origins can leave nominally coplanar vertices
+            // a few floating-point ulps above/below zero. The cutter then
+            // classifies shared edges inconsistently and can leave an open cap.
+            // Cut-space distances are physical mm: this 10 nm tolerance is far
+            // below printable detail and does not depend on the chosen origin.
+            for(auto& vertex:transformed.its.vertices)
+                if(std::abs(vertex.z())<1e-5)vertex.z()=0;
             indexed_triangle_set kept;
             cut_mesh(transformed.its,0,keep_positive?&kept:nullptr,keep_positive?nullptr:&kept);
             its_compactify_vertices(kept);
+            if(its_num_open_edges(kept)>its_num_open_edges(transformed.its))
+                throw std::runtime_error("The cut could not be capped safely. Nothing was changed.");
             TriangleMesh mesh(std::move(kept));
             if (mesh.empty()) throw std::runtime_error("The cut did not produce a usable piece. Nothing was changed.");
             result.removed_mm3+=std::max(0.,before-std::abs(double(its_volume(mesh.its))));

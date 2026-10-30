@@ -276,11 +276,17 @@ int main()
     assert(logged.find("private-opaque-state")==std::string::npos);
     session.trace={};
 
-    // The Luna option is explicitly Max, while Sol retains the existing default.
+    // Model labels, requests and logs use the same explicit effort policy.
     session.respond=[&](const Json& request) {
         assert(request.at("reasoning").at("effort")=="max"); return final;
     };
     run_turn(Json::array(),Json::object(),"test","gpt-6-luna",session);
+    session.respond=[&](const Json& request) {
+        assert(request.at("reasoning").at("effort")=="high"); return final;
+    };
+    session.trace=[&](const std::string& event,const Json& data){if(event=="turn_start")assert(data.at("reasoning_effort")=="high");};
+    run_turn(Json::array(),Json::object(),"test","gpt-6.1-terra",session);
+    session.trace={};
     session.respond=[&](const Json& request) {
         assert(!request.contains("reasoning")); return final;
     };

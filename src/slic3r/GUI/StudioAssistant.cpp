@@ -598,11 +598,19 @@ void AssistantWindow::poll() {
             m_retry_models=false;
             m_model_catalog = event.at("models"); m_models->Clear(); int selected = 0;
             const auto saved = wxGetApp().app_config->get("studio_assistant_model");
+            // Adopt the requested default once on upgrade, then preserve any
+            // later explicit model selection. Defer adoption if unavailable.
+            const bool adopt_default=wxGetApp().app_config->get("studio_assistant_default_revision")!="terra-high-v1";
+            int terra=-1,saved_index=-1;
             for (size_t i=0;i<m_model_catalog.size();++i) {
                 const auto slug=m_model_catalog[i].at("slug").get<std::string>();
-                m_models->Append(wxString::FromUTF8(m_model_catalog[i].at("name").get<std::string>()+(slug=="gpt-6-luna"?" (Max)":"")));
-                if (m_model_catalog[i].at("slug") == saved) selected = int(i);
+                const auto effort=model_reasoning_effort(slug);
+                m_models->Append(wxString::FromUTF8(m_model_catalog[i].at("name").get<std::string>()+(effort=="max"?" (Max)":effort=="high"?" (High)":"")));
+                if(slug=="gpt-6.1-terra")terra=int(i);
+                if(slug==saved)saved_index=int(i);
             }
+            selected=adopt_default&&terra>=0?terra:saved_index>=0?saved_index:terra>=0?terra:0;
+            if(adopt_default&&terra>=0){wxGetApp().app_config->set("studio_assistant_model","gpt-6.1-terra");wxGetApp().app_config->set("studio_assistant_default_revision","terra-high-v1");wxGetApp().app_config->save();}
             if (!m_model_catalog.empty()) m_models->SetSelection(selected);
             status("Ready. Requests use the connected ChatGPT plan; Manage usage controls its allowance.");
         } else if (type == "done") {

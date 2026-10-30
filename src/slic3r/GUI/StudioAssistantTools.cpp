@@ -166,6 +166,12 @@ void validate(const Json& value, const Json& schema)
     }
 }
 }
+std::string model_reasoning_effort(const std::string& model)
+{
+    if(model=="gpt-6.1-terra")return "high";
+    if(model=="gpt-6-luna")return "max";
+    return "";
+}
 static Json run_turn_impl(Json input, const Json& context, const std::string& message, const std::string& model, const SessionCallbacks& callbacks)
 {
     auto check = [&] { if (callbacks.cancelled()) throw std::runtime_error("Stopped. Changes already applied can be undone."); };
@@ -180,9 +186,8 @@ static Json run_turn_impl(Json input, const Json& context, const std::string& me
         check();
         Json request={{"model",model},{"instructions",instructions()},{"input",input},{"tools",definitions},
             {"store",false},{"stream",true},{"parallel_tool_calls",false}};
-        // Luna is offered as a deliberate Max-effort option. Other models keep
-        // their existing defaults; switching models never silently upgrades Sol.
-        if (model == "gpt-6-luna") request["reasoning"]={{"effort","max"}};
+        const auto effort=model_reasoning_effort(model);
+        if(!effort.empty())request["reasoning"]={{"effort",effort}};
         trace(callbacks,"model_request",{{"step",step+1}});
         const auto response=callbacks.respond(request);
         trace_response(callbacks,response,step+1);
@@ -265,7 +270,8 @@ static Json run_turn_impl(Json input, const Json& context, const std::string& me
 }
 Json run_turn(Json history,const Json& context,const std::string& message,const std::string& model,const SessionCallbacks& callbacks)
 {
-    trace(callbacks,"turn_start",{{"model",model},{"reasoning_effort",model=="gpt-6-luna"?"max":"default"},
+    const auto effort=model_reasoning_effort(model);
+    trace(callbacks,"turn_start",{{"model",model},{"reasoning_effort",effort.empty()?"default":effort},
         {"history_items",history.size()},{"message",message},{"context",context},{"instructions",instructions()}});
     try {
         auto result=run_turn_impl(std::move(history),context,message,model,callbacks);

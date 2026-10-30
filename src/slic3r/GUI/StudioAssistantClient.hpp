@@ -85,6 +85,7 @@ Json workbench_tool_definitions();
 bool workbench_changes_project(const std::string& name);
 bool workbench_requires_confirmation(const std::string& name);
 std::string instructions();
+std::string model_reasoning_effort(const std::string& model);
 bool changes_project(const std::string& tool);
 bool requires_confirmation(const std::string& tool);
 bool requires_confirmation(const std::string& tool, const Json& arguments);

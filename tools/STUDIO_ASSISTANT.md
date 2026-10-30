@@ -3,8 +3,10 @@
 Click the **sparkle button** beside the slicing controls, or open
 **Help → Studio assistant…**. Choose **Continue with ChatGPT**, finish the
 browser sign-in, and authorize ChatGPT plan usage for **Charms Studio Assistant**.
-The model menu lists the models available to that account. **GPT-6 Luna (Max)**
-explicitly uses maximum reasoning effort; other models retain their defaults.
+The model menu lists the models available to that account. **GPT-6.1 Terra (High)**
+is the default and explicitly sends High reasoning effort. The upgrade adopts it
+once when available, then preserves later manual model choices. **GPT-6 Luna
+(Max)** explicitly uses maximum effort; other models retain their defaults.
 The **⋯** menu contains account selection, sign-in/out, **New conversation**,
 **Open conversation logs…**,
 and the option to confirm every edit. **Manage usage** in that menu opens

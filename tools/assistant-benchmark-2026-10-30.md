@@ -120,10 +120,20 @@ python3 tools/run_studio_assistant_model_checks.py \
   --check-name assistant-cut-tangent-checks
 ```
 
-The diagnostic reports both outcomes as JSON; it intentionally returns normally
-so either observation can be inspected. `all_passed: false` is the reproduced
-defect, not a passing regression claim. Output is recorded in
+The original diagnostic reported `all_passed: false`, reproducing the defect.
+After the subsequent fix it is an enforcing regression: both valid descriptions
+must succeed and failure returns nonzero. It also records raw unsnapped/snapped
+cutter variants to show the original open-cap failure. Output is recorded in
 `build/arm64/assistant-cut-tangent-checks/results.log`.
+
+## Subsequent fix and default
+
+After this benchmark, the user selected Terra High as the app default. The
+native cut helper now snaps near-zero cut-space distances to the plane at a
+10 nm tolerance and rejects cuts introducing open edges. The regression covers
+both equivalent origins, scaled normals, both retained sides, closed caps,
+correct volumes and preserved transforms. ARM checks and the actual macOS 12.6
+Intel Mac checks pass. This later fix does not change the benchmark scores.
 
 Two repetitions of one task are a practical spot check, not an estimate of
 general model reliability. Request timing includes variable service/network

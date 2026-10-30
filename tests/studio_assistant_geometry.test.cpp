@@ -24,6 +24,18 @@ int main(int argc,char** argv) {
     auto xy=[](double x,double y){return Point(scale_(x),scale_(y));};
     ExPolygon outline(Polygon({xy(0,0),xy(20,0),xy(20,30),xy(14,30),xy(14,36),xy(6,36),xy(6,30),xy(0,30)}));
     outline.holes.push_back(Polygon({xy(8,31),xy(8,34),xy(12,34),xy(12,31)}));
+    // The same physical plane must cut/cap identically when its origin moves
+    // tangentially or its normal is rescaled. This previously left an open cap
+    // for the valid center point chosen by the assistant on a rotated model.
+    for(const auto& point:std::vector<Vec3d>{{35,85.98076211353316,0},{43.66025403784438,90.98076211353316,1.5}})
+    for(double scale:{.1,1.,7.})for(bool keep_positive:{false,true}) {
+        Model regression;auto* e=regression.add_object("Rotated loop","",TriangleMesh(slices_to_mesh({{outline}},0,3,3)));auto* i=e->add_instance();i->set_rotation(Vec3d(0,0,PI/6));i->set_offset(Vec3d(50,60,0));auto* p=e->volumes[0];const auto pose=i->get_matrix();
+        auto cut=prepare_plane_cut(*e,std::to_string(i->id().id),{std::to_string(p->id().id)},point,scale*Vec3d(-.5,.8660254037844386,0),keep_positive);cut.apply(*e);
+        assert(its_num_open_edges(p->mesh().its)==0);assert(i->get_matrix().matrix().isApprox(pose.matrix(),1e-12));
+        const auto size=p->mesh().transformed_bounding_box(p->get_matrix()).size();const Vec3d wanted=keep_positive?Vec3d(8,6,3):Vec3d(20,30,3);assert((size-wanted).cwiseAbs().maxCoeff()<.002);
+        assert(std::abs(std::abs(its_volume(p->mesh().its))-(keep_positive?108.:1800.))<.02);
+    }
+    std::cout<<"Equivalent rotated cut planes, scaled normals, both retained sides, closed caps and exact volumes passed.\n";
     Model model;auto* object=model.add_object("Earring with a loop","",TriangleMesh(slices_to_mesh({{outline}},0,3,3)));
     auto* instance=object->add_instance();instance->set_offset(Vec3d(60,60,0));
     const auto instance_id=std::to_string(instance->id().id);
