@@ -28,17 +28,28 @@ int main(int argc,char** argv) {
     if (service.rfind("charms-keychain-test/",0)!=0 || path.find("keychain-native-checks")==std::string::npos) return 64;
     SecKeychainRef keychain=nullptr;
     constexpr const char* password="synthetic-test-keychain-only";
-    auto status=operation=="create"?SecKeychainCreate(path.c_str(),strlen(password),password,false,nullptr,&keychain):SecKeychainOpen(path.c_str(),&keychain);
+    auto status=(operation=="create" || operation=="create_legacy")?SecKeychainCreate(path.c_str(),strlen(password),password,false,nullptr,&keychain):SecKeychainOpen(path.c_str(),&keychain);
     if (status!=errSecSuccess) return 65;
     try {
         if (operation=="create") keychain_save(service,{{"access_token","synthetic-test-value"},{"generation",KEYCHAIN_TEST_GENERATION}},keychain);
+        else if(operation=="create_legacy") {
+            const auto value=Json({{"access_token","synthetic-test-value"},{"generation",0}}).dump();
+            status=SecKeychainAddGenericPassword(keychain,UInt32(service.size()),service.c_str(),7,"ChatGPT",UInt32(value.size()),value.data(),nullptr);
+        }
+        else if(operation=="versions") {
+            for(const auto& name:{service,service+"/signed-v2"})if(SecKeychainFindGenericPassword(keychain,UInt32(name.size()),name.c_str(),7,"ChatGPT",nullptr,nullptr,nullptr)!=errSecSuccess)return 72;
+        }
+        else if(operation=="change_legacy") {
+            SecKeychainItemRef item=nullptr;status=SecKeychainFindGenericPassword(keychain,UInt32(service.size()),service.c_str(),7,"ChatGPT",nullptr,nullptr,&item);
+            if(status==errSecSuccess){const auto value=Json({{"access_token","stale-legacy-test-value"}}).dump();status=SecKeychainItemModifyAttributesAndData(item,nullptr,UInt32(value.size()),value.data());CFRelease(item);}
+        }
         else if (operation=="read") {
             const auto value=keychain_load(service,false,keychain);
             if (value.value("access_token","")!="synthetic-test-value") return 66;
         } else if (operation=="update") keychain_save(service,{{"access_token","synthetic-test-value"},{"generation",KEYCHAIN_TEST_GENERATION}},keychain);
         else if (operation=="lock") status=SecKeychainLock(keychain);
         else if (operation=="unlock") status=SecKeychainUnlock(keychain,strlen(password),password,true);
-        else if (operation=="delete") { keychain_delete(service,keychain); status=SecKeychainDelete(keychain); }
+        else if (operation=="delete") { keychain_delete(service,keychain);for(const auto& name:{service,service+"/signed-v2"})if(SecKeychainFindGenericPassword(keychain,UInt32(name.size()),name.c_str(),7,"ChatGPT",nullptr,nullptr,nullptr)!=errSecItemNotFound)return 73;status=SecKeychainDelete(keychain); }
         else return 64;
         CFRelease(keychain);
         return status==errSecSuccess?0:67;

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -180,8 +181,9 @@ Json credential_process(const Json& input) {
     return result.at("result");
 }
 }
-Json keychain_load(const std::string& service,bool interaction,SecKeychainRef keychain) {
-    if (!keychain && !in_credential_child) return credential_process({{"operation","load"},{"service",service},{"interaction",interaction}});
+namespace {
+std::string stable_service(const std::string& logical){return logical+"/signed-v2";}
+std::optional<Json> read_secret(const std::string& service,bool interaction,SecKeychainRef keychain) {
     auto q=query(service,interaction,keychain);
     if (!interaction) preflight(q);
     CFDictionarySetValue(q,kSecReturnData,kCFBooleanTrue);
@@ -189,13 +191,37 @@ Json keychain_load(const std::string& service,bool interaction,SecKeychainRef ke
     CFTypeRef result=nullptr;
     const auto status=SecItemCopyMatching(q,&result);
     Owned<CFTypeRef> guard(result);
-    if (status==errSecItemNotFound) return Json::object();
+    if (status==errSecItemNotFound) return std::nullopt;
     check(status);
     if (!result || CFGetTypeID(result)!=CFDataGetTypeID()) throw std::runtime_error("The saved ChatGPT connection could not be read.");
     const auto bytes=static_cast<CFDataRef>(result);
     auto value=Json::parse(std::string(reinterpret_cast<const char*>(CFDataGetBytePtr(bytes)),CFDataGetLength(bytes)),nullptr,false);
     if (!value.is_object()) throw std::runtime_error("The saved ChatGPT connection could not be read. Sign in again.");
     return value;
+}
+void add_signed_secret(const std::string& service,const Json& value,SecKeychainRef keychain) {
+    const auto text=value.dump();Owned<CFDataRef> bytes(CFDataCreate(nullptr,reinterpret_cast<const UInt8*>(text.data()),text.size()));
+    // Updating a legacy record's data does not replace its pre-signing ACL.
+    // A fresh item captures this signed code's persistent designated requirement.
+    SecTrustedApplicationRef raw_app=nullptr;check(SecTrustedApplicationCreateFromPath(nullptr,&raw_app));Owned<SecTrustedApplicationRef> app(raw_app);
+    const void* refs[]={app.value};Owned<CFArrayRef> trusted(CFArrayCreate(nullptr,refs,1,&kCFTypeArrayCallBacks));
+    SecAccessRef raw_access=nullptr;check(SecAccessCreate(CFSTR("Charms Studio Assistant"),trusted,&raw_access));Owned<SecAccessRef> access(raw_access);
+    auto add=query(service,false,keychain,true);CFDictionarySetValue(add,kSecValueData,bytes);CFDictionarySetValue(add,kSecAttrAccess,access);
+    const auto status=SecItemAdd(add,nullptr);
+    if(status==errSecDuplicateItem){if(!read_secret(service,false,keychain))throw std::runtime_error("The saved ChatGPT connection changed while upgrading its storage.");}
+    else check(status);
+}
+}
+Json keychain_load(const std::string& service,bool interaction,SecKeychainRef keychain) {
+    if (!keychain && !in_credential_child) return credential_process({{"operation","load"},{"service",service},{"interaction",interaction}});
+    if(auto current=read_secret(stable_service(service),interaction,keychain))return *current;
+    auto legacy=read_secret(service,interaction,keychain);if(!legacy)return Json::object();
+    // Migrate only after an authorized read. Keep the original encrypted item
+    // intact until its replacement is created and read back; never relax an ACL.
+    add_signed_secret(stable_service(service),*legacy,keychain);
+    const auto migrated=read_secret(stable_service(service),false,keychain);
+    if(!migrated)throw std::runtime_error("The ChatGPT connection's signed storage could not be verified. Its original saved sign-in is retained.");
+    return *migrated;
 }
 void keychain_save(const std::string& service,const Json& value,SecKeychainRef keychain) {
     if (!keychain && !in_credential_child) { credential_process({{"operation","save"},{"service",service},{"data",value}}); return; }
@@ -204,26 +230,24 @@ void keychain_save(const std::string& service,const Json& value,SecKeychainRef k
     keychain_load(service,false,keychain);
     const auto text=value.dump();
     Owned<CFDataRef> bytes(CFDataCreate(nullptr,reinterpret_cast<const UInt8*>(text.data()),text.size()));
-    auto q=query(service,false,keychain);
+    auto q=query(stable_service(service),false,keychain);
     preflight(q);
     const void* keys[]={kSecValueData}; const void* values[]={bytes.value};
     Owned<CFDictionaryRef> attributes(CFDictionaryCreate(nullptr,keys,values,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks));
     auto status=SecItemUpdate(q,attributes);
     if (status==errSecItemNotFound) {
-        auto add=query(service,false,keychain,true);
-        CFDictionarySetValue(add,kSecValueData,bytes);
-        status=SecItemAdd(add,nullptr);
+        add_signed_secret(stable_service(service),value,keychain);return;
     }
     check(status);
 }
 bool keychain_delete(const std::string& service,SecKeychainRef keychain) {
     if (!keychain && !in_credential_child) return credential_process({{"operation","delete"},{"service",service}}).get<bool>();
     keychain_load(service,false,keychain);
-    auto q=query(service,false,keychain);
-    preflight(q);
-    const auto status=SecItemDelete(q);
-    if (status==errSecItemNotFound) return true;
-    check(status); return true;
+    for(const auto& name:{stable_service(service),service}) {
+        auto q=query(name,false,keychain);const auto status=SecItemDelete(q);
+        if(status!=errSecItemNotFound)check(status);
+    }
+    return true;
 }
 int keychain_child_main() {
     // No Studio, network plugin, logging, or GUI is initialized in this process.

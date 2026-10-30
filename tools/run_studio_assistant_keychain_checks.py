@@ -62,11 +62,23 @@ def main():
         finally:
             shutil.copy2(valid,replacement); os.replace(replacement,first)
         run([first,'delete',keychain,service])
+        # An older record keeps its original encrypted data while a verified,
+        # signed replacement is created. Later reads never resurrect stale data.
+        run([first,'create_legacy',keychain,service])
+        assert run([foreign,'read',keychain,service],2)<3
+        run([first,'read',keychain,service])
+        run([first,'versions',keychain,service])
+        run([first,'change_legacy',keychain,service])
+        run([second,'read',keychain,service])
+        run([first,'update',keychain,service])
+        run([second,'read',keychain,service])
+        run([first,'delete',keychain,service])
     finally:
         # Always remove the disposable Keychain, including on timeout/failure.
         # This never targets the login Keychain or a real account's credentials.
         if keychain.exists(): run(['/usr/bin/security','delete-keychain',keychain])
     print('PASS: restarts and a changed executable retain access with the same signing certificate.')
+    print('PASS: authorized legacy migration preserves its original item, prefers signed storage, and sign-out removes both versions.')
     print('PASS: locked Keychain and foreign signature fail promptly without authorization UI.')
     print('PASS: failed foreign reads/writes/deletes preserve the original synthetic credential.')
     print('PASS: private self-child transport validates the signed parent and rejects invalid services/direct invocation.')
