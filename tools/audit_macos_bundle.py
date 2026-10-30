@@ -58,6 +58,13 @@ def audit(app, architecture, maximum_os):
             signing = command('/usr/bin/codesign', '-d', '-r-', str(app))
             if 'cdhash' in signing.lower() or not any(value in signing.lower() for value in ('certificate', 'anchor')):
                 errors.append('Use tools/sign_macos_app.py: the app needs a stable certificate identity for Keychain access across updates')
+            details = command('/usr/bin/codesign', '-dv', '--verbose=4', str(app))
+            team = re.search(r'^TeamIdentifier=([A-Z0-9]{10})$', details, re.M)
+            if not team:
+                errors.append('Use an Apple signing identity with a Team ID: self-signed login-Keychain partitions change with each build')
+            else:
+                command('/usr/bin/codesign', '--verify', '--deep', '--strict', '-R',
+                        '=anchor apple generic and certificate leaf[subject.OU] = "'+team[1]+'"', str(app))
         except subprocess.CalledProcessError:
             errors.append('The app has no valid code-signing identity')
 

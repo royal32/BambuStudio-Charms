@@ -32,10 +32,11 @@ SDK's `usr/lib/liblzma.tbd`; do not link Homebrew's dylib.
 Copy the completed app to a distribution directory and replace its Resources
 symlink with a real copy of the resources. Remove build-machine runtime search
 paths and bundle any required non-system dylibs. Sign with the persistent
-private-build certificate before auditing the actual distribution:
+Apple signing identity before auditing the actual distribution:
 
 ```sh
 python3 tools/sign_macos_app.py init  # Once on the build Mac; idempotent.
+python3 tools/sign_macos_app.py configure-apple APPLE_CERTIFICATE_SHA1  # Existing valid identity, once.
 python3 tools/sign_macos_app.py sign /path/to/BambuStudio.app
 python3 tools/audit_macos_bundle.py /path/to/BambuStudio.app --arch x86_64 --macos 12.6
 codesign --verify --deep --strict /path/to/BambuStudio.app
@@ -44,12 +45,13 @@ codesign --verify --deep --strict /path/to/BambuStudio.app
 The audit checks every bundled Mach-O file, minimum OS versions, architectures,
 runtime search paths, external symlinks and non-system dependencies. Passing it
 does not replace a native launch check. The audit rejects ad-hoc or identifier-only
-signing because that would regress persistent Keychain authorization. The private
-family certificate is not Developer ID signing or notarization. It is pinned in
-the app's designated requirement; no trusted root or system trust exception is
-installed. Keep its private key on the build Mac, in the dedicated signing
-Keychain, and never regenerate it for an ordinary rebuild. Ship only the signed
-app to the Intel Mac. The same identity signs Apple Silicon and Intel packages.
+signing and self-signed identities. Login-Keychain partitions require a stable
+Apple Team ID in addition to the designated requirement for prompt-free rebuilds.
+The current Apple Development identity is pinned by its exact certificate;
+this is not Developer ID distribution or notarization. No trusted root or system
+trust exception is installed. The signer preserves the existing private key and
+fails if the selected identity is unavailable instead of choosing a new one.
+Ship only the signed app to the Intel Mac. The same identity signs both architectures.
 
 Build a fresh staged app, sign and verify it, quit the installed copy, then
 replace the bundle by renaming the staged directory into place. Keep the old

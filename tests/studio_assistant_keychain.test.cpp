@@ -33,10 +33,14 @@ int main(int argc,char** argv) {
     if (SecKeychainSetUserInteractionAllowed(false)!=errSecSuccess) return 68;
     if (argc!=4) return 64;
     const std::string operation=argv[1],path=argv[2],service=argv[3];
-    if (service.rfind("charms-keychain-test/",0)!=0 || path.find("keychain-native-checks")==std::string::npos) return 64;
+    const bool login_synthetic=path=="--login-synthetic-only";
+    if (service.rfind("charms-keychain-test/",0)!=0 || (login_synthetic?service.size()!=57:path.find("keychain-native-checks")==std::string::npos)) return 64;
+    // Opt-in regression for login-Keychain partitions. Only this test's unique
+    // synthetic item may change; never lock, unlock, or delete the Keychain.
+    if(login_synthetic && operation!="create" && operation!="read" && operation!="update" && operation!="cleanup_login")return 64;
     SecKeychainRef keychain=nullptr;
     constexpr const char* password="synthetic-test-keychain-only";
-    auto status=(operation=="create" || operation=="create_legacy")?SecKeychainCreate(path.c_str(),strlen(password),password,false,nullptr,&keychain):SecKeychainOpen(path.c_str(),&keychain);
+    auto status=login_synthetic?SecKeychainCopyDefault(&keychain):(operation=="create" || operation=="create_legacy")?SecKeychainCreate(path.c_str(),strlen(password),password,false,nullptr,&keychain):SecKeychainOpen(path.c_str(),&keychain);
     if (status!=errSecSuccess) return 65;
     try {
         if (operation=="create") keychain_save(service,{{"access_token","synthetic-test-value"},{"generation",KEYCHAIN_TEST_GENERATION}},keychain);
@@ -57,6 +61,7 @@ int main(int argc,char** argv) {
         } else if (operation=="update") keychain_save(service,{{"access_token","synthetic-test-value"},{"generation",KEYCHAIN_TEST_GENERATION}},keychain);
         else if (operation=="lock") status=SecKeychainLock(keychain);
         else if (operation=="unlock") status=SecKeychainUnlock(keychain,strlen(password),password,true);
+        else if (operation=="cleanup_login") { keychain_delete(service,keychain);for(const auto& name:{service,service+"/signed-v2"})if(SecKeychainFindGenericPassword(keychain,UInt32(name.size()),name.c_str(),7,"ChatGPT",nullptr,nullptr,nullptr)!=errSecItemNotFound)return 73; }
         else if (operation=="delete") { keychain_delete(service,keychain);for(const auto& name:{service,service+"/signed-v2"})if(SecKeychainFindGenericPassword(keychain,UInt32(name.size()),name.c_str(),7,"ChatGPT",nullptr,nullptr,nullptr)!=errSecItemNotFound)return 73;status=SecKeychainDelete(keychain); }
         else return 64;
         CFRelease(keychain);

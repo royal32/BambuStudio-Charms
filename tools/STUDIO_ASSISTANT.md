@@ -118,12 +118,16 @@ sign-in; the assistant never automatically repeats OAuth or switches billing.
 Error handling follows the official
 [Sign in with ChatGPT recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
 
-Mac packages must use the persistent private-build signing certificate via
+Mac packages must use the configured existing Apple signing identity via
 `tools/sign_macos_app.py`; the bundle audit rejects ad-hoc signatures and
-identifier-only requirements. The first changeover from an old ad-hoc build
+identifier-only requirements and self-signed identities without an Apple Team ID.
+The first changeover from an old ad-hoc or self-signed build
 needs one explicit **⋯ → Authorize Keychain access…** action. Choose
 **Always Allow** in macOS's dialog. Ordinary rebuilds signed with the same
-certificate keep the same designated requirement and reuse that approval.
+Apple certificate keep the same designated requirement and Team ID partition,
+and reuse that approval. A self-signed certificate alone is insufficient:
+[Apple's securityd implementation](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp)
+assigns unclassified signed code a partition derived from its changing CDHash.
 Changing the certificate, revoking access, or locking the Keychain can still
 require a person's action; the app does not bypass those protections.
 
@@ -230,13 +234,19 @@ their disposable Keychain. Initialize the stable build identity once first:
 
 ```sh
 python3 tools/sign_macos_app.py init
+python3 tools/sign_macos_app.py configure-apple APPLE_CERTIFICATE_SHA1
 python3 tools/run_studio_assistant_keychain_checks.py
+python3 tools/run_studio_assistant_keychain_checks.py --login-synthetic
 ```
 
 These checks cover process restarts, moved and changed executables signed with
 the same certificate, locked-Keychain rejection, foreign-signature rejection
 for reads/writes/deletes, and private credential-pipe/caller validation. They
-never read an actual account credential. `tests/run_keychain_checks_macos.sh`
+never read an actual account credential. The optional `--login-synthetic` check
+also creates/removes one UUID-named fake login-Keychain item: changed executable
+bytes/paths must retain access, while foreign signatures and a different app
+identifier signed by the same team must fail. It never locks, unlocks or deletes
+the login Keychain. `tests/run_keychain_checks_macos.sh`
 runs the prebuilt Intel probes on the macOS 12 Intel Mac without Python or CLT.
 Both native checks pass with atomic executable replacement; on macOS 12,
 overwriting an existing executable in place can leave stale identity state.

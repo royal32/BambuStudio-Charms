@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Opt-in native checks using fake values in one disposable Keychain only."""
+"""Native fake-credential checks; optional isolated login-Keychain partition test."""
+import argparse
 import importlib.util
 import os
 from pathlib import Path
@@ -21,6 +22,9 @@ def run(args, expected=0):
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--login-synthetic',action='store_true',help='Also test one UUID-named fake item in the login Keychain; never touch real credentials.')
+    args=parser.parse_args()
     OUT.mkdir(parents=True,exist_ok=True)
     spec=importlib.util.spec_from_file_location('charms_signing',ROOT/'tools/sign_macos_app.py')
     signing=importlib.util.module_from_spec(spec); spec.loader.exec_module(signing)
@@ -31,6 +35,10 @@ def main():
     first,second,foreign=[OUT/x for x in ('stable-probe','next-probe','foreign-probe')]
     run(command+['-o',first]); run(command+['-DKEYCHAIN_TEST_GENERATION=2','-o',second])
     signing.sign(first,'org.charmsstudio.keychain-test'); signing.sign(second,'org.charmsstudio.keychain-test')
+    original=OUT/'original-probe';shutil.copy2(first,original)
+    assert original.read_bytes()!=second.read_bytes()
+    other_identifier=OUT/'other-identifier-probe';shutil.copy2(second,other_identifier)
+    signing.sign(other_identifier,'org.charmsstudio.other-keychain-test')
     run([first,'--ipc-check']) # Signed self-child, anonymous pipes, service validation.
     run([first,'--ipc-check-reaped']) # Host SIGCHLD handling cannot break a valid response.
     run([first,'--ipc-cancel-check']) # Explicit authorization can stop without leaving a child/dialog.
@@ -55,6 +63,7 @@ def main():
         assert run([foreign,'read',keychain,service],2)<3
         assert run([foreign,'update',keychain,service],2)<3
         assert run([foreign,'delete',keychain,service],2)<3
+        assert run([other_identifier,'read',keychain,service],2)<3
         run([first,'read',keychain,service])
         valid=OUT/'valid-probe'; shutil.copy2(first,valid)
         try:
@@ -84,6 +93,24 @@ def main():
     print('PASS: failed foreign reads/writes/deletes preserve the original synthetic credential.')
     print('PASS: private self-child transport validates the signed parent and rejects invalid services/direct invocation.')
     print('PASS: disposable Keychain removed. No real account credential was read.')
+    if args.login_synthetic:
+        if not signing.load().get('apple_identity'):
+            raise RuntimeError('The login-partition regression requires an explicitly configured Apple identity.')
+        service='charms-keychain-test/'+str(uuid.uuid4())
+        created=False
+        try:
+            run([original,'create','--login-synthetic-only',service]);created=True
+            run([second,'read','--login-synthetic-only',service])
+            run([second,'update','--login-synthetic-only',service])
+            run([original,'read','--login-synthetic-only',service])
+            assert run([foreign,'read','--login-synthetic-only',service],2)<3
+            assert run([foreign,'update','--login-synthetic-only',service],2)<3
+            assert run([foreign,'cleanup_login','--login-synthetic-only',service],2)<3
+            assert run([other_identifier,'read','--login-synthetic-only',service],2)<3
+            run([second,'read','--login-synthetic-only',service])
+        finally:
+            if created:run([original,'cleanup_login','--login-synthetic-only',service])
+        print('PASS: real login-Keychain synthetic item survives changed signed bytes/paths; foreign signature and same-team wrong identifier denied; only that item removed.')
 
 
 if __name__=='__main__':

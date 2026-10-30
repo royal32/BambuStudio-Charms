@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Stable signing for private family builds; never fall back to ad-hoc signing.
 
-The signing key is non-exportable in a dedicated Keychain. Its unlock password
+The local fallback key is non-exportable in a dedicated Keychain. Its unlock password
 is stored in the login Keychain for Apple's security tool. No signing secrets,
 OAuth credentials, or private keys are stored in the repository or app bundle.
+An explicitly selected existing Apple Development identity takes precedence.
+Unlike local self-signing, it has a stable Team ID Keychain partition across
+changed executable bytes. No fallback occurs if that selected identity expires.
 This does not install a trusted root, enable Gatekeeper exceptions, or notarize.
 """
 import argparse
@@ -118,6 +121,35 @@ def load():
     return record
 
 
+def configure_apple(identity):
+    """Select an existing identity only after a real signed-code trust check."""
+    record = load()
+    identity = identity.upper()
+    if not re.fullmatch(r'[0-9A-F]{40}', identity):
+        raise RuntimeError('Specify the existing Apple certificate SHA-1 fingerprint.')
+    available = run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'])
+    if not re.search(r'\b'+identity+r'\b', available):
+        raise RuntimeError('The requested signing identity is not valid and available.')
+    login_unlocked()
+    with tempfile.TemporaryDirectory(prefix='charms-apple-signing-') as directory:
+        root = Path(directory)
+        source, probe = root/'probe.c', root/'probe'
+        source.write_text('int main(void) { return 0; }\n')
+        run(['/usr/bin/clang', str(source), '-o', str(probe)])
+        run(['/usr/bin/codesign', '--force', '--sign', identity, '--timestamp=none', str(probe)])
+        run(['/usr/bin/codesign', '--verify', '--strict', '-R', '=anchor apple generic', str(probe)])
+        details = subprocess.run(['/usr/bin/codesign', '-dv', '--verbose=4', str(probe)], text=True, capture_output=True, check=True)
+        team = re.search(r'^TeamIdentifier=([A-Z0-9]{10})$', details.stderr, re.M)
+        if not team:
+            raise RuntimeError('The Apple identity did not produce a Team ID; configuration is unchanged.')
+        record['apple_identity'] = {'identity': identity, 'team': team.group(1)}
+    pending = CONFIG.with_suffix('.next')
+    pending.write_text(json.dumps(record, indent=2)+'\n')
+    pending.chmod(0o600)
+    os.replace(pending, CONFIG)
+    print('Selected existing Apple signing identity with verified Team ID:', record['apple_identity']['team'])
+
+
 def sign(path, identifier=None):
     record = load()
     detach_signing_keychain()
@@ -138,22 +170,38 @@ def sign(path, identifier=None):
     if not identifier or not re.fullmatch(r'[A-Za-z0-9_.-]+',identifier):
         raise RuntimeError('A stable signing identifier is required.')
     login_unlocked()
-    password = run(['/usr/bin/security', 'find-generic-password', '-a', ACCOUNT, '-s', SERVICE, '-w'], private=True)
-    security_command(['unlock-keychain', '-p', password, str(KEYCHAIN)])
+    apple = record.get('apple_identity')
+    if apple:
+        if not re.fullmatch(r'[0-9A-F]{40}', apple.get('identity','')) or not re.fullmatch(r'[A-Z0-9]{10}', apple.get('team','')):
+            raise RuntimeError('The selected Apple signing identity record is invalid.')
+        fingerprint = apple['identity']
+        available = run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'])
+        if not re.search(r'\b'+fingerprint+r'\b', available):
+            raise RuntimeError('The selected Apple signing identity is unavailable or expired; refusing a different identity.')
+        keychain_args = []
+    else:
+        fingerprint = record['identity']
+        password = run(['/usr/bin/security', 'find-generic-password', '-a', ACCOUNT, '-s', SERVICE, '-w'], private=True)
+        security_command(['unlock-keychain', '-p', password, str(KEYCHAIN)])
+        keychain_args = ['--keychain', str(KEYCHAIN)]
     try:
         # Pin the leaf certificate, not the changing executable CDHash. No
         # identifier-only or otherwise weakened designated requirement is used.
-        requirement = f'designated => identifier "{identifier}" and certificate leaf = H"{record["identity"]}"'
-        run(['/usr/bin/codesign', '--force', '--deep', '--sign', record['identity'],
-             '--keychain', str(KEYCHAIN), '--identifier', identifier, '--timestamp=none',
+        requirement = f'designated => identifier "{identifier}" and certificate leaf = H"{fingerprint}"'
+        run(['/usr/bin/codesign', '--force', '--deep', '--sign', fingerprint,
+             *keychain_args, '--identifier', identifier, '--timestamp=none',
              '--requirements', '='+requirement, str(path)])
         run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(path)])
         details = subprocess.run(['/usr/bin/codesign','-d','-r-',str(path)],text=True,capture_output=True)
         requirement_text = details.stdout+details.stderr
-        if 'cdhash' in requirement_text.lower() or record['identity'].lower() not in requirement_text.lower():
+        if 'cdhash' in requirement_text.lower() or fingerprint.lower() not in requirement_text.lower():
             raise RuntimeError('The app did not retain the pinned stable signing identity.')
+        if apple:
+            run(['/usr/bin/codesign', '--verify', '--strict', '-R',
+                 '=anchor apple generic and certificate leaf[subject.OU] = "'+apple['team']+'"', str(path)])
     finally:
-        security_command(['lock-keychain', str(KEYCHAIN)])
+        if not apple:
+            security_command(['lock-keychain', str(KEYCHAIN)])
     print('Signed and verified:', path)
 
 
@@ -161,6 +209,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('init')
+    apple = sub.add_parser('configure-apple', help='Select an existing Apple identity after verifying its trust and Team ID.')
+    apple.add_argument('identity', help='Existing certificate SHA-1 fingerprint; no key is generated/exported.')
     signing = sub.add_parser('sign')
     signing.add_argument('path', type=Path)
     signing.add_argument('--identifier', help='Required for a standalone test executable; app IDs come from Info.plist.')
@@ -170,6 +220,8 @@ def main():
         if args.command == 'init':
             initialize()
             print('Stable private-build signing identity is ready. No system trust settings changed.')
+        elif args.command == 'configure-apple':
+            configure_apple(args.identity)
         else:
             sign(args.path, args.identifier)
     except (RuntimeError, OSError, ValueError) as error:

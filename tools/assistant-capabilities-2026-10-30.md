@@ -91,12 +91,12 @@ combined triangles. Larger sources can require native interactive preparation.
   bytes/paths with the same signing identity, foreign identities fail, and
   sign-out removes both records.
 
-These are native/scripted tests, **not new Sol/Luna performance results** or a
-claim that the complete GUI was exercised. The local Mac locked again and its
-real credential still requires the pending protected approval. The Intel test machine's older
-Studio is running; its login/session was left untouched. Optional account tests
+The initial results above are native/scripted tests, **not Sol/Luna performance
+results** or a claim that the complete GUI was exercised. The initial local
+credential check was blocked by a locked Mac and protected approval. The Intel test machine's
+older Studio was running; its login/session was left untouched. Optional account tests
 must run with Studio closed so old/new credential stores cannot refresh the
-same account independently. No real model request or print was sent this turn.
+same account independently. No print was sent.
 
 ## Reproducing the disposable checks
 
@@ -115,19 +115,35 @@ The headless fixture dispatcher covers a subset of the app: a valid tool it
 does not implement marks the trial inconclusive/comparison-ineligible, rather
 than being treated as a model capability failure. No model weights were trained.
 
-The ARM app is installed at `/Applications/BambuStudio.app`; the previous app
-is preserved at `build/arm64/Installed-Backup-20261030/BambuStudio.app`. Quit the
-already-running older review instance and reopen Applications to load the new
-64-tool build. The one-time legacy credential approval remains pending.
+The 64-tool ARM app is installed at `/Applications/BambuStudio.app`; previous
+apps are preserved in the dated `Installed-Backup*` directories under
+`build/arm64`.
 
 Follow-up: a late approval reply arrived after the original three-minute
 request had timed out; a fresh three-minute request also expired. The explicit
 approval window is now fifteen minutes and Stop interrupts/reaps its private
 helper. Background access remains noninteractive with its ten-second bound.
 Disposable credential/signature/cancellation checks and the client contract
-suite pass. This follow-up is staged in the review builds; the Mac locked again
-before Studio could be quit and its installed executable updated. Real account
-access across builds remains unverified until a fresh protected approval.
+suite pass. After the user unlocked/quit Studio, the fixed app was installed.
+The first real approval exposed an additional login-Keychain partition check:
+the self-signed app could restart, but different bytes with the same designated
+requirement still needed approval. The disposable custom-Keychain test had not
+covered that login-Keychain restriction.
+
+The signer now supports an explicitly selected existing Apple Development
+identity, verifies its Apple trust/Team ID, pins its exact certificate and refuses
+to fall back to a different identity. Both architectures use that identity.
+An additional UUID-named synthetic login-Keychain test verifies access across
+different executable bytes/paths, denies foreign signatures and same-team wrong
+app identifiers, and verifies removal of only the synthetic item. It never
+locks/unlocks/deletes the login Keychain or reads real account credentials.
+The distribution audit now rejects self-signed packages without an Apple Team ID.
+
+The Apple-signed app is installed locally. The user approved its Documents
+access and explicit assistant credential migration. The GUI connected, then a
+separate, differently built Apple-signed executable successfully fetched the
+real model catalog without another authorization prompt. This verifies real
+cross-build access, in addition to the synthetic regressions.
 
 The Intel test machine's signed/audited review is staged at
 `~/Downloads/Charms-Assistant-Capabilities-20261030/BambuStudio.app`. Its executable
