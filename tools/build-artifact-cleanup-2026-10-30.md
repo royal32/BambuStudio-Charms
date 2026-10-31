@@ -1,5 +1,9 @@
 # Local cleanup shortlist
 
+**Completed 2026-10-31:** the approved ZIPs, older app copies, generated tests
+and compiler outputs were removed (48 paths). Compiled dependencies were
+retained. The tables and path lists below record the pre-cleanup inventory.
+
 Measured after installing the library/shortcut/layout fixes on both Macs and
 removing this investigation's eight temporary diagnostic app copies. The working
 application is `/Applications/BambuStudio.app`. The library processor is also
@@ -71,5 +75,11 @@ build/Charms-Terra-High-Intel-20261030.zip
   `.charm-library` records: these are the working collection, exclusions and
   feedback, rather than build artifacts.
 
-No candidates in this shortlist have been removed. Only the temporary diagnostic
-apps and temporary runtime tracing file created during this fix were cleaned up.
+The cleanup recovered about 10.5 GiB of available disk space, leaving about
+25.3 GiB free immediately afterward. The retained installed app, current release
+bundles and rollback app have unchanged executable/resource-manifest hashes and
+passed deep code-signature verification. The compiled dependency tree's file
+metadata fingerprint remained unchanged. Library inputs and shared data were
+outside the removal paths.
+
+The exact removal report is in `build/approved-cleanup-2026-10-31.json`.
