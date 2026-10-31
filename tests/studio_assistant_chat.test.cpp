@@ -1,5 +1,9 @@
 #include <wx/app.h>
 #include <wx/frame.h>
+#include <wx/scrolwin.h>
+#include <wx/choice.h>
+#include <wx/button.h>
+#include <fstream>
 #include "slic3r/GUI/StudioAssistantChat.hpp"
 #include <iostream>
 #include <stdexcept>
@@ -17,8 +21,8 @@ wxTextCtrl* view(AssistantBubble* bubble,const wxString& name) {
 class ChatChecks : public wxApp {
 public:
     bool OnInit() override {
-        bool review=false;
-        for (int i=1;i<argc;++i) review|=argv[i]=="--review";
+        bool review=true;
+        for (int i=1;i<argc;++i)if(argv[i]=="--auto-close")review=false;
         auto* frame=new wxFrame(nullptr,wxID_ANY,"Synthetic assistant chat checks",wxDefaultPosition,wxSize(1000,850));
         auto* columns=new wxBoxSizer(wxHORIZONTAL);
         wxString long_text;
@@ -39,6 +43,17 @@ public:
             panel->SetSizer(rows); columns->Add(panel,1,wxEXPAND);
         }
         frame->SetSizer(columns); frame->Show();
+        // Match the real assistant: a native selector above a scrolled
+        // transcript and native buttons below it, with selectable text cards.
+        auto* scrolling=new wxFrame(nullptr,wxID_ANY,"Synthetic scrolling assistant checks",wxDefaultPosition,wxSize(520,480));
+        auto* panel=new wxPanel(scrolling);auto* stack=new wxBoxSizer(wxVERTICAL);
+        auto* selector=new wxChoice(panel,wxID_ANY);selector->Append("GPT-6.1 Terra (High)");selector->SetSelection(0);stack->Add(selector,0,wxEXPAND|wxALL,12);
+        auto* transcript=new wxScrolledWindow(panel,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxVSCROLL|wxBORDER_NONE);transcript->SetScrollRate(0,10);
+        Slic3r::GUI::assistant_clip_children(transcript->GetHandle());auto* messages=new wxBoxSizer(wxVERTICAL);transcript->SetSizer(messages);stack->Add(transcript,1,wxEXPAND|wxLEFT|wxRIGHT,8);
+        std::vector<AssistantBubble*> cards;
+        for(int i=0;i<6;++i){auto* card=new AssistantBubble(transcript,false,i==0?"What would you like to make? I can help with colors, arranging pieces, or fixing warnings.":i==1?"ChatGPT needs Keychain authorization. Choose the account menu to authorize access when you are ready.":long_text,false);cards.push_back(card);messages->Add(card,0,wxALL,4);}
+        stack->Add(new wxButton(panel,wxID_ANY,"Explain warnings"),0,wxEXPAND|wxALL,12);panel->SetSizer(stack);auto* whole=new wxBoxSizer(wxVERTICAL);whole->Add(panel,1,wxEXPAND);scrolling->SetSizer(whole);
+        for(auto* card:cards)card->rewrap(420);transcript->FitInside();transcript->Layout();scrolling->Show();
         CallAfter([=] {
             try {
                 for (size_t i:{0u,2u}) {
@@ -108,10 +123,28 @@ public:
                     }
                     bubble->Destroy();
                 }
+                for(int width:{400,520,700})for(int height:{340,480}) {
+                    require(Slic3r::GUI::assistant_children_clipped(transcript->GetHandle()),"Transcript does not enforce native child clipping");
+                    scrolling->SetSize(wxSize(width,height));scrolling->Layout();
+                    for(auto* card:cards)card->rewrap(std::max(150,int(transcript->GetClientSize().x*.85)));
+                    transcript->FitInside();transcript->Layout();
+                    for(int position:{0,8,40,1000}) {
+                        transcript->Scroll(0,position);
+                        for(auto* card:cards){
+                            require(Slic3r::GUI::assistant_children_clipped(card->GetHandle()),"Bubble does not enforce native child clipping");
+                            auto* text=view(card,"Assistant");
+                            require(Slic3r::GUI::assistant_visible_text_contained(text->GetHandle(),transcript->GetHandle()),"Native message text escaped the scrolled transcript into header/footer controls");
+                            require(Slic3r::GUI::assistant_visible_text_contained(text->GetHandle(),card->GetHandle()),"Native message text escaped its bubble");
+                        }
+                    }
+                }
+                scrolling->SetSize(wxSize(520,480));scrolling->Layout();for(auto* card:cards)card->rewrap(std::max(150,int(transcript->GetClientSize().x*.85)));transcript->FitInside();transcript->Layout();transcript->Scroll(0,0);
                 result=0;
                 std::cout<<"PASS: light/dark narrow/wide messages, Unicode, selection retention, font changes, action-only replies, streaming growth, final replacement, and long-token sizing."<<std::endl;
             } catch (const std::exception& error) { std::cerr<<"FAIL: "<<error.what()<<'\n'; }
-            if (!review || result) frame->Destroy();
+            std::ofstream(PROJECT_CHAT_CHECK_RESULT)<<(result?"FAIL":"PASS")<<'\n';
+            scrolling->SetTitle(result?"FAIL — assistant clipping checks":"PASS — assistant clipping checks");
+            if (!review) {frame->Destroy();scrolling->Destroy();}
         });
         return true;
     }

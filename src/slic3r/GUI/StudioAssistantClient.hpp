@@ -81,6 +81,9 @@ private:
 };
 
 Json tool_definitions();
+inline constexpr int assistant_max_rounds=32;
+inline constexpr size_t assistant_max_actions=64;
+Json runtime_capabilities();
 Json workbench_tool_definitions();
 bool workbench_changes_project(const std::string& name);
 bool workbench_requires_confirmation(const std::string& name);

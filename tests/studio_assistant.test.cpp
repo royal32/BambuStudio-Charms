@@ -191,6 +191,11 @@ int main()
         decoder.finish(); // A completed item alone never authorizes execution.
     });
     const auto tools = tool_definitions(); assert(tools.at(0).at("type") == "namespace"); assert(tools.at(0).at("name") == "studio");
+    const auto runtime=runtime_capabilities();std::set<std::string> declared,advertised;
+    for(const auto& tool:tools.at(0).at("tools"))declared.insert(tool.at("name").get<std::string>());
+    for(const auto& name:runtime.at("available_tools"))advertised.insert(name.get<std::string>());
+    assert(declared==advertised && !advertised.count("shell") && !advertised.count("browser"));
+    assert(runtime.at("turn_limits").at("model_rounds")==assistant_max_rounds && runtime.at("turn_limits").at("tool_actions")==assistant_max_actions);
     assert(changes_project("set_settings")); assert(!changes_project("inspect_project")); assert(requires_confirmation("document"));
     assert(changes_project("plane_cut") && changes_project("add_primitive") && changes_project("delete_parts"));
     assert(!changes_project("model_section") && requires_confirmation("delete_parts"));
@@ -282,7 +287,9 @@ int main()
     };
     run_turn(Json::array(),Json::object(),"test","gpt-6-luna",session);
     session.respond=[&](const Json& request) {
-        assert(request.at("reasoning").at("effort")=="high"); return final;
+        assert(request.at("reasoning").at("effort")=="high");
+        bool contract=false;for(const auto& item:request.at("input"))if(item.value("role",std::string())=="developer"&&item.value("content",std::string()).find("Application-provided Studio runtime contract:")==0)contract=true;
+        assert(contract);return final;
     };
     session.trace=[&](const std::string& event,const Json& data){if(event=="turn_start")assert(data.at("reasoning_effort")=="high");};
     run_turn(Json::array(),Json::object(),"test","gpt-6.1-terra",session);

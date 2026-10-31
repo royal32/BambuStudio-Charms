@@ -14,11 +14,13 @@ def main():
     parser.add_argument('--arch',choices=('arm64','x86_64'),default=platform.machine())
     parser.add_argument('--build-only',action='store_true')
     parser.add_argument('--review',action='store_true',help='Leave the synthetic window visible after checks')
+    parser.add_argument('--check-name',default='assistant-chat-checks',help='Separate output prefix for before/after checks')
+    parser.add_argument('--appearance-source',type=pathlib.Path,help='Optional saved implementation for a before-fix regression check')
     args=parser.parse_args()
     root=pathlib.Path(__file__).resolve().parents[1]
     deps=root/'deps/build'/args.arch/'BambuStudio_deps/usr/local'
     wxconfig=deps/'bin/wx-config'
-    output=root/'build'/('assistant-chat-checks-'+args.arch)
+    output=root/'build'/(args.check_name+'-'+args.arch)
     output.mkdir(parents=True,exist_ok=True)
     def flags(option):
         return shlex.split(subprocess.check_output([str(wxconfig),*option],text=True))
@@ -36,15 +38,16 @@ def main():
     next_binary=binary.with_suffix('.next')
     # Bundled wx is built without assertion/debug symbols, matching Studio.
     command=['clang++','-std=c++17','-DwxDEBUG_LEVEL=0','-arch',args.arch,'-mmacosx-version-min=12.0',
-             '-I'+str(root/'src'),*flags(['--cxxflags']),
+             '-DPROJECT_CHAT_CHECK_RESULT="'+str(output/'result.txt')+'"',
+             '-I'+str(root/'src'),'-I'+str(root/'src/slic3r/GUI'),*flags(['--cxxflags']),
              str(root/'tests/studio_assistant_chat.test.cpp'),
-             str(root/'src/slic3r/GUI/StudioAssistantAppearance.mm'),'-o',str(next_binary),*libraries]
+             str(args.appearance_source.resolve() if args.appearance_source else root/'src/slic3r/GUI/StudioAssistantAppearance.mm'),'-o',str(next_binary),*libraries]
     with (output/'build.log').open('w') as log:
         if subprocess.run(command,stdout=log,stderr=subprocess.STDOUT).returncode:
             raise SystemExit(f'Build failed; see {output / "build.log"}')
     # A review fixture may still be running. Never truncate its executable inode.
     os.replace(next_binary,binary)
-    metadata={'CFBundleIdentifier':'org.charmsstudio.chat-checks',
+    metadata={'CFBundleIdentifier':'org.charmsstudio.'+args.check_name,
               'CFBundleExecutable':binary.name,'CFBundleName':'Assistant Chat Checks',
               'CFBundlePackageType':'APPL','CFBundleInfoDictionaryVersion':'6.0',
               'CFBundleVersion':'1','CFBundleShortVersionString':'1.0',
@@ -54,7 +57,7 @@ def main():
     os.replace(next_plist,contents/'Info.plist')
     print(f'Built {bundle}',flush=True)
     if not args.build_only:
-        subprocess.run([str(binary),*(['--review'] if args.review else [])],check=True,
+        subprocess.run([str(binary),*([] if args.review else ['--auto-close'])],check=True,
                        timeout=None if args.review else 30)
 
 

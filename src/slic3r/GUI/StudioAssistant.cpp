@@ -171,6 +171,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     m_menu->SetName("Assistant options"); m_menu->SetToolTip("Accounts and conversation options"); model_row->Add(m_menu,0,wxALIGN_CENTER_VERTICAL);
     outer->Add(model_row, 0, wxEXPAND|wxALL, FromDIP(12));
     m_chat = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL|wxBORDER_NONE);
+    assistant_clip_children(m_chat->GetHandle());
     m_chat->SetScrollRate(0, FromDIP(10)); m_messages=new wxBoxSizer(wxVERTICAL); m_chat->SetSizer(m_messages);
     m_chat->Bind(wxEVT_SIZE,[this](wxSizeEvent& event) { layout_chat(false); event.Skip(); });
     outer->Add(m_chat, 1, wxEXPAND|wxLEFT|wxRIGHT, FromDIP(8));
@@ -219,6 +220,10 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
         }
         for (const auto& bubble:m_bubbles) bubble.first->theme(wxGetApp().dark_mode());
         Refresh(); event.Skip();
+    });
+    Bind(wxEVT_SHOW,[this](wxShowEvent& event){
+        if(event.IsShown())CallAfter([this]{Layout();layout_chat(false);});
+        event.Skip();
     });
     auto& config = *wxGetApp().app_config;
     auto host = config.get("studio_assistant_host");
@@ -485,6 +490,7 @@ void AssistantWindow::send(const std::string& text, bool clear_draft) {
         log->append("turn_end",{{"turn",turn},{"status","error"},{"phase","initial_inspection"},{"message",error.what()}});
         append("Assistant",error.what());check_log();return;
     }
+    context["assistant_controls"]={{"confirm_every_project_edit",!m_allow_changes}};
     m_logging_turn=true;
     append("You", text); append("Assistant", ""); activity("Thinking…");
     if (clear_draft) m_input->Clear();

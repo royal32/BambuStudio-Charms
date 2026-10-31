@@ -23,6 +23,7 @@ public:
         : wxPanel(parent), m_user(user), m_body(text)
     {
         SetBackgroundStyle(wxBG_STYLE_PAINT);
+        assistant_clip_children(GetHandle());
         auto* column = new wxBoxSizer(wxVERTICAL);
         const long style=wxTE_MULTILINE|wxTE_READONLY|wxTE_NO_VSCROLL|wxBORDER_NONE;
         m_text = new wxTextCtrl(this, wxID_ANY, text, wxDefaultPosition, wxDefaultSize, style);
