@@ -3,6 +3,16 @@
 #import <QuartzCore/QuartzCore.h>
 
 namespace Slic3r { namespace GUI {
+void assistant_uniform_button(void* native_view)
+{
+    NSView* view=static_cast<NSView*>(native_view);
+    if([view isKindOfClass:[NSButton class]]) {
+        auto* button=static_cast<NSButton*>(view);
+        // Rounded push bezels have a fixed intrinsic visual height despite
+        // their wx frame. RoundRect bezels track the shared row height.
+        [button setBezelStyle:NSBezelStyleRoundRect];
+    }
+}
 void assistant_clip_children(void* native_view)
 {
     NSView* view=static_cast<NSView*>(native_view);

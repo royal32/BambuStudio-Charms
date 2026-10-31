@@ -16,6 +16,13 @@
 #include <chrono>
 #include <vector>
 #include <cctype>
+#include <cstdio>
+#include <memory>
+#include <functional>
+#ifndef _WIN32
+#include <unistd.h>
+#include <cerrno>
+#endif
 #include "PlateJobName.hpp"
 
 namespace Slic3r { namespace GUI { namespace LibraryStorage {
@@ -76,10 +83,33 @@ inline void write(const fs::path& root, const std::string& relative, const std::
 
 inline Json read(const fs::path& path)
 {
-    if (fs::file_size(path) > 65536) throw std::runtime_error("A shared library record is too large.");
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) throw std::runtime_error("A shared library record could not be read.");
-    auto record = Json::parse(stream);
+    if (!fs::is_regular_file(path)) throw std::runtime_error("A shared library record is not a regular file.");
+    const auto size = fs::file_size(path);
+    if (size > 65536) throw std::runtime_error("A shared library record is too large.");
+#ifdef _WIN32
+    auto* raw = _wfopen(path.c_str(), L"rb");
+#else
+    auto* raw = std::fopen(path.c_str(), "rb");
+#endif
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> file(raw, &std::fclose);
+    if (!file) throw std::runtime_error("A shared library record could not be read.");
+    // Bound metadata reads and parse in memory. The caller's deadline handles
+    // File Provider delays without keeping the library interface busy forever.
+    std::string bytes(size, '\0');
+#ifdef _WIN32
+    std::setvbuf(file.get(), nullptr, _IONBF, 0);
+    if (size && std::fread(bytes.data(), 1, size, file.get()) != size)
+        throw std::runtime_error("A shared library record changed or could not be read.");
+#else
+    size_t offset = 0;
+    while (offset < size) {
+        const auto count = ::pread(::fileno(file.get()), bytes.data() + offset, size - offset, offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) throw std::runtime_error("A shared library record changed or could not be read.");
+        offset += size_t(count);
+    }
+#endif
+    auto record = Json::parse(bytes);
     if (!record.is_object() || record.value("version", 0) != 1)
         throw std::runtime_error("Unsupported shared library record. Update Studio and the library tool.");
     return record;
@@ -120,14 +150,50 @@ inline std::vector<Json> exclusions(const fs::path& root)
     return removed;
 }
 
-inline std::vector<Json> projects_for(const fs::path& root, const std::string& plate)
+inline std::string plate_source_key(const std::string& plate)
+{
+    uint64_t value = 14695981039346656037ull;
+    for (unsigned char c : plate) { value ^= c; value *= 1099511628211ull; }
+    std::ostringstream text; text << std::hex << std::setw(16) << std::setfill('0') << value;
+    return text.str();
+}
+
+inline std::vector<std::string> index_project(const fs::path& root, const Json& project)
+{
+    std::vector<std::string> entries;
+    const auto id = project.at("id").get<std::string>();
+    if (id.empty() || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_'; }))
+        throw std::runtime_error("Invalid source project ID.");
+    for (const auto& plate : project.at("plates")) {
+        const auto name = plate.at("id").get<std::string>();
+        const auto relative = ".charm-library/plate-sources/" + plate_source_key(name) + "/" + id + ".json";
+        write(root, relative,
+            Json({{"version", 1}, {"plate", name}, {"project_id", id}}).dump());
+        entries.push_back(relative);
+    }
+    return entries;
+}
+
+inline std::vector<Json> projects_for(const fs::path& root, const std::string& plate,
+    const std::function<bool()>& cancelled = [] { return false; })
 {
     std::vector<Json> projects;
-    const auto directory = child(root, ".charm-library/projects");
+    const bool indexed = fs::exists(child(root, ".charm-library/plate-sources"));
+    const auto directory = child(root, indexed ? ".charm-library/plate-sources/" + plate_source_key(plate) : ".charm-library/projects");
     if (!fs::exists(directory)) return projects;
     for (const auto& item : fs::directory_iterator(directory)) {
+        if (cancelled()) return {};
         if (item.path().extension() != ".json") continue;
         auto project = read(child(root, item.path().lexically_relative(root).generic_u8string()));
+        if (indexed) {
+            if (project.at("plate").get<std::string>() != plate) continue; // Routing keys are not identities.
+            const auto id = project.at("project_id").get<std::string>();
+            if (cancelled()) return {};
+            const auto record = child(root, ".charm-library/projects/" + id + ".json");
+            if (!fs::exists(record)) continue;
+            project = read(record);
+            if (project.at("id").get<std::string>() != id) throw std::runtime_error("Invalid source project index.");
+        }
         for (const auto& p : project.at("plates")) {
             if (p.at("id").get<std::string>() == plate) { projects.push_back(project); break; }
         }
@@ -146,13 +212,16 @@ inline bool is_source_project(const fs::path& path)
 // Availability checks can touch a disconnected drive: call this on a worker.
 // Source paths may live outside the library. Relative paths travel with it;
 // machine-local overrides let another computer locate its own source copy.
-inline Json source_projects(const fs::path& root, const std::string& plate, const Json& overrides = Json::object())
+inline Json source_projects(const fs::path& root, const std::string& plate, const Json& overrides = Json::object(),
+    const std::function<bool()>& cancelled = [] { return false; })
 {
     Json sources = Json::array();
-    auto projects = projects_for(root, plate);
+    auto projects = projects_for(root, plate, cancelled);
+    if (cancelled()) return sources;
     if (projects.empty()) projects.push_back({{"id", "plate:" + plate}, {"name", plate},
         {"plates", Json::array({{{"id", plate}, {"index", 0}}})}});
     for (const auto& project : projects) {
+        if (cancelled()) return {};
         const auto id = project.at("id").get<std::string>();
         auto source = project.value("source", std::string());
         const auto registered_source = source;

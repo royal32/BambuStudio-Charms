@@ -4694,29 +4694,7 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         case '7':
         case '8':
         case '9': {
-            int digit = keyCode - '0';
-            const bool starting_new_sequence = (m_color_input_value < 0 || !m_timer_set_color.IsRunning());
-            if (starting_new_sequence && digit == 0) {
-                // Map single zero key to filament #10 immediately
-                if (m_timer_set_color.IsRunning())
-                    m_timer_set_color.Stop();
-                if (m_gizmos.get_current_type() != GLGizmosManager::MmuSegmentation) {
-                    // Assembly view owns an independent model; route the shortcut there.
-                    if (m_canvas_type == ECanvasType::CanvasAssembleView)
-                        wxGetApp().plater()->change_extruder_for_assemble_selection(10);
-                    else if (obj_list != nullptr)
-                        obj_list->set_extruder_for_selected_items(10);
-                }
-                m_color_input_value = -1;
-                break;
-            }
-            else if (starting_new_sequence) {
-                m_color_input_value = digit;
-            } else {
-                m_color_input_value = m_color_input_value * 10 + digit;
-            }
-            if (m_timer_set_color.IsRunning()) m_timer_set_color.Stop();
-            m_timer_set_color.StartOnce(500);
+            queue_filament_digit(keyCode - '0');
             break;
         }
 
@@ -4933,6 +4911,20 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
     const int keyCode = evt.GetKeyCode();
 
     auto imgui = wxGetApp().imgui();
+    int digit_key = keyCode;
+    if (digit_key >= WXK_NUMPAD0 && digit_key <= WXK_NUMPAD9)
+        digit_key = '0' + digit_key - WXK_NUMPAD0;
+    const auto gizmo = m_gizmos.get_current_type();
+    const bool transforming = gizmo == GLGizmosManager::Undefined || gizmo == GLGizmosManager::Move ||
+        gizmo == GLGizmosManager::Rotate || gizmo == GLGizmosManager::Scale;
+    // Route before ImGui consumes KEY_DOWN and prevents a CHAR event. Actual
+    // text fields and painting/modeling editors keep their keyboard controls.
+    if (m_initialized && evt.GetEventType() == wxEVT_KEY_DOWN && transforming && !m_selection.is_empty() &&
+        !evt.HasAnyModifiers() && digit_key >= '0' && digit_key <= '9' && !imgui->want_text_input() &&
+        (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView)) {
+        queue_filament_digit(digit_key - '0');
+        return;
+    }
     if (imgui->update_key_data(evt)) {
         render();
     }
@@ -5317,6 +5309,23 @@ void GLCanvas3D::on_render_fallback_timer(wxTimerEvent& evt)
         m_render_fallback_quiet_ticks = 0;
     else if (++m_render_fallback_quiet_ticks >= 60)//Wait for a maximum of 60 frames to ensure the idle mechanism returns to normal
         m_render_fallback_timer.Stop();
+}
+
+void GLCanvas3D::queue_filament_digit(int digit)
+{
+    if (m_selection.is_empty())
+        return;
+    const bool starting = m_color_input_value < 0 || !m_timer_set_color.IsRunning();
+    if (starting && digit == 0) {
+        m_color_input_value = 10;
+        wxTimerEvent event;
+        on_set_color_timer(event);
+        return;
+    }
+    // Keep a held key or an invalid multi-digit sequence from overflowing.
+    m_color_input_value = starting ? digit :
+        m_color_input_value <= wxGetApp().filaments_cnt() ? m_color_input_value * 10 + digit : m_color_input_value;
+    m_timer_set_color.StartOnce(500);
 }
 
 void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)

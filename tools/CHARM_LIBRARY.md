@@ -13,6 +13,17 @@ Studio can now maintain individual projects directly, on Mac or Windows:
 - Right-click a library item → **Regenerate project in library** to open its saved source, slice the project again, and replace its registered sliced files. Normal unsaved-project prompts still apply when opening the source. New plates are added; excluded plates remain excluded. Existing filenames and aliases are retained. Successful regeneration returns to the library, with the editable source still open in Prepare; it never sends a print.
 - Repeat additions update the same project/plate identities. New filename collisions get a numbered suffix instead of replacing another project's file. Outputs are staged before publication, concurrent changes are checked, and failed replacements restore prior files. The library refreshes automatically after a successful addition.
 
+Source opening uses a portable lookup in `.charm-library/plate-sources/` so it
+reads only the selected plate's project registrations, instead of downloading
+every project's iCloud record. The registrations in `.charm-library/projects/`
+remain authoritative; stale lookup entries cannot select a different source.
+Both Studio publication and the batch processor maintain this lookup. Existing
+collections can initialize it without reslicing using
+`python3 tools/migrate_library_source_index.py --state .charm-library/manifest.json --library "/path/to/Library" --write`.
+The migration refuses incomplete coverage and does not replace an existing
+lookup; `--record` includes additional registrations and `--unregistered`
+explicitly preserves known plates that need **Locate source project**.
+
 Projects exported this way are marked as managed by Studio. The terminal tool
 preserves their registrations and skips verified native outputs. If their source
 or outputs change, or a forced rebuild is requested, its plan directs you to

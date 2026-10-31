@@ -54,6 +54,9 @@ struct SlicedLibraryState {
     bool dirty{false};
     bool reading_thumbnails{false};
     bool action_running{false};
+    bool action_read_only{false};
+    uint64_t action_generation{0};
+    std::chrono::steady_clock::time_point action_started;
     LibraryJson pending_action;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 };
@@ -235,6 +238,12 @@ void WebViewPanel::PollSlicedLibrary()
             state->pending_thumbnails = LibraryJson::array();
         }
         action.swap(state->pending_action);
+        if (state->action_running && state->action_read_only &&
+            std::chrono::steady_clock::now() - state->action_started > std::chrono::seconds(15)) {
+            ++state->action_generation; // A late read must never open a project after timeout.
+            state->action_running = false;
+            action = {{"error", "Reading the library timed out. Check that its files are downloaded in iCloud or the drive is connected, then try again."}};
+        }
         if (!state->scanning && !state->reading_thumbnails && !state->action_running) m_sliced_library_timer->Stop();
     }
     if (!list.is_null()) send_library_message(*this, list);
@@ -303,6 +312,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                 std::chrono::steady_clock::now() - m_sliced_library->started > std::chrono::seconds(30)));
             m_sliced_library->dirty = true;
         }
+        if (m_sliced_library_opening) { PollSlicedLibrary(); return true; }
         if (scan) StartSlicedLibraryScan(folder);
         else PollSlicedLibrary();
     } else if (command == "sliced_library_context") {
@@ -381,19 +391,28 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
             if (!weak) return true;
             auto overrides = LibraryJson::parse(wxGetApp().app_config->get("sliced_library_source_paths"), nullptr, false);
             if (!overrides.is_object()) overrides = LibraryJson::object();
+            uint64_t generation;
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 state->action_running = true;
+                state->action_read_only = selection == source || selection == reveal_source || selection == regenerate || selection == reveal_plate;
+                state->action_started = std::chrono::steady_clock::now();
+                generation = ++state->action_generation;
             }
+            if (selection == source || selection == reveal_source)
+                send_library_message(*this, {{"command", "sliced_library_action_status"}, {"notice", "Finding the source project…"}});
             m_sliced_library_timer->Start(200);
-            std::thread([state, entry, note, overrides, opening = selection == source || selection == reveal_source || selection == regenerate,
+            std::thread([state, entry, note, overrides, generation, opening = selection == source || selection == reveal_source || selection == regenerate,
                          regenerating = selection == regenerate,
                          revealing_source = selection == reveal_source, revealing_plate = selection == reveal_plate, deleting = selection == remove] {
                 LibraryJson result = {{"rescan", deleting}};
                 try {
                     const auto root = fs::canonical(fs::u8path(state->folder));
                     if (opening) {
-                        result["source_projects"] = LibraryStorage::source_projects(root, entry.id, overrides);
+                        result["source_projects"] = LibraryStorage::source_projects(root, entry.id, overrides, [state, generation] {
+                            std::lock_guard<std::mutex> lock(state->mutex);
+                            return state->cancelled || state->action_generation != generation;
+                        });
                         result["plate"] = entry.id;
                         result["reveal_source"] = revealing_source;
                         result["regenerate"] = regenerating;
@@ -412,6 +431,7 @@ bool WebViewPanel::HandleSlicedLibraryMessage(const std::string& message)
                     result["error"] = std::string("The library action could not finish: ") + error.what();
                 }
                 std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->cancelled || state->action_generation != generation) return;
                 state->pending_action = std::move(result);
                 state->action_running = false;
             }).detach();

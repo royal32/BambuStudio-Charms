@@ -1,4 +1,5 @@
 #include "ExtraRenderers.hpp"
+#include <wx/clntdata.h>
 #include "wxExtensions.hpp"
 #include "GUI.hpp"
 #include "BitmapComboBox.hpp"
@@ -328,6 +329,10 @@ wxWindow* BitmapChoiceRenderer::CreateEditorCtrl(wxWindow* parent, wxRect labelR
     else
         c_editor->SetSelection(atoi(data.GetText().c_str()) - 1);
 
+    // Ending an unchanged inline edit must not reapply the parent filament
+    // and erase the individual part assignments (including newer shortcuts).
+    c_editor->wxEvtHandler::SetClientObject(new wxStringClientData(wxString::Format("%d", c_editor->GetSelection())));
+
 #ifdef __linux__
     c_editor->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& evt) {
         // to avoid event propagation to other sidebar items
@@ -350,6 +355,11 @@ bool BitmapChoiceRenderer::GetValueFromEditorCtrl(wxWindow* ctrl, wxVariant& val
     int selection = c->GetSelection();
     if (selection < 0)
         return false;
+    if (auto* initial = dynamic_cast<wxStringClientData*>(c->wxEvtHandler::GetClientObject())) {
+        long original = -1;
+        if (initial->GetData().ToLong(&original) && original == selection)
+            return false;
+    }
    
     DataViewBitmapText bmpText;
 

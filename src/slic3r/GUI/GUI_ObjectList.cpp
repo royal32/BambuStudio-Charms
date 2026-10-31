@@ -261,16 +261,18 @@ ObjectList::ObjectList(wxWindow* parent) :
 
     // Handle digits before the native macOS outline's type-to-select logic,
     // independently of the accelerator table disabled during name editing.
-    // Inline name/filament editors must retain ordinary text input.
+    // Name editors retain ordinary text input; the read-only filament picker
+    // can use these digits to choose a slot too.
     Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
         int key = event.GetKeyCode();
         if (key >= WXK_NUMPAD0 && key <= WXK_NUMPAD9)
             key = key - WXK_NUMPAD0 + '0';
+        auto* focus = wxWindow::FindFocus();
         bool editing = false;
-        for (unsigned int col = 0; col < GetColumnCount(); ++col)
-            editing |= GetColumn(col)->GetRenderer()->GetEditorCtrl() != nullptr;
+        if (auto* editor = GetColumn(colName)->GetRenderer()->GetEditorCtrl())
+            editing = focus && editor->IsShownOnScreen() && (focus == editor || editor->IsDescendant(focus));
         if (event.HasAnyModifiers() || key < '0' || key > '9' ||
-            wxWindow::FindFocus() != this || editing) {
+            !focus || (focus != this && !IsDescendant(focus)) || editing) {
             event.Skip();
             return;
         }
@@ -6846,7 +6848,7 @@ void GUI::ObjectList::OnStartEditing(wxDataViewEvent &event)
             int plate_idx = node->GetPlateIdx();
             if (plate_idx >= 0) {
                 auto plate = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx);
-                m_objects_model->SetName(from_u8(plate->get_plate_name()), GetSelection());
+                m_objects_model->SetName(from_u8(plate->get_plate_name()), item);
             }
         }
     }
@@ -6990,6 +6992,19 @@ void ObjectList::set_extruder_for_selected_items(const int extruder)
     if (extruder > colors.size())
         return;
 
+#ifdef __WXOSX__
+    // Cocoa can retain an inline editor after focus returns to the model/list.
+    // Close it before refreshing cells, otherwise its old value can be
+    // committed over this assignment by the native outline's end-edit callback.
+    auto* focus = wxWindow::FindFocus();
+    for (unsigned int col = 0; col < GetColumnCount(); ++col) {
+        auto* renderer = GetColumn(col)->GetRenderer();
+        if (auto* editor = renderer->GetEditorCtrl())
+            if (col == colFilament || !focus || (focus != editor && !editor->IsDescendant(focus)))
+                renderer->CancelEditing();
+    }
+#endif
+
     wxDataViewItemArray sels;
     GetSelections(sels);
 
@@ -7006,6 +7021,8 @@ void ObjectList::set_extruder_for_selected_items(const int extruder)
         ItemType sel_item_type = m_objects_model->GetItemType(sel_item);
         wxDataViewItem item = (sel_item_type & itInstance) ? m_objects_model->GetObject(item) : sel_item;
         ItemType type = m_objects_model->GetItemType(item);
+        if (type & itPlate)
+            continue;
         if (type & itVolume) {
             const int obj_idx = m_objects_model->GetObjectIdByItem(item);
             int vol_idx = m_objects_model->GetVolumeIdByItem(item);

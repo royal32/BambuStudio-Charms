@@ -164,24 +164,36 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     auto* panel = new wxPanel(this);
     auto* outer = new wxBoxSizer(wxVERTICAL);
     auto* model_row = new wxBoxSizer(wxHORIZONTAL);
-    m_models = new wxChoice(panel, wxID_ANY); model_row->Add(m_models, 1, wxRIGHT|wxALIGN_CENTER_VERTICAL, FromDIP(8));
+    // Use controls with matching visible edges while retaining native focus,
+    // keyboard and accessibility behavior.
+    auto button = [panel](const wxString& label, int width = -1) {
+        auto* result = new wxButton(panel, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        result->SetFont(panel->GetFont());
+        result->SetMinSize(panel->FromDIP(wxSize(width, 32)));
+        assistant_uniform_button(result->GetHandle());
+        return result;
+    };
+    m_models = new wxChoice(panel, wxID_ANY);
+    m_models->SetMinSize(FromDIP(wxSize(-1, 32)));
+    assistant_uniform_button(m_models->GetHandle());
+    model_row->Add(m_models, 1, wxRIGHT|wxEXPAND, FromDIP(8));
     m_models->SetName("Assistant model");
-    m_connect = new wxButton(panel, wxID_ANY, "Continue with ChatGPT"); model_row->Add(m_connect, 1, wxRIGHT|wxALIGN_CENTER_VERTICAL, FromDIP(8));
-    m_menu = new wxButton(panel, wxID_ANY, wxString::FromUTF8("⋯"), wxDefaultPosition, FromDIP(wxSize(38,-1)));
-    m_menu->SetName("Assistant options"); m_menu->SetToolTip("Accounts and conversation options"); model_row->Add(m_menu,0,wxALIGN_CENTER_VERTICAL);
+    m_connect = button("Continue with ChatGPT"); model_row->Add(m_connect, 1, wxRIGHT|wxEXPAND, FromDIP(8));
+    m_menu = button(wxString::FromUTF8("⋯"), 38);
+    m_menu->SetName("Assistant options"); m_menu->SetToolTip("Accounts and conversation options"); model_row->Add(m_menu,0,wxEXPAND);
     outer->Add(model_row, 0, wxEXPAND|wxALL, FromDIP(12));
     m_chat = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL|wxBORDER_NONE);
     assistant_clip_children(m_chat->GetHandle());
     m_chat->SetScrollRate(0, FromDIP(10)); m_messages=new wxBoxSizer(wxVERTICAL); m_chat->SetSizer(m_messages);
     m_chat->Bind(wxEVT_SIZE,[this](wxSizeEvent& event) { layout_chat(false); event.Skip(); });
     outer->Add(m_chat, 1, wxEXPAND|wxLEFT|wxRIGHT, FromDIP(8));
-    auto* quick = new wxBoxSizer(wxHORIZONTAL);
+    auto* quick = new wxGridSizer(1, 2, 0, FromDIP(8));
     for (const auto& item : std::vector<std::pair<std::string,std::string>>{{"Explain warnings", "Explain the warnings on this plate."},
         {"Help with supports", "Help me set up supports for this plate."}}) {
-        auto* button = new wxButton(panel, wxID_ANY, wxString::FromUTF8(item.first));
-        m_quick.push_back(button);
-        quick->Add(button, 1, wxRIGHT, FromDIP(4));
-        button->Bind(wxEVT_BUTTON, [this, text=item.second](wxCommandEvent&) { send(text,false); });
+        auto* action = button(wxString::FromUTF8(item.first));
+        m_quick.push_back(action);
+        quick->Add(action, 1, wxEXPAND);
+        action->Bind(wxEVT_BUTTON, [this, text=item.second](wxCommandEvent&) { send(text,false); });
     }
     outer->Add(quick, 0, wxEXPAND|wxALL, FromDIP(12));
     auto* composer = new wxBoxSizer(wxHORIZONTAL);
@@ -189,7 +201,7 @@ AssistantWindow::AssistantWindow(wxWindow* parent)
     m_input->SetName("Message the assistant"); m_input->SetHint("Ask me to help with your print…");
     m_input->SetToolTip("Enter to send. Shift+Enter for a new line.");
     composer->Add(m_input,1,wxEXPAND|wxRIGHT,FromDIP(6));
-    m_send = new wxButton(panel, wxID_ANY, "Send"); composer->Add(m_send,0,wxALIGN_BOTTOM);
+    m_send = button("Send", 78); composer->Add(m_send,0,wxALIGN_BOTTOM);
     outer->Add(composer,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(12));
     m_allow_changes=wxGetApp().app_config->get("studio_assistant_allow_changes")!="false";
     panel->SetSizer(outer);

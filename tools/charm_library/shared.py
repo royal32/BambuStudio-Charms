@@ -17,6 +17,22 @@ def child(root, relative):
     return result
 
 
+def plate_source_key(plate):
+    value = 14695981039346656037
+    for byte in plate.encode('utf-8'):
+        value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
+    return format(value, '016x')
+
+
+def index_project(root, project):
+    identifier = project['id']
+    if not identifier or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in identifier):
+        raise ValueError('Invalid source project ID')
+    for plate in project['plates']:
+        write_json(root, '.charm-library/plate-sources/' + plate_source_key(plate['id']) + '/' + identifier + '.json',
+                   {'version': 1, 'plate': plate['id'], 'project_id': identifier})
+
+
 def read(path):
     if path.stat().st_size > 65536:
         raise ValueError('Shared library record is too large: ' + str(path))
@@ -130,6 +146,7 @@ def sync_projects(root, projects):
         record['editable_source'] = bool(project.get('editable_project'))
         record['plates'].extend(project.get('legacy_plates', []))
         write_json(root, '.charm-library/projects/' + project['id'] + '.json', record)
+        index_project(root, record)
 
 
 def restore(library, plate):

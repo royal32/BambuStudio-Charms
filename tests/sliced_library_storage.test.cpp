@@ -16,6 +16,8 @@ int main(int argc, char** argv)
         Json project = {{"version", 1}, {"id", "bee-project"}, {"name", "Bee"}, {"source_sha256", "source-hash"},
             {"plates", Json::array({{{"id", plate}, {"index", 2}}, {{"id", "Bee.gcode.3mf"}, {"index", 1}}})}};
         write(root, ".charm-library/projects/bee-project.json", project.dump());
+        assert(projects_for(root, plate, [] { return true; }).empty());
+        assert(source_projects(root, plate, Json::object(), [] { return true; }).empty());
         // Older libraries still offer Locate, then remember that computer's copy.
         auto sources = source_projects(root, plate);
         assert(sources.size() == 1 && !sources[0]["available"].get<bool>());
@@ -54,6 +56,20 @@ int main(int argc, char** argv)
         assert(source_projects(root, plate, obsolete)[0]["path"] == project["source"]);
         Json located = {{"bee-project", {{"source", project["source"]}, {"path", (root / "Moved Bee.3MF").u8string()}}}};
         assert(source_projects(root, plate, located)[0]["path"] == (root / "Moved Bee.3MF").u8string());
+        // Source lookup must not read unrelated iCloud registrations. A stale
+        // hint cannot invent ownership, and multiple real owners remain visible.
+        index_project(root, project);
+        assert(plate_source_key(u8"Mamá’s Bee.gcode.3mf") == "901ed4ae796a5f36"); // Shared Python/C++ UTF-8 routing.
+        write(root, ".charm-library/projects/unrelated.json", "invalid unrelated record");
+        assert(source_projects(root, plate)[0]["path"] == project["source"]);
+        auto another = project; another["id"] = "another-bee";
+        write(root, ".charm-library/projects/another-bee.json", another.dump());
+        index_project(root, another);
+        assert(source_projects(root, plate).size() == 2);
+        another["plates"] = Json::array();
+        fs::remove(root / ".charm-library/projects/another-bee.json");
+        write(root, ".charm-library/projects/another-bee.json", another.dump());
+        assert(source_projects(root, plate).size() == 1);
         // Native publication is repeatable and never steals another project's
         // filename. Existing aliases and per-plate exclusions keep their IDs.
         const auto native_root = root / "native";

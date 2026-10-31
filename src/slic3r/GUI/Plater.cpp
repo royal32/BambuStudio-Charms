@@ -23084,6 +23084,8 @@ bool Plater::add_plates_to_library(bool all_plates, const std::string& folder, c
         { std::ofstream out(metadata); out.exceptions(std::ios::failbit | std::ios::badbit); out << plan.project.dump(2) << '\n'; out.close(); }
         staged.emplace_back(project_stage, relative.generic_u8string());
         staged.emplace_back(metadata, ".charm-library/projects/" + plan.project.at("id").get<std::string>() + ".json");
+        for (const auto& entry : storage::index_project(staging.path, plan.project))
+            staged.emplace_back(storage::child(staging.path, entry), entry);
         try {
             storage::publish_staged(root, staging.path, staged, [](const stdfs::path& from, const stdfs::path& to) {
 #ifdef _WIN32
