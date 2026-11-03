@@ -8,7 +8,7 @@ The existing collection is tracked in persistent state, with named standardized 
 
 Studio can now maintain individual projects directly, on Mac or Windows:
 
-- After slicing, use the **Print plate ▾ → Add plate to library** or **Add all plates to library** actions. All requested nonempty printable plates must have valid slices. The first addition asks for a library folder if none is selected.
+- After slicing, use the **Print plate ▾ → Add plate to library** or **Add all plates to library** actions. All requested nonempty printable plates must have valid slices. The first addition asks for a library folder if none is selected. Library checks run in the background with progress and Cancel, including iCloud downloads. A two-minute wait before replacement stops safely without replacing library files; let iCloud finish syncing before retrying. Once replacement begins, Studio completes it or rolls it back before closing the progress window.
 - Studio saves an editable source in the shared library and exports one named `.gcode.3mf` per plate, with native vector artwork when supported. External inputs get a copy in **Projects/**; the open document continues editing that library copy. Existing projects already inside the library are saved in place. Current printer, filament, process, part colors and plate layout are preserved.
 - Right-click a library item → **Regenerate project in library** to open its saved source, slice the project again, and replace its registered sliced files. Normal unsaved-project prompts still apply when opening the source. New plates are added; excluded plates remain excluded. Existing filenames and aliases are retained. Successful regeneration returns to the library, with the editable source still open in Prepare; it never sends a print.
 - Repeat additions update the same project/plate identities. New filename collisions get a numbered suffix instead of replacing another project's file. Outputs are staged before publication, concurrent changes are checked, and failed replacements restore prior files. The library refreshes automatically after a successful addition.
@@ -114,6 +114,9 @@ Normal launches build offline from the pinned Cargo lockfile. Setup installs Num
 ## Validation
 
 ```sh
+cmake -S tests/library -B build/library-checks
+cmake --build build/library-checks
+ctest --test-dir build/library-checks --output-on-failure
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p 'test_charm_library*.py'
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_vector_preview_generator.py
 PYTHONDONTWRITEBYTECODE=1 .charm-library/venv/bin/python3 -m unittest discover -s tests -p test_embedded_artwork.py

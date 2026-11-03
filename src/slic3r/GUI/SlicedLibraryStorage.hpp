@@ -19,6 +19,9 @@
 #include <cstdio>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include <thread>
+#include <mutex>
 #ifndef _WIN32
 #include <unistd.h>
 #include <cerrno>
@@ -269,17 +272,69 @@ inline std::string short_stem(const std::string& name)
     return stem;
 }
 
-inline Json project_for_source(const fs::path& root, const fs::path& source, const std::string& preferred = {})
+// Publication needs all ownership records. Load them once, with bounded
+// concurrency, on its file worker rather than scanning twice on the GUI thread.
+inline std::vector<Json> publication_projects(const fs::path& root,
+    const std::function<void()>& checkpoint = [] {},
+    const std::function<void(size_t, size_t)>& progress = [](size_t, size_t) {})
 {
+    checkpoint();
+    const auto directory = child(root, ".charm-library/projects");
+    std::vector<fs::path> paths;
+    if (fs::exists(directory)) for (const auto& item : fs::directory_iterator(directory)) {
+        checkpoint();
+        if (item.path().extension() == ".json") paths.push_back(item.path());
+    }
+    std::sort(paths.begin(), paths.end());
+    std::vector<Json> records(paths.size());
+    std::atomic<size_t> next{0}, completed{0};
+    std::atomic<bool> failed{false};
+    std::mutex error_mutex;
+    std::exception_ptr error;
+    auto load = [&] {
+        try {
+            while (!failed) {
+                checkpoint();
+                const auto i = next.fetch_add(1);
+                if (i >= paths.size()) break;
+                records[i] = read(child(root, paths[i].lexically_relative(root).generic_u8string()));
+                checkpoint();
+                progress(completed.fetch_add(1) + 1, paths.size());
+            }
+        } catch (...) {
+            failed = true;
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (!error) error = std::current_exception();
+        }
+    };
+    std::vector<std::thread> workers;
+    try {
+        for (size_t i = 0; i < std::min<size_t>(8, paths.size()); ++i) workers.emplace_back(load);
+    } catch (...) {
+        failed = true;
+        for (auto& worker : workers) worker.join();
+        throw;
+    }
+    for (auto& worker : workers) worker.join(); // Only the file worker waits here.
+    if (error) std::rethrow_exception(error);
+    checkpoint();
+    return records;
+}
+
+inline Json project_for_source(const fs::path& root, const fs::path& source, const std::string& preferred = {},
+                               const std::vector<Json>* snapshot = nullptr)
+{
+    if (!snapshot) {
+        const auto records = publication_projects(root);
+        return project_for_source(root, source, preferred, &records);
+    }
     const auto directory = child(root, ".charm-library/projects");
     if (!fs::exists(directory)) {
         if (!preferred.empty()) throw std::runtime_error("The library project registration changed. Refresh and try again.");
         return Json();
     }
     Json match;
-    for (const auto& item : fs::directory_iterator(directory)) {
-        if (item.path().extension() != ".json") continue;
-        auto project = read(child(root, item.path().lexically_relative(root).generic_u8string()));
+    for (auto project : *snapshot) {
         if (!preferred.empty()) {
             if (project.at("id").get<std::string>() == preferred) return project;
             continue;
@@ -310,8 +365,13 @@ inline bool plate_excluded(const std::vector<Json>& records, const Json& project
 }
 
 inline PublicationPlan plan_publication(const fs::path& root, Json project, const std::string& source,
-                                         const std::string& name, const std::vector<PlateExport>& plates)
+                                         const std::string& name, const std::vector<PlateExport>& plates,
+                                         const std::vector<Json>* snapshot = nullptr)
 {
+    if (!snapshot) {
+        const auto records = publication_projects(root);
+        return plan_publication(root, std::move(project), source, name, plates, &records);
+    }
     if (project.is_null()) project = {{"version", 1}, {"id", "studio-" + unique_id()}, {"name", name}, {"plates", Json::array()}};
     const auto records = exclusions(root);
     const auto id = project.at("id").get<std::string>();
@@ -319,10 +379,7 @@ inline PublicationPlan plan_publication(const fs::path& root, Json project, cons
     if (id.empty() || id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
         throw std::runtime_error("Invalid library project identity.");
     std::map<std::string, std::string> owners;
-    const auto directory = child(root, ".charm-library/projects");
-    if (fs::exists(directory)) for (const auto& item : fs::directory_iterator(directory)) {
-        if (item.path().extension() != ".json") continue;
-        const auto other = read(child(root, item.path().lexically_relative(root).generic_u8string()));
+    for (const auto& other : *snapshot) {
         for (const auto& p : other.at("plates")) {
             const auto filename = p.at("id").get<std::string>(); child(root, filename);
             auto& owner = owners[folded(filename)];

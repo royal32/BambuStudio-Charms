@@ -2,6 +2,7 @@
 #include "PlateJobName.hpp"
 #include "PlateVectorGeometry.hpp"
 #include "SlicedLibraryStorage.hpp"
+#include "SlicedLibraryTask.hpp"
 #include "WebViewDialog.hpp"
 #include <openssl/sha.h>
 #include <cerrno>
@@ -22932,13 +22933,15 @@ void Plater::export_sliced_plate_gcodes()
 }
 
 namespace {
-std::string library_file_digest(const std::filesystem::path& path)
+std::string library_file_digest(const std::filesystem::path& path, const std::function<void()>& checkpoint = [] {})
 {
+    checkpoint();
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("A library file could not be read.");
     SHA256_CTX hash; SHA256_Init(&hash);
     std::array<char, 65536> buffer;
     while (input) {
+        checkpoint();
         input.read(buffer.data(), buffer.size());
         SHA256_Update(&hash, buffer.data(), size_t(input.gcount()));
     }
@@ -22957,6 +22960,110 @@ struct LibraryStaging {
     std::filesystem::path path;
     ~LibraryStaging() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
 };
+struct LibraryPublicationResult {
+    std::filesystem::path root, source;
+    size_t files, excluded;
+};
+
+LibraryPublicationResult publish_library_snapshot(const std::string& directory,
+    std::filesystem::path source, const std::string& preferred, const std::string& name,
+    const std::vector<LibraryStorage::PlateExport>& candidates,
+    const std::shared_ptr<LibraryStaging>& snapshot, const LibraryTasks::Context& context)
+{
+    namespace stdfs = std::filesystem;
+    namespace storage = LibraryStorage;
+    const auto check = [&] { context.checkpoint(); };
+    context.report("Checking the library folder…");
+    const auto root = stdfs::canonical(stdfs::u8path(directory));
+    if (!stdfs::is_directory(root)) throw std::runtime_error("The library folder is unavailable.");
+    const auto registrations = storage::publication_projects(root, check, [&](size_t done, size_t total) {
+        context.report("Checking library projects (" + std::to_string(done) + " of " + std::to_string(total) + ")…");
+    });
+    auto project = source.empty() ? json() : storage::project_for_source(root, source, preferred, &registrations);
+    check();
+    auto relative = source.empty() ? stdfs::path() : stdfs::weakly_canonical(source).lexically_relative(root);
+    if (relative.empty() || *relative.begin() == ".." || !storage::is_source_project(source)) {
+        auto stem = plate_filename_component(name);
+        if (stem.empty()) stem = "Project";
+        relative = stdfs::u8path("Projects/" + stem + ".3mf");
+        for (int n = 2; stdfs::exists(storage::child(root, relative.generic_u8string())); ++n) {
+            check();
+            relative = stdfs::u8path("Projects/" + storage::short_stem(stem) + " (" + std::to_string(n) + ").3mf");
+        }
+    }
+    source = storage::child(root, relative.generic_u8string());
+    auto plan = storage::plan_publication(root, project, relative.generic_u8string(), name, candidates, &registrations);
+    if (plan.files.empty()) return {root, source, 0, plan.excluded};
+    context.report("Checking existing library files…");
+    std::map<std::string, std::string> output_before;
+    for (const auto& file : plan.files) {
+        check();
+        const auto path = storage::child(root, file.relative);
+        output_before[file.relative] = stdfs::exists(path) ? library_file_digest(path, check) : std::string();
+    }
+    const auto source_before = stdfs::exists(source) ? library_file_digest(source, check) : std::string();
+    context.report("Preparing the current project…");
+    std::vector<int> requested;
+    for (const auto& file : plan.files)
+        if (std::find(requested.begin(), requested.end(), file.index) == requested.end()) requested.push_back(file.index);
+    context.await_snapshot(std::move(requested)); // Export only non-excluded plates.
+    LibraryStaging staging{storage::child(root, ".charm-library/staging/" + storage::unique_id())};
+    check();
+    stdfs::create_directories(staging.path);
+    const auto project_stage = staging.path / "project.3mf";
+    stdfs::copy_file(snapshot->path / "project.3mf", project_stage);
+    plan.project["source_sha256"] = library_file_digest(project_stage, check);
+    plan.project["updated_at"] = storage::timestamp();
+    if (!plan.project.value("output_sha256", json()).is_object()) plan.project["output_sha256"] = json::object();
+    std::vector<std::pair<stdfs::path, std::string>> staged;
+    size_t count = 0;
+    for (const auto& file : plan.files) {
+        context.report("Preparing “" + file.name + "”…");
+        const auto copy = staging.path / ("output-" + std::to_string(++count) + ".gcode.3mf");
+        // Independent staged inodes are needed for aliases and rollback.
+        stdfs::copy_file(snapshot->path / ("plate-" + std::to_string(file.index) + ".gcode.3mf"), copy);
+        staged.emplace_back(copy, file.relative);
+        plan.project["output_sha256"][file.relative] = library_file_digest(copy, check);
+    }
+    context.report("Checking for library changes…");
+    if (stdfs::exists(source) ? library_file_digest(source, check) != source_before : !source_before.empty())
+        throw std::runtime_error("The source project changed on disk. Reopen it before regenerating the library.");
+    if (!project.is_null()) {
+        const auto current = storage::read(storage::child(root, ".charm-library/projects/" + project.at("id").get<std::string>() + ".json"));
+        if (current != project) throw std::runtime_error("The library project changed during export. Refresh and try again.");
+    }
+    const auto exclusions = storage::exclusions(root);
+    for (const auto& file : plan.files) {
+        check();
+        if (storage::plate_excluded(exclusions, plan.project, file.index, file.relative))
+            throw std::runtime_error("A plate was excluded during export. Refresh and try again.");
+        const auto path = storage::child(root, file.relative);
+        if ((stdfs::exists(path) ? library_file_digest(path, check) : std::string()) != output_before.at(file.relative))
+            throw std::runtime_error("A library file changed during export. Refresh and try again.");
+    }
+    const auto metadata = staging.path / "project.json";
+    { std::ofstream out(metadata); out.exceptions(std::ios::failbit | std::ios::badbit); out << plan.project.dump(2) << '\n'; out.close(); }
+    staged.emplace_back(project_stage, relative.generic_u8string());
+    staged.emplace_back(metadata, ".charm-library/projects/" + plan.project.at("id").get<std::string>() + ".json");
+    for (const auto& entry : storage::index_project(staging.path, plan.project))
+        staged.emplace_back(storage::child(staging.path, entry), entry);
+    context.report("Finishing the library update…");
+    context.begin_commit(); // Final GUI validation; Cancel can win until approval.
+    try {
+        storage::publish_staged(root, staging.path, staged, [](const stdfs::path& from, const stdfs::path& to) {
+#ifdef _WIN32
+            return Slic3r::rename_file(from.u8string(), to.u8string());
+#else
+            if (boost::nowide::rename(from.u8string().c_str(), to.u8string().c_str()) == 0) return std::error_code();
+            return std::error_code(errno, std::generic_category());
+#endif
+        });
+    } catch (const storage::PublicationFailure& error) {
+        if (error.keep_backups) staging.path.clear();
+        throw;
+    }
+    return {root, source, plan.files.size(), plan.excluded};
+}
 }
 
 bool Plater::can_add_plates_to_library(bool all_plates) const
@@ -22994,22 +23101,12 @@ bool Plater::add_plates_to_library(bool all_plates, const std::string& folder, c
     if (!can_add_plates_to_library(all_plates)) return false;
     LibraryOperation operation(p->m_library_operation);
     try {
-        const auto root = stdfs::canonical(stdfs::u8path(directory));
-        if (!stdfs::is_directory(root)) throw std::runtime_error("The library folder is unavailable.");
-        auto source = stdfs::u8path(into_u8(get_project_filename(".3mf")));
-        auto project = source.empty() ? json() : storage::project_for_source(root, source, project_id);
+        // Show the modal guard before any shared-folder access. Export only to
+        // local scratch on the GUI thread; workers never touch live model/UI.
+        wxProgressDialog progress(_L("Add plates to library"), _L("Preparing the current project…"),
+            100, this, wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+        const auto source = stdfs::u8path(into_u8(get_project_filename(".3mf")));
         const auto project_name = into_u8(get_project_name());
-        auto relative = source.empty() ? stdfs::path() : stdfs::weakly_canonical(source).lexically_relative(root);
-        // Publish an editable copy into the shared folder for new external/STL
-        // inputs. Continue editing that copy, so both Macs use the same source.
-        if (relative.empty() || *relative.begin() == ".." || !storage::is_source_project(source)) {
-            auto stem = plate_filename_component(project_name);
-            if (stem.empty()) stem = "Project";
-            relative = stdfs::u8path("Projects/" + stem + ".3mf");
-            for (int n = 2; stdfs::exists(storage::child(root, relative.generic_u8string())); ++n)
-                relative = stdfs::u8path("Projects/" + storage::short_stem(stem) + " (" + std::to_string(n) + ").3mf");
-        }
-        source = storage::child(root, relative.generic_u8string());
         std::vector<storage::PlateExport> candidates;
         for (int i = 0; i < p->partplate_list.get_plate_count(); ++i) {
             auto* plate = p->partplate_list.get_plate(i);
@@ -23019,98 +23116,67 @@ bool Plater::add_plates_to_library(bool all_plates, const std::string& folder, c
             if (!stdfs::is_regular_file(gcode) || stdfs::file_size(gcode) == 0) throw std::runtime_error("Sliced data is missing. Slice the plate again.");
             candidates.push_back({i + 1, plate_job_name(project_name, plate->get_plate_name(), i, p->partplate_list.get_plate_count()), {}});
         }
-        auto plan = storage::plan_publication(root, project, relative.generic_u8string(), project_name, candidates);
-        if (plan.files.empty()) {
+        const auto snapshot = std::make_shared<LibraryStaging>();
+        snapshot->path = stdfs::temp_directory_path() / ("studio-library-" + storage::unique_id());
+        stdfs::create_directories(snapshot->path);
+        LibraryTasks::Task<LibraryPublicationResult> task(
+            [directory, source, project_id, project_name, candidates, snapshot](const LibraryTasks::Context& context) {
+                return publish_library_snapshot(directory, source, project_id, project_name, candidates, snapshot, context);
+            });
+        auto started = std::chrono::steady_clock::now();
+        while (!task.done()) {
+            const auto message = task.message();
+            if (!progress.Pulse(message.empty() ? _L("Checking the library…") : from_u8(message))) {
+                if (task.cancel()) return false;
+                // Replacement has begun. Finish or roll back as one operation;
+                // don't abandon a partly published library on a late Cancel.
+                progress.Resume();
+            }
+            if (std::chrono::steady_clock::now() - started > std::chrono::minutes(2) && task.cancel())
+                throw std::runtime_error("The library is taking too long to respond. No library files were replaced. Let iCloud finish syncing, then try again.");
+            if (task.phase() == LibraryTasks::Phase::awaiting_snapshot) {
+                const auto requested = task.snapshot_indices();
+                const auto project_stage = snapshot->path / "project.3mf";
+                if (export_3mf(fs::path(project_stage.u8string()), SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::ShareMesh) < 0)
+                    throw std::runtime_error("The editable project could not be saved. No library files were replaced.");
+                for (const auto& plate : candidates) {
+                    if (std::find(requested.begin(), requested.end(), plate.index) == requested.end()) continue;
+                    if (!progress.Pulse(from_u8("Preparing “" + plate.name + "”…"))) return false;
+                    const auto job = snapshot->path / ("plate-" + std::to_string(plate.index) + ".gcode.3mf");
+                    const auto strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel;
+                    if (export_3mf(fs::path(job.u8string()), strategy, plate.index - 1) < 0 || !stdfs::is_regular_file(job) || stdfs::file_size(job) == 0)
+                        throw std::runtime_error("A sliced plate could not be exported. No library files were replaced.");
+                }
+                started = std::chrono::steady_clock::now();
+                task.snapshot_ready();
+            }
+            if (task.phase() == LibraryTasks::Phase::awaiting_commit) {
+                if (is_background_process_slicing() || is_background_process_update_scheduled())
+                    throw std::runtime_error("The project changed during export. Slice it again before adding it to the library.");
+                for (const auto& plate : candidates)
+                    if (!p->partplate_list.get_plate(plate.index - 1)->is_slice_result_ready_for_print())
+                        throw std::runtime_error("A plate changed during export. Slice it again before adding it to the library.");
+                if (auto* cancel = progress.FindWindow(wxID_CANCEL)) cancel->Disable();
+                task.approve_commit();
+            }
+            wxMilliSleep(50);
+        }
+        const auto result = task.get();
+        if (result.files == 0) {
+            progress.Update(100);
             MessageDialog(this, _L("These plates are excluded from library updates. Restore them before adding them again."), _L("Sliced library"), wxOK).ShowModal();
             return false;
         }
-        std::map<std::string, std::string> output_before;
-        for (const auto& file : plan.files) {
-            const auto path = storage::child(root, file.relative);
-            output_before[file.relative] = stdfs::exists(path) ? library_file_digest(path) : std::string();
-        }
-        const auto transaction = ".charm-library/staging/" + storage::unique_id();
-        LibraryStaging staging{storage::child(root, transaction)};
-        stdfs::create_directories(staging.path);
-        const auto source_before = stdfs::exists(source) ? library_file_digest(source) : std::string();
-        wxProgressDialog progress(_L("Add plates to library"), _L("Saving the editable project and sliced plates…"),
-            int(plan.files.size() + 1), this, wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT);
-        const auto project_stage = staging.path / "project.3mf";
-        if (export_3mf(fs::path(project_stage.u8string()), SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::ShareMesh) < 0)
-            throw std::runtime_error("The editable project could not be saved. No library files were replaced.");
-        plan.project["source_sha256"] = library_file_digest(project_stage);
-        plan.project["updated_at"] = storage::timestamp();
-        if (!plan.project.value("output_sha256", json()).is_object()) plan.project["output_sha256"] = json::object();
-        std::vector<std::pair<stdfs::path, std::string>> staged;
-        std::map<int, stdfs::path> exported;
-        int count = 0;
-        for (const auto& file : plan.files) {
-            if (!progress.Update(count++, from_u8("Preparing “" + file.name + "”…"))) return false;
-            auto job = staging.path / ("plate-" + std::to_string(file.index) + ".gcode.3mf");
-            if (!exported.count(file.index)) {
-                const auto strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel;
-                if (export_3mf(fs::path(job.u8string()), strategy, file.index - 1) < 0 || !stdfs::is_regular_file(job) || stdfs::file_size(job) == 0)
-                    throw std::runtime_error("A sliced plate could not be exported. No library files were replaced.");
-                exported[file.index] = job;
-            }
-            // Each destination needs its own staged inode, including aliases.
-            const auto copy = staging.path / ("output-" + std::to_string(count) + ".gcode.3mf");
-            stdfs::copy_file(exported.at(file.index), copy);
-            staged.emplace_back(copy, file.relative);
-            plan.project["output_sha256"][file.relative] = library_file_digest(copy);
-        }
-        if (!progress.Update(count, _L("Updating the library…"))) return false;
-        // Recheck after modal event processing and before any replacements.
-        if (is_background_process_slicing() || is_background_process_update_scheduled())
-            throw std::runtime_error("The project changed during export. Slice it again before adding it to the library.");
-        for (const auto& plate : candidates)
-            if (!p->partplate_list.get_plate(plate.index - 1)->is_slice_result_ready_for_print())
-                throw std::runtime_error("A plate changed during export. Slice it again before adding it to the library.");
-        if (stdfs::exists(source) ? library_file_digest(source) != source_before : !source_before.empty())
-            throw std::runtime_error("The source project changed on disk. Reopen it before regenerating the library.");
-        if (!project.is_null()) {
-            const auto current = storage::read(storage::child(root, ".charm-library/projects/" + project.at("id").get<std::string>() + ".json"));
-            if (current != project) throw std::runtime_error("The library project changed during export. Refresh and try again.");
-        }
-        const auto exclusions = storage::exclusions(root);
-        for (const auto& file : plan.files) {
-            if (storage::plate_excluded(exclusions, plan.project, file.index, file.relative))
-                throw std::runtime_error("A plate was excluded during export. Refresh and try again.");
-            const auto path = storage::child(root, file.relative);
-            if ((stdfs::exists(path) ? library_file_digest(path) : std::string()) != output_before.at(file.relative))
-                throw std::runtime_error("A library file changed during export. Refresh and try again.");
-        }
-        const auto metadata = staging.path / "project.json";
-        { std::ofstream out(metadata); out.exceptions(std::ios::failbit | std::ios::badbit); out << plan.project.dump(2) << '\n'; out.close(); }
-        staged.emplace_back(project_stage, relative.generic_u8string());
-        staged.emplace_back(metadata, ".charm-library/projects/" + plan.project.at("id").get<std::string>() + ".json");
-        for (const auto& entry : storage::index_project(staging.path, plan.project))
-            staged.emplace_back(storage::child(staging.path, entry), entry);
-        try {
-            storage::publish_staged(root, staging.path, staged, [](const stdfs::path& from, const stdfs::path& to) {
-#ifdef _WIN32
-                return Slic3r::rename_file(from.u8string(), to.u8string());
-#else
-                // The generic Utils helper unlinks the destination first on
-                // POSIX. Use rename directly to keep each replacement atomic.
-                if (boost::nowide::rename(from.u8string().c_str(), to.u8string().c_str()) == 0) return std::error_code();
-                return std::error_code(errno, std::generic_category());
-#endif
-            });
-        } catch (const storage::PublicationFailure& error) {
-            if (error.keep_backups) staging.path.clear();
-            throw;
-        }
-        set_project_filename(from_u8(source.u8string()));
-        m_3mf_path = source.u8string();
+        set_project_filename(from_u8(result.source.u8string()));
+        m_3mf_path = result.source.u8string();
         up_to_date(true, false); up_to_date(true, true);
         wxGetApp().update_saved_preset_from_current_preset();
         reset_project_dirty_after_save();
-        progress.Update(int(plan.files.size() + 1));
-        if (wxGetApp().mainframe->m_webview) wxGetApp().mainframe->m_webview->StartSlicedLibraryScan(root.u8string());
+        progress.Update(100);
+        if (wxGetApp().mainframe->m_webview) wxGetApp().mainframe->m_webview->StartSlicedLibraryScan(result.root.u8string());
         p->notification_manager->push_notification(NotificationType::CustomNotification,
             NotificationManager::NotificationLevel::RegularNotificationLevel,
-            into_u8(format_wxstr(_L("Added %d sliced file(s) to the library. %d excluded plate(s) skipped.\nThe editable project is saved in the library."), int(plan.files.size()), int(plan.excluded))));
+            into_u8(format_wxstr(_L("Added %d sliced file(s) to the library. %d excluded plate(s) skipped.\nThe editable project is saved in the library."), int(result.files), int(result.excluded))));
         return true;
     } catch (const std::exception& error) {
         show_error(this, from_u8(error.what()));

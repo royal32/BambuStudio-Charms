@@ -78,6 +78,38 @@ int main(int argc, char** argv)
         auto initial = plan_publication(native_root, Json(), "Projects/Bee.3mf", "Bee",
             {{1, "Bee", {}}, {2, "Bee", {}}});
         assert(initial.files.size() == 2);
+        // A single immutable read supplies source lookup and filename ownership.
+        // Neither operation reopens every shared registration after this point.
+        write(native_root, ".charm-library/projects/" + initial.project.at("id").get<std::string>() + ".json", initial.project.dump());
+        size_t loaded = 0;
+        const auto snapshot = publication_projects(native_root, [] {}, [&](size_t n, size_t total) {
+            assert(total == 1); loaded = n;
+        });
+        assert(loaded == 1 && snapshot.size() == 1);
+        write(native_root, ".charm-library/projects/unrelated.json", "must not be reopened");
+        assert(project_for_source(native_root, native_root / "Projects/Bee.3mf", {}, &snapshot).at("id") == initial.project.at("id"));
+        const auto from_snapshot = plan_publication(native_root, initial.project, "Projects/Bee.3mf", "Bee", {{1, "Bee", {}}}, &snapshot);
+        assert(from_snapshot.files.size() == 1 && from_snapshot.files[0].relative == initial.files[0].relative);
+        fs::remove(native_root / ".charm-library/projects/unrelated.json");
+        bool cancelled_load = false;
+        try { publication_projects(native_root, [] { throw std::runtime_error("cancelled"); }); }
+        catch (const std::runtime_error&) { cancelled_load = true; }
+        assert(cancelled_load);
+        const auto parallel_root = root / "parallel";
+        for (int i = 0; i < 24; ++i) {
+            auto record = initial.project; record["id"] = "project-" + std::to_string(i);
+            write(parallel_root, ".charm-library/projects/" + record.at("id").get<std::string>() + ".json", record.dump());
+        }
+        std::atomic<size_t> reports{0};
+        const auto parallel_records = publication_projects(parallel_root, [] {}, [&](size_t done, size_t total) {
+            assert(total == 24 && done > 0 && done <= total); ++reports;
+        });
+        assert(parallel_records.size() == 24 && reports == 24);
+        write(parallel_root, ".charm-library/projects/broken.json", "invalid");
+        bool failed_load = false;
+        try { publication_projects(parallel_root); }
+        catch (const std::exception&) { failed_load = true; }
+        assert(failed_load); // Don't publish using incomplete ownership metadata.
         assert(initial.files[0].relative == "Bee (2).gcode.3mf");
         assert(initial.files[1].relative == "Bee (3).gcode.3mf");
         initial.project["source_sha256"] = "native-hash";
