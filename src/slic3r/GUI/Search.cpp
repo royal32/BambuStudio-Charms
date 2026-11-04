@@ -1025,8 +1025,10 @@ SearchObjectDialog::~SearchObjectDialog() {}
 
 void SearchObjectDialog::Popup(wxPoint position /*= wxDefaultPosition*/)
 {
-    update_list();
-    PopupWindow::Popup();
+    // Focus can return to the search field while its results are still open.
+    // Opening a transient popup twice installs the same wx handlers again.
+    if (!IsShown())
+        PopupWindow::Popup(GetParent());
 }
 
 void SearchObjectDialog::Dismiss()
