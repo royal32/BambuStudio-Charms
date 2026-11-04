@@ -278,17 +278,20 @@ ObjectList::ObjectList(wxWindow* parent) :
         }
 
         const int digit = key - '0';
+        const int filament_count = filaments_count();
         const bool starting = m_extruder_input_value < 0 || !m_timer_set_extruder.IsRunning();
-        if (starting && digit == 0) {
+        if (filament_count <= 10 || (starting && digit == 0)) {
             m_timer_set_extruder.Stop();
             m_extruder_input_value = -1;
-            if (filaments_count() >= 10)
-                set_extruder_for_selected_items(10);
+            const int slot = digit == 0 ? 10 : digit;
+            if (slot <= filament_count)
+                // Finish native key dispatch before refreshing the outline.
+                CallAfter([this, slot] { set_extruder_for_selected_items(slot); });
         } else {
             // An invalid sequence stays invalid until the timeout, without
             // overflowing if a number key is held down.
             m_extruder_input_value = starting ? digit :
-                (m_extruder_input_value <= filaments_count() ? m_extruder_input_value * 10 + digit : m_extruder_input_value);
+                (m_extruder_input_value <= filament_count ? m_extruder_input_value * 10 + digit : m_extruder_input_value);
             m_timer_set_extruder.StartOnce(500);
         }
     });
@@ -1913,13 +1916,14 @@ void ObjectList::key_event(wxKeyEvent& event)
         if (keyCode >= '0' && keyCode <= '9') {
             int digit = keyCode - '0';
             const bool starting_new_sequence = (m_extruder_input_value < 0 || !m_timer_set_extruder.IsRunning());
-            if (starting_new_sequence && digit == 0) {
-                // Map single zero key to filament #10
+            const int filament_count = filaments_count();
+            if (filament_count <= 10 || (starting_new_sequence && digit == 0)) {
                 if (m_timer_set_extruder.IsRunning())
                     m_timer_set_extruder.Stop();
-                if (filaments_count() >= 10)
-                    set_extruder_for_selected_items(10);
                 m_extruder_input_value = -1;
+                const int slot = digit == 0 ? 10 : digit;
+                if (slot <= filament_count)
+                    set_extruder_for_selected_items(slot);
                 return;
             }
             if (starting_new_sequence)

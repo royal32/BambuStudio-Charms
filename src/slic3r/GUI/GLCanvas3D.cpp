@@ -5315,23 +5315,26 @@ void GLCanvas3D::queue_filament_digit(int digit)
 {
     if (m_selection.is_empty())
         return;
+    const int filament_count = wxGetApp().filaments_cnt();
     const bool starting = m_color_input_value < 0 || !m_timer_set_color.IsRunning();
-    if (starting && digit == 0) {
-        m_color_input_value = 10;
+    // With at most ten slots, every slot has a single-key shortcut.
+    if (filament_count <= 10 || (starting && digit == 0)) {
+        m_color_input_value = digit == 0 ? 10 : digit;
         wxTimerEvent event;
         on_set_color_timer(event);
         return;
     }
     // Keep a held key or an invalid multi-digit sequence from overflowing.
     m_color_input_value = starting ? digit :
-        m_color_input_value <= wxGetApp().filaments_cnt() ? m_color_input_value * 10 + digit : m_color_input_value;
+        m_color_input_value <= filament_count ? m_color_input_value * 10 + digit : m_color_input_value;
     m_timer_set_color.StartOnce(500);
 }
 
 void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)
 {
     auto obj_list = wxGetApp().obj_list();
-    if (m_gizmos.get_current_type() != GLGizmosManager::MmuSegmentation && m_color_input_value > 0) {
+    if (m_gizmos.get_current_type() != GLGizmosManager::MmuSegmentation &&
+        m_color_input_value > 0 && m_color_input_value <= wxGetApp().filaments_cnt()) {
         // Assembly view owns an independent model; route the shortcut to it instead of the prepare-side list.
         if (m_canvas_type == ECanvasType::CanvasAssembleView)
             wxGetApp().plater()->change_extruder_for_assemble_selection(m_color_input_value);
