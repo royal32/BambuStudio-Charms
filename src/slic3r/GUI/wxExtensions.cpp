@@ -3,7 +3,10 @@
 #include <stdexcept>
 #include <cmath>
 
+#include <wx/clipbrd.h>
+#include <wx/menu.h>
 #include <wx/sizer.h>
+#include <wx/stattext.h>
 #include <boost/algorithm/string/replace.hpp>
 
 /* mac need the macro while including <boost/stacktrace.hpp>*/
@@ -28,6 +31,7 @@
 #include "../Utils/WxFontUtils.hpp"
 #include "FilamentBitmapUtils.hpp"
 #include "../Utils/ColorSpaceConvert.hpp"
+#include "libslic3r/Log.hpp"
 #ifndef __linux__
 // msw_menuitem_bitmaps is used for MSW and OSX
 static std::map<int, std::string> msw_menuitem_bitmaps;
@@ -384,6 +388,38 @@ void edit_tooltip(wxString& tooltip)
     tooltip.Replace("Slic3r", SLIC3R_APP_KEY, true);
 }
 
+bool copy_text_to_clipboard(const wxString& text)
+{
+    if (text.IsEmpty() || !wxTheClipboard->Open())
+        return false;
+
+    const bool copied = wxTheClipboard->SetData(new wxTextDataObject(text));
+    wxTheClipboard->Close();
+    return copied;
+}
+
+void enable_static_text_copy_menu(wxStaticText* label)
+{
+    if (!label)
+        return;
+
+    // wxEVT_CONTEXT_MENU is not delivered by MSW static controls, so drive the
+    // menu from the raw right-click instead.
+    label->Bind(wxEVT_RIGHT_UP, [label](wxMouseEvent& evt) {
+        const wxString value = label->GetLabel();
+        if (value.IsEmpty() || value == "-") {
+            evt.Skip();
+            return;
+        }
+
+        wxMenu menu;
+        const int copy_id = wxWindow::NewControlId();
+        menu.Append(copy_id, _L("Copy"));
+        menu.Bind(wxEVT_MENU, [value](wxCommandEvent&) { copy_text_to_clipboard(value); }, copy_id);
+        label->PopupMenu(&menu, evt.GetPosition());
+    });
+}
+
 /* Function for rescale of buttons in Dialog under MSW if dpi is changed.
  * btn_ids - vector of buttons identifiers
  */
@@ -455,7 +491,7 @@ wxBitmap create_scaled_bitmap(  const std::string& bmp_name_in,
     /* An empty name means the caller failed to resolve the icon (eg. missing printer config).
        Do not throw in this case, a missing icon must not take down the whole process */
     if (bmp_name_in.empty() || bmp_name_in == ".png") {
-        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": empty bitmap name";
+        BOOST_LOG_TRIVIAL(error) << "empty bitmap name";
         return wxNullBitmap;
     }
 
@@ -481,15 +517,12 @@ wxBitmap create_scaled_bitmap(  const std::string& bmp_name_in,
     }
 
     if (bmp == nullptr) {
-
         /*stacktrace is time-consuming, optimize it*/
         if (s_bmps_not_found.count(bmp_name) == 0) {
             BOOST_LOG_TRIVIAL(error) << "Could not load bitmap: " << boost::stacktrace::stacktrace();
+            throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);// Neither SVG nor PNG has been found, raise error
             s_bmps_not_found.emplace(bmp_name);
         }
-
-        // Neither SVG nor PNG has been found, raise error
-        throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);
     }
 
     return *bmp;
@@ -510,10 +543,9 @@ wxBitmap create_scaled_bitmap2(const std::string& bmp_name_in, Slic3r::GUI::Bitm
         /*stacktrace is time-consuming, optimize it*/
         if (s_bmps_not_found.count(bmp_name) == 0) {
             BOOST_LOG_TRIVIAL(error) << "Could not load bitmap: " << boost::stacktrace::stacktrace();
+            throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);
             s_bmps_not_found.emplace(bmp_name);
         }
-
-        throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);
     }
     return *bmp;
 }

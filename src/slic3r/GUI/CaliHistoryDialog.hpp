@@ -6,6 +6,8 @@
 #include "Widgets/ComboBox.hpp"
 #include "DeviceManager.hpp"
 
+#include <optional>
+
 namespace Slic3r {
 namespace GUI {
 
@@ -28,11 +30,18 @@ protected:
     int get_extruder_id();
 
     void on_click_new_button(wxCommandEvent &event);
+    void on_click_nozzle_tab(std::optional<int> nozzle_pos_id);
+    void build_nozzle_tab_panel();
+    void update_nozzle_tab_styles();
 
+    wxScrolledWindow*          m_scroll_window { nullptr };
     wxPanel*                   m_history_data_panel;
     ComboBox*                  m_comboBox_nozzle_dia;
     SwitchButton*              m_extruder_switch_btn;
-    Label*              m_tips;
+    Label*                     m_tips;
+    wxPanel*                   m_nozzle_tab_panel { nullptr };
+    std::vector<Button*>       m_nozzle_tab_btns;
+    std::optional<int>         m_selected_nozzle_pos; // nullopt: All, otherwise: nozzle_pos_id
 
     wxTimer*                   m_refresh_timer { nullptr };
 
@@ -41,6 +50,7 @@ protected:
     MachineObject*             curr_obj { nullptr };
 
     bool                       m_ui_op_lock{ false };
+    bool                       m_pending_sync{ false }; // combo/extruder change: wait for fetch, then sync once
 };
 
 class EditCalibrationHistoryDialog : public DPIDialog

@@ -106,7 +106,7 @@ struct PrinterCaliInfo
 {
     std::string                 dev_id;
     bool                        cali_finished = true;
-    float                       cache_flow_ratio;
+    float                       cache_flow_ratio{0.f};
     std::vector<CaliPresetInfo> selected_presets;
     FlowRatioCalibrationType    cache_flow_rate_calibration_type = FlowRatioCalibrationType::COMPLETE_CALIBRATION;
 };
@@ -158,6 +158,7 @@ struct PACalibExtruderInfo
     float            nozzle_diameter;
     std::string      nozzle_sn;
     std::string      filament_id = "";
+    bool             use_nozzle_diameter{true};
     bool             use_extruder_id{true};
     bool             use_nozzle_volume_type{true};
 };

@@ -1,6 +1,7 @@
 #include "FilamentSelectDialog.hpp"
 #include "AMSMaterialsSetting.hpp"  // AMS_MATERIALS_SETTING_GREY* colour constants
 #include "FilamentBitmapUtils.hpp"
+#include "DeviceCore/DevFilaSystem.h"  // DevFilaSystem::GetTrayNameByAmsSlotId
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "wxExtensions.hpp"
@@ -13,19 +14,11 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r { namespace GUI {
 
 namespace {
-
-wxColour parse_hex_color(const std::string& hex)
-{
-    if (hex.empty()) return wxColour(0x63, 0x63, 0x63);
-    wxString s = wxString::FromUTF8(hex);
-    if (!s.StartsWith("#")) s = "#" + s;
-    wxColour c(s);
-    return c.IsOk() ? c : wxColour(0x63, 0x63, 0x63);
-}
 
 std::vector<wxColour> spool_colors(const FilamentSpool& sp)
 {
@@ -171,9 +164,12 @@ wxString slot_label(const FilamentSpool& sp)
 {
     if (!sp.in_printer || sp.slot_id.empty() || sp.ams_id < 0) return wxString();
     try {
-        const wxString s = wxGetApp().transition_tridid(sp.ams_id * 4 + std::stoi(sp.slot_id));
-        if (!s.empty()) return s;
-    } catch (...) {}
+        const std::string s = DevFilaSystem::GetTrayNameByAmsSlotId(
+            sp.dev_id, sp.ams_id, std::stoi(sp.slot_id), (DevAmsType)sp.ams_type);
+        if (!s.empty()) return wxString::FromUTF8(s);
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+    }
     return wxString::FromUTF8(sp.slot_id);
 }
 
@@ -214,12 +210,14 @@ inline wxColour dlg_separator()    { return wxGetApp().dark_mode() ? wxColour(0x
 inline wxColour dlg_divider()      { return wxGetApp().dark_mode() ? wxColour(0x50,0x52,0x54) : wxColour(220,220,220); }
 inline wxColour dlg_chip_sel_bg()  { return wxGetApp().dark_mode() ? wxColour(0x1F,0x35,0x29) : wxColour(0xDB,0xFD,0xE7); }
 inline wxColour dlg_chip_border()  { return wxGetApp().dark_mode() ? wxColour(0x50,0x52,0x54) : wxColour(220,220,220); }
-inline wxColour dlg_row_hl()       { return wxGetApp().dark_mode() ? wxColour(0x1A,0x3A,0x28) : wxColour(238,248,242); }
+inline wxColour dlg_row_hl()       { return wxGetApp().dark_mode() ? wxColour(0x24,0x5C,0x3A) : wxColour(238,248,242); }
 inline wxColour dlg_brand_sel_bg() { return wxGetApp().dark_mode() ? wxColour(0x4A,0x4C,0x4E) : wxColour(240,240,240); }
 inline wxColour dlg_badge_bg()     { return wxGetApp().dark_mode() ? wxColour(0x1A,0x2E,0x22) : wxColour(219,244,228); }
 inline wxColour dlg_search_border(){ return wxGetApp().dark_mode() ? wxColour(0x50,0x52,0x54) : wxColour(238,238,238); }
 inline wxColour dlg_text_primary()  { return wxGetApp().dark_mode() ? wxColour(0xF0,0xF0,0xF0) : AMS_MATERIALS_SETTING_GREY900; }
 inline wxColour dlg_text_secondary(){ return wxGetApp().dark_mode() ? wxColour(0xC8,0xCA,0xCC) : AMS_MATERIALS_SETTING_GREY800; }
+inline wxColour dlg_text_meta()     { return wxGetApp().dark_mode() ? wxColour(0xC8,0xCA,0xCC) : AMS_MATERIALS_SETTING_GREY700; }
+inline wxColour dlg_text_dimmed()   { return wxGetApp().dark_mode() ? wxColour(0x8A,0x8A,0x8E) : AMS_MATERIALS_SETTING_GREY300; }
 
 // recently-used spool LRU (Filament Manager spools only)
 
@@ -861,10 +859,7 @@ wxWindow* FilamentSelectDialog::make_spool_row(wxWindow* parent, const FilamentS
     }
     auto* name_lbl = new Label(row, name, wxST_ELLIPSIZE_END);
     name_lbl->SetFont(Label::Body_14);
-    name_lbl->SetForegroundColour(dimmed ? AMS_MATERIALS_SETTING_GREY300 : AMS_MATERIALS_SETTING_GREY900);
-    // Cap the name column's min width so a very long custom filament name cannot
-    // inflate the row (and the scrolled list's virtual width) and push the fixed
-    // weight/badge columns out of the viewport. proportion=1 still lets it grow.
+    name_lbl->SetForegroundColour(dimmed ? dlg_text_dimmed() : dlg_text_primary());
     name_lbl->SetMinSize(wxSize(FromDIP(120), -1));
     name_lbl->SetToolTip(name);
     h->Add(name_lbl, 1, wxALIGN_CENTER_VERTICAL, 0);
@@ -872,7 +867,7 @@ wxWindow* FilamentSelectDialog::make_spool_row(wxWindow* parent, const FilamentS
     // weight — fixed min-width so the column edge is consistent across all rows
     auto* w_lbl = new Label(row, wxString::Format("%dg", spool_weight_grams(sp)));
     w_lbl->SetFont(Label::Body_14);
-    w_lbl->SetForegroundColour(dimmed ? AMS_MATERIALS_SETTING_GREY300 : AMS_MATERIALS_SETTING_GREY700);
+    w_lbl->SetForegroundColour(dimmed ? dlg_text_dimmed() : dlg_text_meta());
     w_lbl->SetMinSize(wxSize(FromDIP(52), -1));
     h->Add(w_lbl, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
 
@@ -882,7 +877,7 @@ wxWindow* FilamentSelectDialog::make_spool_row(wxWindow* parent, const FilamentS
     if (!slot.empty()) {
         auto* slot_lbl = new Label(row, slot + " " + _L("slot"));
         slot_lbl->SetFont(Label::Body_14);
-        slot_lbl->SetForegroundColour(dimmed ? AMS_MATERIALS_SETTING_GREY300 : AMS_MATERIALS_SETTING_GREY700);
+        slot_lbl->SetForegroundColour(dimmed ? dlg_text_dimmed() : dlg_text_meta());
         slot_lbl->SetMinSize(wxSize(badge_col_w, -1));
         h->Add(slot_lbl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, badge_margin);
     } else if (is_recent && !dimmed) {
@@ -895,6 +890,8 @@ wxWindow* FilamentSelectDialog::make_spool_row(wxWindow* parent, const FilamentS
         badge->SetTextColor(StateColor(std::make_pair(green, (int)StateColor::Normal)));
         badge->SetBorderColor(StateColor(std::make_pair(green, (int)StateColor::Normal)));
         badge->SetCanFocus(false);
+        badge->SetAllowShrink(true);
+        badge->SetMinSize(wxSize(badge_col_w, -1));
         h->Add(badge, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, badge_margin);
     } else {
         auto* placeholder = new wxPanel(row, wxID_ANY, wxDefaultPosition, wxSize(badge_col_w, -1));
@@ -942,23 +939,31 @@ void FilamentSelectDialog::fill_default_tab()
         m_brand_to_aliases[vendor].push_back(alias);
     }
 
-    static const std::vector<wxString> type_order{ "PLA", "PETG", "ABS", "TPU" };
-    for (auto& kv : m_brand_to_aliases) {
-        std::sort(kv.second.begin(), kv.second.end(), [this](const wxString& l, const wxString& r) {
-            wxString lt, rt;
-            auto il = m_types.find(l), ir = m_types.find(r);
-            if (il != m_types.end()) lt = il->second;
-            if (ir != m_types.end()) rt = ir->second;
-            auto i1 = std::find(type_order.begin(), type_order.end(), lt);
-            auto i2 = std::find(type_order.begin(), type_order.end(), rt);
-            if (i1 != i2) return i1 < i2;
-            return l < r;
-        });
-    }
+    // Reuse the shared filament ordering (same curated order as the main-window combo boxes).
+    auto fkey = [this](const wxString& a) -> FilamentListKey {
+        auto iv = m_vendors.find(a);
+        auto it = m_types.find(a);
+        return FilamentListKey{ std::string(a.ToUTF8().data()),
+                                iv != m_vendors.end() ? std::string(iv->second.ToUTF8().data()) : std::string(),
+                                it != m_types.end()  ? std::string(it->second.ToUTF8().data())  : std::string() };
+    };
 
-    std::vector<wxString> keys;
-    for (auto& kv : m_brand_to_aliases) keys.push_back(kv.first);
-    m_ordered_brands = order_brands(keys, other);
+    for (auto& kv : m_brand_to_aliases)
+        std::sort(kv.second.begin(), kv.second.end(),
+                  [&](const wxString& l, const wxString& r) { return filament_list_less(fkey(l), fkey(r)); });
+
+    // Brand order: rank by each brand's leading alias, then keep "Other" pinned last.
+    m_ordered_brands.clear();
+    for (auto& kv : m_brand_to_aliases) m_ordered_brands.push_back(kv.first);
+    std::sort(m_ordered_brands.begin(), m_ordered_brands.end(),
+              [&](const wxString& lb, const wxString& rb) {
+                  return filament_list_less(fkey(m_brand_to_aliases[lb].front()),
+                                            fkey(m_brand_to_aliases[rb].front()));
+              });
+    if (auto p = std::find(m_ordered_brands.begin(), m_ordered_brands.end(), other); p != m_ordered_brands.end()) {
+        m_ordered_brands.erase(p);
+        m_ordered_brands.push_back(other);
+    }
 
     for (const wxString& b : m_ordered_brands) {
         auto* row = new wxPanel(m_brand_list, wxID_ANY);

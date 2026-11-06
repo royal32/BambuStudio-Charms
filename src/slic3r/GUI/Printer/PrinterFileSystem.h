@@ -15,6 +15,7 @@ using nlohmann::json;
 
 #include <functional>
 #include <deque>
+#include "libslic3r/Log.hpp"
 
 wxDECLARE_EVENT(EVT_STATUS_CHANGED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_MODE_CHANGED, wxCommandEvent);
@@ -317,6 +318,7 @@ private:
                     result = n == 0 ? result : n;
                 }
                 catch (...) {
+                    BOOST_LOG_TRIVIAL(warning) << Slic3r::current_exception_message();
                     result = ERROR_JSON;
                 }
             }
@@ -340,6 +342,7 @@ private:
                     result = n == 0 ? result : n;
                 }
                 catch (...) {
+                    BOOST_LOG_TRIVIAL(warning) << Slic3r::current_exception_message();
                     result = ERROR_JSON;
                 }
             }

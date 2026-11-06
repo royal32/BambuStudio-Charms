@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,6 +15,18 @@ namespace Slic3r {
 
 class TriangleMesh;
 class ModelVolume;
+
+namespace tex2color {
+struct MeshRepairCache;
+}
+
+// Incomplete-type helpers so GUI code can own a MeshRepairCache without
+// including TextureToColor.hpp (that header pulls Point.hpp via TriMesh).
+struct MeshRepairCacheDeleter {
+    void operator()(tex2color::MeshRepairCache* p) const;
+};
+using MeshRepairCachePtr = std::unique_ptr<tex2color::MeshRepairCache, MeshRepairCacheDeleter>;
+MeshRepairCachePtr make_mesh_repair_cache();
 
 struct TextureImage {
     int width  = 0;
@@ -50,6 +64,12 @@ struct TexturedMesh {
     // split along the resulting cluster boundaries, so color borders stay sharp
     // instead of being averaged away into a single color per face.
     std::vector<std::array<float,4>> precomputed_vertex_colors;
+
+    // The source already stores a small palette of exact colors (standard 3MF color groups)
+    // rather than sampled texture pixels. Such a mesh is only a preview for the import
+    // dialog: the colors are clustered in color space, the geometry is never rebuilt, and
+    // the painting is applied to the original volumes from their own color bindings.
+    bool is_standard_3mf = false;
 };
 
 struct PaintedMesh {
@@ -57,6 +77,9 @@ struct PaintedMesh {
     std::vector<std::array<int,3>>              indices;
     std::vector<std::array<std::size_t,3>>      face_colors;   // per-face RGB [0..255]
     std::vector<std::array<std::size_t,3>>      cluster_colors;
+    // Only filled by standard_3mf_colors_to_painting(): source RGB -> index into cluster_colors
+    // (-1 if unused), so the caller paints each source color with the cluster the preview shows.
+    std::map<std::array<std::size_t,3>, int>    original_color_to_cluster;
 };
 
 using PaintProgressCallback = std::function<void(int percent, const char* message)>;
@@ -72,14 +95,35 @@ struct TexturePaintingSettings {
     double      smooth_weight      = 0.5;
     std::size_t oversampling_iters = 0;
     enum class MeshRepairDecision {
-        Ask,
         ImportWithoutRepair,
         RepairAndImport
     };
     MeshRepairDecision mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
-    bool* mesh_repair_decision_required = nullptr;
     PaintMeshRepairCallback mesh_repair_callback;
+    // Max wait for Windows 3D repair. Timed-out repair is cancelled and the
+    // original mesh is kept. Zero disables the timeout (homepage repair).
+    // Texture import sets this to 90s.
+    std::chrono::seconds mesh_repair_timeout{0};
+    tex2color::MeshRepairCache* mesh_repair_cache = nullptr;
 };
+
+// True if the cache holds a prepared mesh matching this input. Mismatched
+// identity clears prepared geometry but keeps win10_attempt.
+bool mesh_repair_cache_can_skip_input(const MeshRepairCachePtr& cache,
+                                      std::size_t input_face_count,
+                                      const TexturePaintingSettings& settings);
+bool mesh_repair_cache_win10_failed(const MeshRepairCachePtr& cache);
+
+// Copy the oversampled, unclustered prepared mesh for the original-model preview.
+// Returns false when the cache has no prepared geometry.
+bool copy_prepared_mesh_from_cache(const MeshRepairCachePtr& cache, PaintedMesh& out);
+
+// Cluster/smooth a previously prepared cache mesh. Does not read TexturedMesh.
+bool cluster_from_repair_cache(
+    PaintedMesh& painted,
+    const TexturePaintingSettings& settings,
+    PaintProgressCallback progress = nullptr,
+    PaintCancelCallback cancel = nullptr);
 
 struct FilamentMatch {
     int    cluster_index   = -1;
@@ -106,6 +150,17 @@ bool face_colors_to_painting(
     PaintProgressCallback progress = nullptr,
     PaintCancelCallback cancel = nullptr);
 
+// Cluster an exact source palette (TexturedMesh::is_standard_3mf) in color space.
+// Mesh repair, oversampling and smoothing are skipped: the result is a preview for the
+// import dialog, and the caller paints the original volumes itself. Only the vertex-color
+// preview splits triangles, so color borders stay sharp on screen.
+bool standard_3mf_colors_to_painting(
+    const TexturedMesh& mesh,
+    PaintedMesh& painted,
+    const TexturePaintingSettings& settings = {},
+    PaintProgressCallback progress = nullptr,
+    PaintCancelCallback cancel = nullptr);
+
 std::vector<FilamentMatch> match_clusters_to_filaments(
     const std::vector<std::array<std::size_t,3>>& cluster_colors,
     const std::vector<std::array<float,4>>& filament_colors,
@@ -114,6 +169,10 @@ std::vector<FilamentMatch> match_clusters_to_filaments(
 double compute_delta_e(
     const std::array<std::size_t,3>& rgb1,
     const std::array<float,4>& rgba2);
+
+double compute_delta_e(
+    const std::array<std::size_t,3>& rgb1,
+    const std::array<std::size_t,3>& rgb2);
 
 bool apply_painted_mesh_to_volume(
     const PaintedMesh& painted,

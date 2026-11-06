@@ -1,5 +1,6 @@
 #include "slic3r/GUI/StudioAssistantGeometry.hpp"
 #include "libslic3r/Utils.hpp"
+#include "assistant_test_paths.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/SlicesToTriangleMesh.hpp"
@@ -18,8 +19,9 @@ ModelVolume* add(ModelObject& object,PreparedPrimitive&& prepared) {
     volume->set_transformation(Geometry::Transformation(prepared.transform));object.invalidate_bounding_box();return volume;
 }
 int main(int argc,char** argv) {
-    const std::string temporary=std::getenv("CHARMS_GEOMETRY_TEST_TMP")?std::getenv("CHARMS_GEOMETRY_TEST_TMP"):PROJECT_TEST_TMP;
-    set_resources_dir(PROJECT_RESOURCES);set_temporary_dir(temporary);set_data_dir(temporary);
+    configure_assistant_test_paths();
+    const std::string temporary=std::getenv("CHARMS_GEOMETRY_TEST_TMP")?std::getenv("CHARMS_GEOMETRY_TEST_TMP"):assistant_test_tmp();
+    set_temporary_dir(temporary);set_data_dir(temporary);
     boost::filesystem::create_directories(temporary);
     auto xy=[](double x,double y){return Point(scale_(x),scale_(y));};
     ExPolygon outline(Polygon({xy(0,0),xy(20,0),xy(20,30),xy(14,30),xy(14,36),xy(6,36),xy(6,30),xy(0,30)}));

@@ -1,12 +1,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdio.hpp>
 
 #include "objparser.hpp"
 
 #include "libslic3r/LocalesUtils.hpp"
+#include "libslic3r/Log.hpp"
 
 namespace ObjParser {
 #define EATWS()  while (*line == ' ' || *line == '\t') ++line
@@ -247,7 +247,9 @@ static bool obj_parseline(const char *line, ObjData &data)
             else
 				-- vertex.normalIdx;
 			if (vertex.textureCoordIdx < 0)
-                vertex.textureCoordIdx += (int)data.textureCoordinates.size() / 3;
+                // Texture coordinates are stored as u/v pairs (OBJ_VERTEX_LENGTH is not used here),
+                // so a negative (relative) index is rebased against the pair count, not a triple.
+                vertex.textureCoordIdx += (int)data.textureCoordinates.size() / 2;
             else
 				-- vertex.textureCoordIdx;
 			data.vertices.push_back(vertex);

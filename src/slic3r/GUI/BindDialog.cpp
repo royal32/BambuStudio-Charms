@@ -1,5 +1,6 @@
 #include "BindDialog.hpp"
 #include "GUI_App.hpp"
+#include "DeviceCore/DevHMSQuery.h"
 
 #include <wx/wx.h>
 #include <wx/mstream.h>
@@ -17,6 +18,7 @@
 #include "Widgets/WebView.hpp"
 
 #include "DeviceCore/DevManager.h"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -234,6 +236,8 @@ PingCodeBindDialog::PingCodeBindDialog(Plater* plater /*= nullptr*/)
     m_button_close->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(PingCodeBindDialog::on_cancel), NULL, this);
 
     m_simplebook->SetSelection(0);
+
+    wxGetApp().UpdateDlgDarkUI(this);
 }
 
 void PingCodeBindDialog::on_key_input(wxKeyEvent& evt)
@@ -350,7 +354,7 @@ PingCodeBindDialog::~PingCodeBindDialog() {
 }
 
  BindMachineDialog::BindMachineDialog(Plater *plater /*= nullptr*/)
-     : DPIDialog(static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Log in printer"), wxDefaultPosition, wxDefaultSize, wxCAPTION)
+     : DPIDialog(static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Log in printer"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
  {
 
 #ifdef __WINDOWS__
@@ -759,10 +763,12 @@ PingCodeBindDialog::~PingCodeBindDialog() {
          json j = json::parse(str.utf8_string());
          if (j.contains("err_code")) {
              int error_code = j["err_code"].get<int>();
-             extra = wxGetApp().get_hms_query()->query_print_error_msg(m_machine_info, error_code);
+              if (m_machine_info)
+                  extra = wxGetApp().get_hms_query_mgr()->query_error(m_machine_info->get_dev_id(), error_code).text;
          }
      }
      catch (...) {
+         BOOST_LOG_TRIVIAL(warning) << current_exception_message();
          ;
      }
 
@@ -920,7 +926,9 @@ void BindMachineDialog::on_show(wxShowEvent &event)
             auto bitmap = create_scaled_bitmap(img, this, FromDIP(80));
             m_printer_img->SetBitmap(bitmap);
         }
-        catch (...){}
+        catch (...){
+            BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+        }
 
         m_printer_img->Refresh();
         m_printer_img->Show();
@@ -1143,7 +1151,9 @@ void UnBindMachineDialog::on_show(wxShowEvent &event)
         try {
             auto bitmap = create_scaled_bitmap(img, this, FromDIP(80));
             m_printer_img->SetBitmap(bitmap);
-        } catch (...) {}
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+        }
 
         m_printer_img->Refresh();
         m_printer_img->Show();

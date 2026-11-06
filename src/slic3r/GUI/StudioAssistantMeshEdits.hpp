@@ -26,7 +26,7 @@ inline PaintKeepPrepared prepare_mesh_boolean(const ModelObject& object,const st
         Transform3d operand_world=geometry_instance(object,instance_id)*operand->get_matrix();operand_world.translation()-=origin;
         TriangleMesh other=operand->mesh();other.transform(operand_world,true);
         const double before=std::abs(double(its_volume(result.its)));std::vector<TriangleMesh> pieces;bool failed=false;
-        MeshBoolean::mcut::make_boolean(result,other,pieces,found->second,canceled,nullptr,[&]{failed=true;});
+        MeshBoolean::make_boolean(result,other,pieces,found->second,canceled,nullptr,[&]{failed=true;});
         if(canceled && canceled())throw std::runtime_error("Model operation canceled; no project changes applied.");
         if(failed || pieces.empty())throw std::runtime_error("Studio's mesh boolean failed or produced no retained material. No project changes applied; inspect closed geometry and overlap.");
         result=std::move(pieces.front());for(size_t i=1;i<pieces.size();++i)result.merge(pieces[i]);

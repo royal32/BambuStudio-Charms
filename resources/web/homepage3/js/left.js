@@ -16,6 +16,7 @@ function OnInit()
 	UpdateServerConnectFailTipVisible();
 	SendMsg_GetLoginInfo();
 	SendMsg_GetAccountProfiles();
+	SendMsg_GetMenuAccess();
 	GotoMenu( 'home' );
 	$("#Login2").click(function() {
 		$("#DropdownWrapper").css("visibility", "visible");
@@ -392,6 +393,15 @@ function OnLoginFromMenu(event)
 {
 	if(event) event.stopPropagation();
 	OnLoginOrRegister();
+}
+
+function SendMsg_GetMenuAccess()
+{
+	var tSend={};
+	tSend['sequence_id']=Math.round(new Date() / 1000);
+	tSend['command']="homepage_leftmenu_access_get";
+
+	SendWXMessage( JSON.stringify(tSend) );
 }
 
 function OnLoginOrRegister()

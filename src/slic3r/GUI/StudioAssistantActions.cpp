@@ -724,7 +724,7 @@ Json Actions::add_library_object(const std::string& staged, const std::string& o
         std::optional<std::vector<int>> explicit_map;
         if (args.contains("filament_map")) explicit_map=args.at("filament_map").get<std::vector<int>>();
         const auto mapping=source_filament_mapping(*source,source_config,destination,slots,explicit_map);
-        apply_source_filament_mapping(*source,mapping);
+        apply_source_filament_mapping(*source,mapping,&source_config);
         for (auto* volume : source->volumes) {
             volume->source.input_file=original;
         }

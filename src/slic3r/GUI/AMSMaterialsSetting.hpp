@@ -2,6 +2,8 @@
 #define slic3r_AMSMaterialsSetting_hpp_
 
 #include "libslic3r/Preset.hpp"
+#include <optional>
+#include <set>
 #include "wxExtensions.hpp"
 #include "GUI_Utils.hpp"
 #include "DeviceManager.hpp"
@@ -17,6 +19,8 @@
 #include "../slic3r/Utils/CalibUtils.hpp"
 #include "DeviceCore/DevNozzleRack.h"
 #include "fila_manager/wgtFilaManagerStore.h"
+#include <memory>
+#include <wx/timer.h>
 
 #define AMS_MATERIALS_SETTING_DEF_COLOUR wxColour(255, 255, 255)
 #define AMS_MATERIALS_SETTING_GREY900 wxColour(38, 46, 48)
@@ -30,7 +34,7 @@
 #define AMS_MATERIALS_SETTING_COMBOX_WIDTH wxSize(FromDIP(250), FromDIP(30))
 #define AMS_MATERIALS_SETTING_BUTTON_SIZE wxSize(FromDIP(90), FromDIP(24))
 #define AMS_MATERIALS_SETTING_INPUT_SIZE wxSize(FromDIP(90), FromDIP(24))
-#define AMS_MATERIALS_SETTING_DIALOG_SIZE wxSize(FromDIP(526), FromDIP(503))
+#define AMS_MATERIALS_SETTING_DIALOG_SIZE wxSize(FromDIP(370), FromDIP(503))
 // Interior width available for the read-only tip: dialog width minus the 20px left + 20px right margins.
 #define AMS_MATERIALS_SETTING_TIP_WIDTH (AMS_MATERIALS_SETTING_DIALOG_SIZE.GetWidth() - FromDIP(40))
 
@@ -112,60 +116,7 @@ public:
 };
 
 
-class AMSTraySettingBase : public DPIDialog
-{
-public:
-    AMSTraySettingBase(wxWindow* parent, wxWindowID id, const wxString& title,
-                    const wxPoint& pos, const wxSize& size, long style)
-        : DPIDialog(parent, id, title, pos, size, style) {}
-
-    void TryRefreshPAProfiles();
-
-    MachineObject* obj{nullptr};
-    int            ams_id{0};
-    int            slot_id{0};
-    std::string    ams_filament_id;
-
-protected:
-    void update_pa_profile_items();
-
-    void on_select_cali_result(wxCommandEvent& evt);
-
-    bool save_pa_profile_selection();
-
-    bool is_virtual_tray();
-
-    void update_kval_editability();
-
-    // Nozzle Type combo (shared by both dialogs). The combo drives PA-profile
-    // filtering via get_nozzle_type_override(); a subclass creates the widget
-    // in its own layout and this base owns the behavior.
-    void update_nozzle_combo(MachineObject* obj);
-    bool switch_nozzle_combo_to_target(NozzleVolumeType volume_type, float nozzle_diameter);
-    void on_select_nozzle_pos_id(wxCommandEvent& evt);
-    bool get_nozzle_type_override(int extruder_id,
-                                  float& nozzle_diameter,
-                                  NozzleFlowType& nozzle_flow_type);
-
-    virtual void on_pa_history_ready() = 0;
-
-    std::vector<PACalibResult> m_pa_profile_items;
-    int  m_pa_cali_select_id{0};
-    bool m_pa_data_pending{false};
-
-    ComboBox*  m_comboBox_cali_result{nullptr};
-    TextInput* m_input_k_val{nullptr};
-    TextInput* m_input_n_val{nullptr};
-
-    ComboBox*     m_comboBox_nozzle_type{nullptr};
-    wxStaticText* m_title_nozzle_type{nullptr};
-    wxSizerItem*  m_nozzle_type_spacer_item{nullptr};
-    wxStaticText* m_title_pa_profile{nullptr};
-
-    void reset_calibration(const std::string& selected_filament_id);
-};
-
-class AMSMaterialsSetting : public AMSTraySettingBase
+class AMSMaterialsSetting : public DPIDialog
 {
 public:
     AMSMaterialsSetting(wxWindow *parent, wxWindowID id);
@@ -177,7 +128,8 @@ public:
     bool Show(bool show) override;
     void Popup(wxString filament = wxEmptyString, wxString sn = wxEmptyString,
                wxString temp_min = wxEmptyString, wxString temp_max = wxEmptyString,
-               wxString k = wxEmptyString, wxString n = wxEmptyString);
+               wxString k = wxEmptyString, wxString n = wxEmptyString,
+               wxString total_weight = wxEmptyString, wxString remain_weight = wxEmptyString);
 
     void trigger_select_filament(const std::string& spool_id, bool from_printer, const wxString& display_text);
     void set_color(wxColour color);
@@ -186,15 +138,19 @@ public:
     void set_ctype(int ctype);
 
     void on_picker_color(wxCommandEvent& color);
+
+    // Tray context + PA-profile refresh (was AMSTraySettingBase; callers set these directly)
+    void TryRefreshPAProfiles();
+    MachineObject* obj{nullptr};
+    int            ams_id{0};
+    int            slot_id{0};
+    std::string    ams_filament_id;
+
     std::string    ams_setting_id;
 
     bool           m_is_third;
     bool           m_confirmed = false;
     bool           m_view_only = false;
-    wxString       m_brand_filament;
-    wxString       m_brand_sn;
-    wxString       m_brand_tmp;
-    wxColour       m_brand_colour;
     std::string    m_filament_type;
     ColorPickerPopup*   m_color_picker_popup{nullptr};
     ColorPicker *       m_clr_picker;
@@ -209,12 +165,15 @@ public:
 protected:
     void create_panel_normal(wxWindow* parent);
     void create_panel_kn(wxWindow* parent);
+    void create_panel_rfid_display(wxWindow* parent);   // read-only card shown for official RFID filament (m_is_third == false)
+    void create_panel_weight(wxWindow* parent);          // shared remain/total weight panel (both modes)
     void on_dpi_changed(const wxRect &suggested_rect) override;
-    void on_select_nozzle_id(wxCommandEvent &evt);
     void apply_filament_selection();
     void on_select_ok(wxCommandEvent &event);
     void on_select_reset(wxCommandEvent &event);
+    void on_select_reread(wxCommandEvent& event);
     void on_select_close(wxCommandEvent &event);
+    void on_reread_result_timer(wxTimerEvent& event);
     void on_open_filament_select_dialog();
     void set_filament_box_text(const wxString& text);   // set the filament name shown in the jump box
     void enable_filament_box(bool enable);              // enable/disable the jump box + grey the text
@@ -222,10 +181,9 @@ protected:
     bool colour_palette_visible() const;
     void apply_dialog_size();
     void update_widgets();
+    bool can_show_reread_btn() const;
 
     void update_filament_editing(bool is_printing);
-    int  get_nozzle_combo_id_code() const;
-    int  get_nozzle_sel_by_sn(MachineObject* obj, const std::string& sn);
     int  get_cali_index_by_ams_slot(MachineObject* obj, int ams_id, int slot_id);
     std::vector<ColorPickerPopup::ColorItem> get_preset_color_items(const std::string& filament_id) const;
 
@@ -238,15 +196,69 @@ protected:
 
     Preset* get_filament_by_id(const std::string& filament_id, bool is_system);
 
-    // AMSTraySettingBase overrides
-    void on_pa_history_ready() override;
+    // ---- PA calibration + filament weight primitives (was AMSTraySettingBase) ----
+    void update_pa_profile_items();
+    void on_select_cali_result(wxCommandEvent& evt);
+    bool save_pa_profile_selection();
+    bool is_virtual_tray();
+    void update_kval_editability();
 
-protected:
+    struct EffectiveNozzle {
+        NozzleDiameterType diameter{NozzleDiameterType::NONE_DIAMETER_TYPE};
+        NozzleFlowType     flow_type{NozzleFlowType::NONE_FLOWTYPE};
+    };
+
+    std::set<int>                   slot_bound_extruder_ids() const;
+    bool                            is_nozzle_combo_selector() const;
+    std::optional<EffectiveNozzle>  get_combo_nozzle() const;
+    std::optional<EffectiveNozzle>  get_effective_nozzle() const;
+    std::optional<DevNozzle>        get_slot_nozzle() const;
+
+    void update_nozzle_combo(MachineObject* obj);
+    bool switch_nozzle_combo_to_target(NozzleVolumeType volume_type, float nozzle_diameter);
+    void on_select_nozzle_pos_id(wxCommandEvent& evt);
+
+    void on_pa_history_ready();
+
+    void reset_calibration(const std::string& selected_filament_id);
+
+    bool support_filament_remain_edit() const;
+    bool can_edit_filament_weight() const;
+    int  remain_weight_upper_bound() const;
+    void clamp_remain_weight_input();
+    bool validate_filament_weight_inputs(bool is_target_bbl, int& total_weight, int& remain_weight) const;
+    bool filament_weight_changed(int total_weight, int remain_weight) const;
+    void update_filament_weight_editing();
+    void set_total_weight_display(const wxString& value);
+    void set_remain_weight_display(const wxString& value);
+    void update_total_weight_preview();
+
+    std::vector<PACalibResult> m_pa_profile_items;
+    int  m_pa_cali_select_id{0};
+    bool m_pa_data_pending{false};
+
+    ComboBox*  m_comboBox_cali_result{nullptr};
+    TextInput* m_input_k_val{nullptr};
+    TextInput* m_input_n_val{nullptr};
+
+    ComboBox*     m_comboBox_nozzle_type{nullptr};
+    wxStaticText* m_title_nozzle_type{nullptr};
+    wxSizerItem*  m_nozzle_type_spacer_item{nullptr};
+    wxStaticText* m_title_pa_profile{nullptr};
+
+    wxPanel*   m_panel_filament_weight{nullptr};
+    TextInput* m_input_total_weight{nullptr};
+    TextInput* m_input_remain_weight{nullptr};
+    bool m_has_initial_filament_weight{false};
+    int  m_initial_total_weight{0};
+    int  m_initial_remain_weight{0};
+    bool m_suppress_remain_preview{false};
+    int  m_preview_base_total{1000};
+    bool m_preview_total_known{false};
+
     StateColor          m_btn_bg_green;
     StateColor          m_btn_bg_gray;
     wxPanel *           m_panel_normal;
-    wxPanel *           m_panel_SN;
-    wxStaticText *      m_sn_number;
     //wxPanel *           m_panel_body;
     wxStaticText *      m_title_filament;
     wxStaticText *      m_title_colour;
@@ -254,10 +266,9 @@ protected:
     wxString            m_nozzle_temp_max_str;
     StaticBox*          m_panel_temperature;
     Label*              m_nozzle_temp_label;
-    TextInput*          m_input_total_weight;
-    TextInput*          m_input_remain_weight;
-    Button *            m_button_reset;
-    Button *            m_button_confirm;
+    Button *            m_button_reset   {nullptr};
+    Button *            m_button_reread  {nullptr};
+    Button *            m_button_confirm {nullptr};
     Label*              m_tip_readonly;
     Button *            m_button_close;
     wxColourData *      m_clrData;
@@ -267,9 +278,15 @@ protected:
     Label*              m_wiki_ctrl;
     wxStaticText*       m_k_param;
     wxStaticText*       m_n_param;
-    bool m_has_initial_filament_weight{ false };
-    int  m_initial_total_weight{ 0 };
-    int  m_initial_remain_weight{ 0 };
+
+    wxPanel *           m_panel_rfid_display{nullptr};
+    ColorPicker *       m_rfid_clr_picker{nullptr};
+    wxStaticText*       m_rfid_lbl_brand{nullptr};
+    wxStaticText*       m_rfid_lbl_color_name{nullptr};
+    StaticBox*          m_rfid_panel_info{nullptr};
+    wxStaticText*       m_rfid_lbl_temp{nullptr};
+    wxPanel *           m_rfid_panel_sn{nullptr};
+    wxStaticText*       m_rfid_lbl_sn{nullptr};
 
     StaticBox*      m_filament_box{nullptr};    // clickable jump box (was m_comboBox_filament)
     Label*          m_filament_text{nullptr};   // filament name shown left-aligned in the box
@@ -282,6 +299,10 @@ protected:
     std::string                          m_pending_spool_id;
     bool                                 m_pending_from_printer{false};
 
+    std::string                          m_popup_dev_id;
+    std::shared_ptr<DevCtrlToken>        m_reread_token;
+    wxTimer                              m_reread_result_timer;
+
     std::string  m_open_spool_id;
     wxColour     m_open_colour;
     std::string  m_open_filament_id;
@@ -290,80 +311,6 @@ protected:
 
 wxDECLARE_EVENT(EVT_SELECTED_COLOR, wxCommandEvent);
 
-// AMSNewOfficialFilamentDlg
-class AMSNewOfficialFilamentDlg : public DPIDialog
-{
-public:
-    enum class Choice { RecordNew, LinkExisting, Skip };
-
-    AMSNewOfficialFilamentDlg(wxWindow* parent);
-    Choice GetChoice() const { return m_choice; }
-
-    void SetTrayContext(MachineObject* obj,
-                        const std::string& ams_id,
-                        const std::string& slot_id);
-    void SetSoftMatchData(const SoftMatchPendingResponse& data);
-    std::string GetSelectedLinkSpoolId() const { return m_selected_link_spool_id; }
-    int GetHitSpoolId() const          { return m_hit_spool_id; }
-    int GetSelectedCandidateId() const { return m_selected_candidate_id; }
-
-    void on_dpi_changed(const wxRect&) override {
-        m_btn_confirm->SetMinSize(AMS_MATERIALS_SETTING_BUTTON_SIZE);
-        m_btn_confirm->SetCornerRadius(FromDIP(12));
-        if (m_btn_record_new) {
-            m_btn_record_new->SetMinSize(AMS_MATERIALS_SETTING_BUTTON_SIZE);
-            m_btn_record_new->SetCornerRadius(FromDIP(12));
-        }
-        if (m_combo_link)
-            m_combo_link->SetMinSize(wxSize(FromDIP(360), FromDIP(56)));
-        // Raw-bitmap cards don't auto-rescale; re-render them at the new DPI.
-        if (m_obj) populate_link_combo();
-        Fit();
-    }
-
-private:
-    void create();
-    void populate_link_combo();
-    void on_combo_selected(wxCommandEvent&);
-    void on_confirm(wxCommandEvent&);
-    void on_record_new(wxCommandEvent&);
-
-    Choice    m_choice{ Choice::RecordNew };
-    wxStaticText*   m_title{ nullptr };
-    wxStaticBitmap* m_hit_card{ nullptr };
-    wxStaticText*   m_match_label{ nullptr };
-    Button*   m_btn_record_new{ nullptr };
-    Button*   m_btn_confirm{ nullptr };
-
-    ::ComboBox*                m_combo_link{ nullptr };
-    wxSizer*                   m_combo_row{ nullptr };
-    std::map<int, std::string>   m_combo_idx_to_spool_id;
-    std::map<int, FilamentSpool> m_combo_idx_to_spool;
-    std::string                m_selected_link_spool_id;
-
-    MachineObject* m_obj    { nullptr };
-    std::string    m_ams_id;
-    std::string    m_slot_id;
-
-    SoftMatchPendingResponse m_soft_match_data;
-    FilamentSpool m_hit_spool;              // hit shown in the collapsed box by default
-    int  m_prev_combo_sel{ -1 };            // last picked candidate index (-1 = none); for re-click toggle
-    int  m_hit_spool_id{ 0 };
-    int  m_selected_candidate_id{ 0 };
-    bool m_only_hit{ false };
-};
-
-// AMSNewFilamentRecordedDlg
-class AMSNewFilamentRecordedDlg : public DPIDialog
-{
-public:
-    AMSNewFilamentRecordedDlg(wxWindow* parent, const FilamentSpool& sp);
-
-    void on_dpi_changed(const wxRect&) override { Fit(); }
-
-private:
-    void create(const FilamentSpool& sp);
-};
 
 wxString spool_display_name(const FilamentSpool& sp);
 

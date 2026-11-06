@@ -125,6 +125,15 @@ function(bambustudio_add_cmake_project projectname)
         set(_gen CMAKE_GENERATOR "${DEP_MSVC_GEN}" CMAKE_GENERATOR_PLATFORM "${DEP_PLATFORM}")
         set(_build_j "/m")
     endif ()
+    # External dependency projects must use the same SDK-selection overrides as
+    # the parent (for example UseEnv=true in a configured developer prompt).
+    set(_vs_globals_arg "")
+    if (MSVC AND CMAKE_VS_GLOBALS)
+        string(REPLACE ";" "$<SEMICOLON>" _vs_globals "${CMAKE_VS_GLOBALS}")
+        set(_vs_globals_arg
+            "-DCMAKE_VS_GLOBALS:STRING=${_vs_globals}"
+            "-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES:STRING=CMAKE_VS_GLOBALS")
+    endif ()
 
     message(STATUS "bambustudio_add_cmake_project ${projectname},  _gen is ${_gen} ")
     message(STATUS "DEP_CMAKE_OPTS is ${DEP_CMAKE_OPTS} ")
@@ -151,6 +160,7 @@ function(bambustudio_add_cmake_project projectname)
             ${_cmake_osx_arch}
             "${_configs_line}"
             ${DEP_CMAKE_OPTS}
+            ${_vs_globals_arg}
             ${P_ARGS_CMAKE_ARGS}
        ${P_ARGS_UNPARSED_ARGUMENTS}
        BUILD_COMMAND ${CMAKE_COMMAND} --build . --config Release -- ${_build_j}

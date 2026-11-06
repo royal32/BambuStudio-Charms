@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <set>
 
 namespace Slic3r {
 class MachineObject;
@@ -28,6 +29,9 @@ public:
     void dismiss_pending_badge(const std::string& dev_id,
                                const std::string& ams_id,
                                const std::string& slot_id);
+    bool has_pending_badge(const std::string& dev_id,
+                           const std::string& ams_id,
+                           const std::string& slot_id) const;
 
 private:
     const FilamentSpool* match_tray(const DevAmsTray& tray,

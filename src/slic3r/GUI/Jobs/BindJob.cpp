@@ -5,6 +5,8 @@
 #include "slic3r/GUI/GUI_App.hpp"
 
 #include "slic3r/GUI/DeviceCore/DevManager.h"
+#include "slic3r/GUI/DeviceCore/DevHMSQuery.h"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -36,6 +38,7 @@ void BindJob::on_exception(const std::exception_ptr &eptr)
         if (eptr)
             std::rethrow_exception(eptr);
     } catch (std::exception &/*e*/) {
+        BOOST_LOG_TRIVIAL(warning) << current_exception_message();
         PlaterJob::on_exception(eptr);
     }
 }
@@ -119,10 +122,11 @@ void BindJob::process()
             try
             {
                 error_code = stoi(result_info);
-                wxString error_msg = wxGetApp().get_hms_query()->query_print_error_msg(m_dev_id, error_code);
+                wxString error_msg = wxGetApp().get_hms_query_mgr()->query_error(m_dev_id, error_code).text;
                 result_info = error_msg.ToStdString();
             }
             catch (...) {
+                BOOST_LOG_TRIVIAL(warning) << current_exception_message();
                 ;
             }
         }

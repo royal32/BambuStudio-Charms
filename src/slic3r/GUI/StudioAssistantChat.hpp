@@ -29,8 +29,9 @@ public:
         m_text = new wxTextCtrl(this, wxID_ANY, text, wxDefaultPosition, wxDefaultSize, style);
         m_activity = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, style);
         m_text->SetName(user?"You":"Assistant"); m_activity->SetName("Studio actions");
-        auto small = m_activity->GetFont(); small.SetPointSize(std::max(9, small.GetPointSize()-1));
-        m_activity->SetFont(small);
+        auto activity_font = m_activity->GetFont();
+        activity_font.SetPointSize(std::max(9, activity_font.GetPointSize()-1));
+        m_activity->SetFont(activity_font);
         column->Add(m_text, 0, wxEXPAND|wxALL, FromDIP(12));
         column->Add(m_activity, 0, wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM, FromDIP(12));
         m_activity->Hide(); SetSizer(column);

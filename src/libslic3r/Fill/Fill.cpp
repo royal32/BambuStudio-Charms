@@ -74,6 +74,13 @@ struct SurfaceFillParams
     float           infill_shift_step          = 0;// param for cross zag
     float           infill_rotate_step         = 0; // param for zig zag to get cross texture
     bool            symmetric_infill_y_axis = false;
+    bool            conformal_infill        = false;
+    ConformalStagger conformal_stagger      = ConformalStagger::None;
+    int             conformal_link_keep_layers = 1;
+    int             conformal_link_flip_layers = 0;
+    ConformalPole    conformal_pole         = ConformalPole::Layer;
+    int             conformal_ray_count    = 0;
+    float           conformal_hub_radius   = 0.f;
 
     // Params for 2Dlattice infill angles
     float lattice_angle_1 = -45.0f;
@@ -110,6 +117,13 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(infill_shift_step);
 		RETURN_COMPARE_NON_EQUAL(infill_rotate_step);
 		RETURN_COMPARE_NON_EQUAL(symmetric_infill_y_axis);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, conformal_infill);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, conformal_stagger);
+		RETURN_COMPARE_NON_EQUAL(conformal_link_keep_layers);
+		RETURN_COMPARE_NON_EQUAL(conformal_link_flip_layers);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, conformal_pole);
+		RETURN_COMPARE_NON_EQUAL(conformal_ray_count);
+		RETURN_COMPARE_NON_EQUAL(conformal_hub_radius);
         RETURN_COMPARE_NON_EQUAL(lattice_angle_1);
         RETURN_COMPARE_NON_EQUAL(lattice_angle_2);
         RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, skin_pattern);
@@ -140,6 +154,13 @@ struct SurfaceFillParams
 				this->infill_shift_step             == rhs.infill_shift_step &&
 				this->infill_rotate_step            == rhs.infill_rotate_step &&
 				this->symmetric_infill_y_axis	== rhs.symmetric_infill_y_axis &&
+				this->conformal_infill			== rhs.conformal_infill &&
+				this->conformal_stagger			== rhs.conformal_stagger &&
+				this->conformal_link_keep_layers	== rhs.conformal_link_keep_layers &&
+				this->conformal_link_flip_layers	== rhs.conformal_link_flip_layers &&
+				this->conformal_pole			== rhs.conformal_pole &&
+				this->conformal_ray_count		== rhs.conformal_ray_count &&
+				this->conformal_hub_radius		== rhs.conformal_hub_radius &&
 			    this->lattice_angle_1 == rhs.lattice_angle_1 &&
                 this->lattice_angle_2 == rhs.lattice_angle_2&&
 				this-> skin_pattern     == rhs.skin_pattern &&
@@ -203,12 +224,30 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 	        else {
                 SurfaceFillParams        params;
                 const PrintRegionConfig &region_config  = layerm.region().config();
+                const double surface_height = (surface.thickness == -1) ? layer.height : surface.thickness;
+                const double object_base_z = layer.object()->layers().empty() ?
+                    0. : layer.object()->layers().front()->bottom_z();
+                const bool starts_at_object_base =
+                    std::abs(layer.print_z - surface_height - object_base_z) <= EPSILON;
+                const bool touches_bed =
+                    starts_at_object_base && std::abs(object_base_z) <= EPSILON;
 		        FlowRole extrusion_role = surface.is_top() ? frTopSolidInfill : (surface.is_solid() ? frSolidInfill : frInfill);
 		        bool     is_bridge 	    = layer.id() > 0 && surface.is_bridge();
 		        params.extruder 	 = layerm.region().extruder(extrusion_role);
-		        if (layer.id() == 0)
+		        if (touches_bed)
 		            params.initial_layer_flow_ratio = region_config.initial_layer_flow_ratio.value;
 		        params.pattern 		 = region_config.sparse_infill_pattern.value;
+		        params.conformal_infill = region_config.conformal_infill && !surface.is_solid();
+		        params.conformal_stagger = params.conformal_infill ? region_config.conformal_stagger.value : ConformalStagger::None;
+		        if (params.conformal_stagger == ConformalStagger::HalfStep)
+		            params.conformal_stagger = ConformalStagger::Alternate;
+		        else if (params.conformal_stagger == ConformalStagger::Orthogonal)
+		            params.conformal_stagger = ConformalStagger::None;
+		        params.conformal_link_keep_layers = params.conformal_infill ? region_config.conformal_link_keep_layers.value : 1;
+		        params.conformal_link_flip_layers = params.conformal_infill ? region_config.conformal_link_flip_layers.value : 0;
+		        params.conformal_pole    = params.conformal_infill ? region_config.conformal_pole.value : ConformalPole::Layer;
+		        params.conformal_ray_count = params.conformal_infill ? region_config.conformal_ray_count.value : 0;
+		        params.conformal_hub_radius = params.conformal_infill ? float(region_config.conformal_hub_radius.value) : 0.f;
 		        params.density       = float(region_config.sparse_infill_density);
 				params.multiline	 = int(region_config.fill_multiline);
                 if (params.pattern == ipLockedZag) {
@@ -240,7 +279,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.density = surface.is_top() ? region_config.top_surface_density.value : region_config.bottom_surface_density.value;
                     } else
 						params.pattern = region_config.top_surface_pattern == ipMonotonic ? ipMonotonic : ipRectilinear;
-                    if (params.pattern == ipMonotonicLine) params.monotonic_travel_into_wall = region_config.monotonic_travel_into_wall.value;
+                    if (params.pattern == ipMonotonicLine || params.pattern == ipGlobalMonotonicLine)
+                        params.monotonic_travel_into_wall = region_config.monotonic_travel_into_wall.value;
 		        } else if (params.density <= 0)
 		            continue;
 
@@ -260,10 +300,33 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 
 		        // Calculate the actual flow we'll be using for this infill.
 		        params.bridge = is_bridge || Fill::use_bridge_flow(params.pattern);
-				params.flow   = params.bridge ?
-					//BBS: always enable thick bridge for internal bridge
-					layerm.bridging_flow(extrusion_role, (surface.is_bridge() && !surface.is_external()) || object_config.thick_bridges) :
-					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness);
+		        if (! params.bridge) {
+		            params.flow = layerm.region().flow(
+                        *layer.object(), extrusion_role, surface_height,
+                        layer.id() == 0 || starts_at_object_base);
+		        } else {
+		            //BBS: always enable thick bridge for internal bridge
+		            const bool thick       = (surface.is_bridge() && ! surface.is_external()) || object_config.thick_bridges;
+		            const bool merged_span = is_bridge && surface_height > layer.height + EPSILON;
+		            // A thick bridge is a rounded extrusion as tall as the nozzle is wide, laid at the layer's
+		            // own Z. That extra height is what anchors an internal bridge down into the sparse fill,
+		            // so decimating the span must not cost it: the merged height is at most 0.7 nozzle
+		            // diameters, which the thick extrusion covers on its own.
+		            Flow thick_flow;
+		            if (thick)
+		                thick_flow = layerm.bridging_flow(extrusion_role, true);
+		            if (thick && (! merged_span || double(thick_flow.height()) + EPSILON >= surface_height))
+		                params.flow = thick_flow;
+		            else if (merged_span)
+		                // BBS multi-diameter: this bridge is the only extrusion filling the merged span, so it
+		                // has to be extruded at the merged height. A thin bridging flow derives its height from
+		                // the physical layer and would leave the rest of the span empty.
+		                params.flow = layerm.region().flow(
+                            *layer.object(), extrusion_role, surface_height,
+                            layer.id() == 0 || starts_at_object_base).with_flow_ratio(region_config.bridge_flow);
+		            else
+		                params.flow = layerm.bridging_flow(extrusion_role, false);
+		        }
 				//BBS: record speed params
                 if (!params.bridge) {
                     if (params.extrusion_role == erInternalInfill)
@@ -308,12 +371,20 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 				//get locked region param
 				if (params.pattern == ipLockedZag){
 					const PrintObject *object = layerm.layer()->object();
-					auto nozzle_diameter = float(object->print()->config().nozzle_diameter.get_at(layerm.region().extruder(extrusion_role) - 1));
-					Flow skin_flow = params.bridge ? params.flow : Flow::new_from_config_width(extrusion_role, region_config.skin_infill_line_width, nozzle_diameter, float((surface.thickness == -1) ? layer.height : surface.thickness));
+					auto nozzle_diameter = nozzle_diameter_for_filament(
+                        object->print()->config(), layerm.region().extruder(extrusion_role));
+                    auto preset_nozzle_diameter = float(primary_nozzle_diameter(object->print()->full_print_config()));
+					Flow skin_flow = params.bridge ? params.flow : Flow::new_from_config_width(
+                        extrusion_role, region_config.skin_infill_line_width, preset_nozzle_diameter, nozzle_diameter,
+                        float((surface.thickness == -1) ? layer.height : surface.thickness),
+                        multi_nozzle_diameter_mode_enabled(object->print()->full_print_config()));
 					//add skin flow
 					append_flow_param(lock_param.skin_flow_params, skin_flow, surface.expolygon);
 
-					Flow skeleton_flow = params.bridge ? params.flow : Flow::new_from_config_width(extrusion_role, region_config.skeleton_infill_line_width, nozzle_diameter, float((surface.thickness == -1) ? layer.height : surface.thickness)) ;
+					Flow skeleton_flow = params.bridge ? params.flow : Flow::new_from_config_width(
+                        extrusion_role, region_config.skeleton_infill_line_width, preset_nozzle_diameter, nozzle_diameter,
+                        float((surface.thickness == -1) ? layer.height : surface.thickness),
+                        multi_nozzle_diameter_mode_enabled(object->print()->full_print_config())) ;
 					// add skeleton flow
 					append_flow_param(lock_param.skeleton_flow_params, skeleton_flow, surface.expolygon);
 
@@ -628,6 +699,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
         f->set_bounding_box(bbox);
         f->layer_id = this->id() - this->object()->get_layer(0)->id(); // We need to subtract raft layers.
+        f->lock_region_id = surface_fill.region_id;
         f->z 		= this->print_z;
         f->angle 	= surface_fill.params.angle;
         f->adapt_fill_octree = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
@@ -650,7 +722,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         } else if (surface_fill.params.pattern == ipLightning){
             dynamic_cast<FillLightning::Filler*>(f.get())->generator = lightning_generator;
 		}
-		else if (surface_fill.params.pattern == ipMonotonicLine){
+		else if (surface_fill.params.pattern == ipMonotonicLine || surface_fill.params.pattern == ipGlobalMonotonicLine){
 			FillMonotonicLineWGapFill* fill_monoline = dynamic_cast<FillMonotonicLineWGapFill*>(f.get());
             fill_monoline->gap_compensation_ratio    = surface_fill.params.monotonic_travel_into_wall * (float) 0.01;
 		}
@@ -730,17 +802,23 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		params.extrusion_role = surface_fill.params.extrusion_role;
 		params.using_internal_flow = using_internal_flow;
 		params.no_extrusion_overlap = surface_fill.params.overlap;
+		params.conformal = surface_fill.params.conformal_infill;
+		params.conformal_stagger = surface_fill.params.conformal_stagger;
+		params.conformal_link_keep_layers = surface_fill.params.conformal_link_keep_layers;
+		params.conformal_link_flip_layers = surface_fill.params.conformal_link_flip_layers;
+		params.conformal_pole = surface_fill.params.conformal_pole;
+		params.conformal_ray_count = surface_fill.params.conformal_ray_count;
+		params.conformal_hub_radius = surface_fill.params.conformal_hub_radius;
 		if( surface_fill.params.pattern == ipLockedZag ) {
 			params.locked_zag = true;
             f->set_lock_region_param(lock_param);
             f->set_skin_and_skeleton_pattern(surface_fill.params.skin_pattern, surface_fill.params.skeleton_pattern);
 		}
         if (surface_fill.params.pattern == ipCrossZag || surface_fill.params.pattern == ipLockedZag) {
-            if (f->layer_id % 2 == 0) {
+            if (f->layer_id % 2 == 0)
                 params.horiz_move -= surface_fill.params.infill_shift_step * (f->layer_id / 2);
-            } else {
+            else
                 params.horiz_move += surface_fill.params.infill_shift_step * (f->layer_id / 2);
-            }
 
             params.symmetric_infill_y_axis = surface_fill.params.symmetric_infill_y_axis;
 
@@ -834,10 +912,10 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
 		std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
 		f->set_bounding_box(bbox);
 		f->layer_id = this->id() - this->object()->get_layer(0)->id(); // We need to subtract raft layers.
+		f->lock_region_id = surface_fill.region_id;
 		f->z = this->print_z;
 		f->angle = surface_fill.params.angle;
 		f->adapt_fill_octree = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
-
 
 		if (surface_fill.params.pattern == ipLightning)
 			dynamic_cast<FillLightning::Filler*>(f.get())->generator = lightning_generator;
@@ -871,6 +949,13 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
 		params.resolution = resolution;
 		params.use_arachne = false;
 		params.layer_height = layerm.layer()->height;
+		params.conformal = surface_fill.params.conformal_infill;
+		params.conformal_stagger = surface_fill.params.conformal_stagger;
+		params.conformal_link_keep_layers = surface_fill.params.conformal_link_keep_layers;
+		params.conformal_link_flip_layers = surface_fill.params.conformal_link_flip_layers;
+		params.conformal_pole = surface_fill.params.conformal_pole;
+		params.conformal_ray_count = surface_fill.params.conformal_ray_count;
+		params.conformal_hub_radius = surface_fill.params.conformal_hub_radius;
 
 		// Pass pattern-specific parameters so that anchoring lines match the actual infill.
 		if (surface_fill.params.pattern == ip2DLattice) {
@@ -993,6 +1078,11 @@ void Layer::make_ironing()
 				ironing_params.just_infill 	= false;
 				ironing_params.line_spacing = config.ironing_spacing;
 				ironing_params.inset 		= config.ironing_inset;
+                if (multi_nozzle_diameter_mode_enabled(this->object()->print()->full_print_config())) {
+                    const double nozzle_diameter = nozzle_diameter_for_filament(
+                        this->object()->print()->config(), (unsigned int) config.solid_infill_filament.value);
+                    ironing_params.inset = multi_nozzle_ironing_inset(nozzle_diameter, ironing_params.inset);
+                }
 				ironing_params.height 		= default_layer_height * 0.01 * config.ironing_flow;
 				ironing_params.speed 		= config.ironing_speed;
 				ironing_params.angle 		= (int(config.ironing_direction.value+layerm->region().config().infill_direction.value)%180) * M_PI / 180.;
@@ -1041,9 +1131,15 @@ void Layer::make_ironing()
 			// Merge top surfaces with the same ironing parameters.
 			Polygons polys;
 			Polygons infills;
+			Polygons void_fill_areas;
 			for (size_t k = i; k < j; ++ k) {
 				const IroningParams		 &ironing_params  = by_extruder[k];
 				const PrintRegionConfig  &region_config   = ironing_params.layerm->region().config();
+				// Layer combination marks swallowed fill as void while keeping the original top slices.
+				// Exclude those areas so ironing is emitted only where this physical layer has fill.
+				for (const Surface &surface : ironing_params.layerm->fill_surfaces.surfaces)
+					if (surface.surface_type == stInternalVoid)
+						polygons_append(void_fill_areas, to_polygons(surface.expolygon));
 				bool					  iron_everything = region_config.ironing_type == IroningType::AllSolid;
 				bool					  iron_completely = iron_everything;
 				if (iron_everything) {
@@ -1087,6 +1183,8 @@ void Layer::make_ironing()
 			//BBS: ironing inset
             double ironing_areas_offset = ironing_params.inset == 0 ? float(scale_(0.5 * nozzle_dmr)) : scale_(ironing_params.inset);
 			ironing_areas = intersection_ex(polys, offset(this->lslices, - ironing_areas_offset));
+			if (! void_fill_areas.empty())
+				ironing_areas = diff_ex(ironing_areas, union_ex(void_fill_areas));
 		}
 
         // Create the filler object.

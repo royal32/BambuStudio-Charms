@@ -1,6 +1,7 @@
 #include "slic3r/GUI/StudioAssistantModel.hpp"
 #include "slic3r/GUI/StudioAssistantProfiles.hpp"
 #include "libslic3r/Utils.hpp"
+#include "assistant_test_paths.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include <cassert>
@@ -21,9 +22,7 @@ int main(int argc,char** argv)
     assert(!readable_profile_parameter("bed_custom_model",text_parameter));
     assert(!readable_profile_parameter("printhost_apikey",text_parameter));
     assert(!readable_profile_parameter("machine_start_gcode",text_parameter));
-    set_resources_dir(std::string(PROJECT_RESOURCES));
-    boost::filesystem::create_directories(PROJECT_TEST_TMP);
-    set_temporary_dir(PROJECT_TEST_TMP); set_data_dir(PROJECT_TEST_TMP);
+    configure_assistant_test_paths();
     Model model;
     auto* object=model.add_object("Two color charm","",make_cube(10,10,2));
     object->add_instance(); object->config.set("extruder",1);
@@ -46,6 +45,17 @@ int main(int argc,char** argv)
     assert(int(check.get_triangles().at(0).get_state())==2); assert(int(check.get_triangles().at(1).get_state())==1);
     assert(volume->supported_facets.get_data()==original_supports); assert(hole->is_negative_volume());
     const auto original_guid=volume->ensure_part_guid();
+    {
+        Model feature_model;
+        auto* feature_object=feature_model.add_object("Global feature colors","",make_cube(5,5,2));
+        auto source_features=source;
+        source_features.set_key_value("wall_filament",new ConfigOptionInt(2));
+        const auto feature_mapping=source_filament_mapping(*feature_object,source_features,target,2);
+        assert(feature_mapping.at(1)==2 && feature_mapping.at(2)==1);
+        apply_source_filament_mapping(*feature_object,feature_mapping,&source_features);
+        assert(feature_object->config.extruder()==2 && feature_object->config.opt_int("wall_filament")==1);
+        assert(source_features.opt_int("wall_filament")==2);
+    }
     auto* clone=copy_source_object(model,*object);
     assert(clone->id()!=object->id()); assert(clone->volumes.size()==object->volumes.size());
     assert(clone->volumes.at(0)->supported_facets.get_data()==original_supports); assert(clone->volumes.at(1)->is_negative_volume());
@@ -74,7 +84,7 @@ int main(int argc,char** argv)
     auto* unsupported=overhang.add_object("Unsupported overhang","",make_cube(6,6,6));
     auto cap=make_cube(24,24,2); cap.translate(Vec3f(-9,-9,6)); unsupported->add_volume(std::move(cap));
     unsupported->add_instance(Vec3d(80,80,-0.4),Vec3d::Ones(),Vec3d::Zero(),Vec3d::Ones());
-    const auto fixture=(boost::filesystem::path(PROJECT_TEST_TMP)/"Unsupported overhang.stl").string();
+    const auto fixture=(boost::filesystem::path(assistant_test_tmp())/"Unsupported overhang.stl").string();
     assert(store_stl(fixture.c_str(), &overhang, true));
     auto process=DynamicPrintConfig::full_print_config();
     process.set_key_value("enable_support",new ConfigOptionBool(false));

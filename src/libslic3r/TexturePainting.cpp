@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <set>
 #include <utility>
 
@@ -10,16 +11,25 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include <boost/log/trivial.hpp>
-
 #include "TextureToColor/TextureToColor.hpp"
 #include "TextureToColor/ColorUtils.hpp"
 
 #include "Model.hpp"
 #include "TriangleMesh.hpp"
 #include "TriangleSelector.hpp"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r {
+
+void MeshRepairCacheDeleter::operator()(tex2color::MeshRepairCache* p) const
+{
+    delete p;
+}
+
+MeshRepairCachePtr make_mesh_repair_cache()
+{
+    return MeshRepairCachePtr(new tex2color::MeshRepairCache());
+}
 
 static cv::Mat decode_texture_image(const TextureImage& img) {
     if (img.data.empty())
@@ -123,6 +133,124 @@ static void extract_painted_mesh(
 
     std::set<std::array<std::size_t,3>> unique_colors(face_colors.begin(), face_colors.end());
     painted.cluster_colors.assign(unique_colors.begin(), unique_colors.end());
+}
+
+static tex2color::TextureToColorSettings make_tex2color_settings(const TexturePaintingSettings& settings)
+{
+    tex2color::TextureToColorSettings algo_settings;
+    algo_settings.target_colors_num  = settings.target_colors_num;
+    algo_settings.smooth_weight      = settings.smooth_weight;
+    algo_settings.oversampling_iters = settings.oversampling_iters;
+    switch (settings.mesh_repair_decision) {
+    case TexturePaintingSettings::MeshRepairDecision::RepairAndImport:
+        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::RepairAndImport;
+        break;
+    case TexturePaintingSettings::MeshRepairDecision::ImportWithoutRepair:
+    default:
+        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::ImportWithoutRepair;
+        break;
+    }
+    algo_settings.mesh_repair_callback = settings.mesh_repair_callback;
+    algo_settings.mesh_repair_timeout = settings.mesh_repair_timeout;
+    algo_settings.mesh_repair_cache = settings.mesh_repair_cache;
+    return algo_settings;
+}
+
+static bool take_prepared_cache(tex2color::MeshRepairCache* cache,
+                                std::size_t input_face_count,
+                                const TexturePaintingSettings& settings)
+{
+    if (!cache || !cache->has_prepared_mesh)
+        return false;
+    const auto algo = make_tex2color_settings(settings);
+    if (!cache->matches_input(input_face_count,
+                              algo.oversampling_iters,
+                              algo.oversampling_min_face_count,
+                              algo.oversampling_max_face_count)) {
+        cache->invalidate_prepared_mesh();
+        return false;
+    }
+    return true;
+}
+
+bool mesh_repair_cache_can_skip_input(const MeshRepairCachePtr& cache,
+                                      std::size_t input_face_count,
+                                      const TexturePaintingSettings& settings)
+{
+    return take_prepared_cache(cache.get(), input_face_count, settings);
+}
+
+bool mesh_repair_cache_win10_failed(const MeshRepairCachePtr& cache)
+{
+    return cache && cache->win10_attempt == tex2color::MeshRepairAttempt::Failed;
+}
+
+bool copy_prepared_mesh_from_cache(const MeshRepairCachePtr& cache, PaintedMesh& out)
+{
+    if (!cache || !cache->has_prepared_mesh)
+        return false;
+    if (cache->mesh.indices.empty() || cache->face_colors.empty())
+        return false;
+    if (cache->face_colors.size() != cache->mesh.indices.size())
+        return false;
+    extract_painted_mesh(cache->mesh, cache->face_colors, out);
+    return true;
+}
+
+static void bind_paint_callbacks(
+    PaintProgressCallback progress,
+    PaintCancelCallback cancel,
+    tex2color::AlgoProgressCallback& algo_progress,
+    tex2color::AlgoCancelCallback& algo_cancel)
+{
+    if (progress) {
+        algo_progress = [progress](tex2color::AlgoProgress p) {
+            progress(p.percent, p.message);
+        };
+    }
+    if (cancel) {
+        algo_cancel = [cancel]() -> bool { return cancel(); };
+    }
+}
+
+static bool painting_from_repair_cache(
+    const TexturePaintingSettings& settings,
+    PaintProgressCallback progress,
+    PaintCancelCallback cancel,
+    PaintedMesh& painted)
+{
+    auto* cache = settings.mesh_repair_cache;
+    if (!cache || !cache->has_prepared_mesh)
+        return false;
+
+    tex2color::TextureToColorSettings algo_settings = make_tex2color_settings(settings);
+    // Prepared geometry is already stored; do not copy cache->mesh again inside
+    // repair_cluster_smooth, and do not retry Win10 repair.
+    algo_settings.mesh_repair_cache = nullptr;
+    algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::ImportWithoutRepair;
+    tex2color::AlgoProgressCallback algo_progress = nullptr;
+    tex2color::AlgoCancelCallback algo_cancel = nullptr;
+    bind_paint_callbacks(progress, cancel, algo_progress, algo_cancel);
+
+    tex2color::TriMesh out_mesh;
+    std::vector<std::array<std::size_t,3>> out_face_colors;
+    bool ok = tex2color::ClusterAndSmooth(
+        cache->mesh, cache->face_colors, out_mesh, out_face_colors,
+        algo_settings, algo_progress, algo_cancel);
+    if (!ok)
+        return false;
+
+    extract_painted_mesh(out_mesh, out_face_colors, painted);
+    return true;
+}
+
+bool cluster_from_repair_cache(
+    PaintedMesh& painted,
+    const TexturePaintingSettings& settings,
+    PaintProgressCallback progress,
+    PaintCancelCallback cancel)
+{
+    return painting_from_repair_cache(settings, progress, cancel, painted);
 }
 
 // Build a vertically-stacked atlas from multiple textures and remap per-face UVs.
@@ -277,6 +405,9 @@ bool texture_to_painting(
     PaintProgressCallback progress,
     PaintCancelCallback cancel)
 {
+    if (take_prepared_cache(settings.mesh_repair_cache, textured.indices.size(), settings))
+        return painting_from_repair_cache(settings, progress, cancel, painted);
+
     if (textured.vertices.empty() || textured.indices.empty() || textured.textures.empty())
         return false;
 
@@ -307,40 +438,14 @@ bool texture_to_painting(
         build_tex2color_mesh(textured, input_mesh, uv_coords);
     }
 
-    tex2color::TextureToColorSettings algo_settings;
-    algo_settings.target_colors_num  = settings.target_colors_num;
-    algo_settings.smooth_weight      = settings.smooth_weight;
-    algo_settings.oversampling_iters = settings.oversampling_iters;
-    switch (settings.mesh_repair_decision) {
-    case TexturePaintingSettings::MeshRepairDecision::Ask:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::Ask;
-        break;
-    case TexturePaintingSettings::MeshRepairDecision::RepairAndImport:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::RepairAndImport;
-        break;
-    case TexturePaintingSettings::MeshRepairDecision::ImportWithoutRepair:
-    default:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::ImportWithoutRepair;
-        break;
-    }
+    tex2color::TextureToColorSettings algo_settings = make_tex2color_settings(settings);
 
     tex2color::AlgoProgressCallback algo_progress = nullptr;
-    if (progress) {
-        algo_progress = [&progress](tex2color::AlgoProgress p) {
-            progress(p.percent, p.message);
-        };
-    }
-
     tex2color::AlgoCancelCallback algo_cancel = nullptr;
-    if (cancel) {
-        algo_cancel = [&cancel]() -> bool { return cancel(); };
-    }
+    bind_paint_callbacks(progress, cancel, algo_progress, algo_cancel);
 
     tex2color::TriMesh color_mesh;
     std::vector<std::array<std::size_t,3>> face_colors;
-    algo_settings.mesh_repair_decision_required = settings.mesh_repair_decision_required;
-    algo_settings.mesh_repair_callback = settings.mesh_repair_callback;
-
     bool ok = tex2color::TextureToColor(
         input_mesh, uv_coords, texture,
         color_mesh, face_colors,
@@ -360,6 +465,9 @@ bool face_colors_to_painting(
     PaintProgressCallback progress,
     PaintCancelCallback cancel)
 {
+    if (take_prepared_cache(settings.mesh_repair_cache, mesh.indices.size(), settings))
+        return painting_from_repair_cache(settings, progress, cancel, painted);
+
     if (mesh.vertices.empty() || mesh.indices.empty() || mesh.precomputed_face_colors.empty())
         return false;
 
@@ -372,35 +480,11 @@ bool face_colors_to_painting(
     for (size_t i = 0; i < mesh.indices.size(); ++i)
         input_mesh.indices[i] = Vec3i(mesh.indices[i][0], mesh.indices[i][1], mesh.indices[i][2]);
 
-    // Forward settings to tex2color
-    tex2color::TextureToColorSettings algo_settings;
-    algo_settings.target_colors_num = settings.target_colors_num;
-    algo_settings.smooth_weight     = settings.smooth_weight;
-    switch (settings.mesh_repair_decision) {
-    case TexturePaintingSettings::MeshRepairDecision::Ask:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::Ask;
-        break;
-    case TexturePaintingSettings::MeshRepairDecision::RepairAndImport:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::RepairAndImport;
-        break;
-    case TexturePaintingSettings::MeshRepairDecision::ImportWithoutRepair:
-    default:
-        algo_settings.mesh_repair_decision = tex2color::MeshRepairDecision::ImportWithoutRepair;
-        break;
-    }
-    algo_settings.mesh_repair_decision_required = settings.mesh_repair_decision_required;
-    algo_settings.mesh_repair_callback = settings.mesh_repair_callback;
+    tex2color::TextureToColorSettings algo_settings = make_tex2color_settings(settings);
 
     tex2color::AlgoProgressCallback algo_progress = nullptr;
-    if (progress) {
-        algo_progress = [&progress](tex2color::AlgoProgress p) {
-            progress(p.percent, p.message);
-        };
-    }
     tex2color::AlgoCancelCallback algo_cancel = nullptr;
-    if (cancel) {
-        algo_cancel = [&cancel]() -> bool { return cancel(); };
-    }
+    bind_paint_callbacks(progress, cancel, algo_progress, algo_cancel);
 
     tex2color::TriMesh out_mesh;
     std::vector<std::array<std::size_t,3>> out_face_colors;
@@ -416,6 +500,118 @@ bool face_colors_to_painting(
     return true;
 }
 
+// Source colors are already a small exact palette (standard 3MF color groups), so the
+// texture pipeline's repair / oversample / smooth stages have nothing to contribute and
+// would only rebuild the geometry. Cluster in color space instead and leave the mesh
+// alone, except for the vertex-color preview split below.
+bool standard_3mf_colors_to_painting(
+    const TexturedMesh& mesh,
+    PaintedMesh& painted,
+    const TexturePaintingSettings& settings,
+    PaintProgressCallback progress,
+    PaintCancelCallback cancel)
+{
+    painted = PaintedMesh();
+    if (mesh.indices.empty() || mesh.vertices.empty() ||
+        mesh.precomputed_vertex_colors.size() != mesh.vertices.size())
+        return false;
+
+    auto report = [&progress](int percent, const char* message) {
+        if (progress)
+            progress(percent, message);
+    };
+    auto cancelled = [&cancel]() { return cancel && cancel(); };
+
+    report(0, "Collecting colors");
+    if (cancelled())
+        return false;
+
+    // Per-face colors are averages of the corner colors, so clustering them would invent
+    // colors the file never had. Cluster the source palette instead.
+    using RGB = std::array<std::size_t,3>;
+    std::vector<RGB> unique_colors;
+    std::map<RGB, std::size_t> unique_index;
+    std::vector<std::size_t> vertex_source_ids(mesh.vertices.size());
+    for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+        RGB rgb;
+        for (int c = 0; c < 3; ++c)
+            rgb[c] = static_cast<std::size_t>(std::lround(std::clamp(mesh.precomputed_vertex_colors[i][c], 0.0f, 1.0f) * 255.0f));
+        auto inserted = unique_index.emplace(rgb, unique_colors.size());
+        if (inserted.second)
+            unique_colors.push_back(rgb);
+        vertex_source_ids[i] = inserted.first->second;
+    }
+
+    const std::size_t max_cluster = MAX_PHYSICAL_FILAMENT_COUNT;
+    const std::size_t target = settings.target_colors_num == 0
+        ? std::min(unique_colors.size(), max_cluster)
+        : std::min(settings.target_colors_num, max_cluster);
+
+    report(20, "Clustering colors");
+    if (cancelled())
+        return false;
+
+    // The file already fits within the requested count, so keep its exact colors rather
+    // than clustering them and drifting off the authored values.
+    std::vector<RGB> centers;
+    std::vector<std::size_t> cluster_labels;
+    if (unique_colors.size() <= target) {
+        centers = unique_colors;
+        cluster_labels.resize(unique_colors.size());
+        std::iota(cluster_labels.begin(), cluster_labels.end(), 0);
+    } else {
+        tex2color::TextureToColorSettings algo_settings = make_tex2color_settings(settings);
+        algo_settings.target_colors_num = settings.target_colors_num == 0 ? 0 : target;
+        algo_settings.max_cluster_k     = std::min(algo_settings.max_cluster_k, max_cluster);
+        tex2color::AlgoProgressCallback algo_progress = nullptr;
+        tex2color::AlgoCancelCallback algo_cancel = nullptr;
+        bind_paint_callbacks(nullptr, cancel, algo_progress, algo_cancel);
+        if (!tex2color::quantize_colors(unique_colors, algo_settings, algo_cancel, centers, cluster_labels))
+            return false;
+    }
+    if (centers.empty() || cluster_labels.size() != unique_colors.size())
+        return false;
+
+    report(60, "Building preview");
+    if (cancelled())
+        return false;
+
+    tex2color::TriMesh preview_mesh;
+    preview_mesh.vertices.resize(mesh.vertices.size());
+    for (size_t i = 0; i < mesh.vertices.size(); ++i)
+        preview_mesh.vertices[i] = Vec3f(mesh.vertices[i][0], mesh.vertices[i][1], mesh.vertices[i][2]);
+    preview_mesh.indices.resize(mesh.indices.size());
+    for (size_t i = 0; i < mesh.indices.size(); ++i)
+        preview_mesh.indices[i] = Vec3i(mesh.indices[i][0], mesh.indices[i][1], mesh.indices[i][2]);
+
+    // Split across color borders so the preview shows the same sharp boundaries the
+    // painting will produce inside a triangle. This mesh never reaches the model.
+    std::vector<std::size_t> vertex_cluster_ids(vertex_source_ids.size());
+    for (size_t i = 0; i < vertex_source_ids.size(); ++i)
+        vertex_cluster_ids[i] = cluster_labels[vertex_source_ids[i]];
+    std::vector<std::array<std::size_t,3>> face_colors;
+    if (!tex2color::adaptive_split_by_vertex_clusters(preview_mesh, vertex_cluster_ids, centers, face_colors))
+        return false;
+
+    if (cancelled())
+        return false;
+
+    // Cluster colors are derived from the faces that actually use them, so a cluster that
+    // ended up empty never takes a color slot in the dialog. They come out sorted.
+    extract_painted_mesh(preview_mesh, face_colors, painted);
+    for (size_t i = 0; i < unique_colors.size(); ++i) {
+        const RGB& center = centers[cluster_labels[i]];
+        auto it = std::lower_bound(painted.cluster_colors.begin(), painted.cluster_colors.end(), center);
+        painted.original_color_to_cluster[unique_colors[i]] =
+            it != painted.cluster_colors.end() && *it == center ? int(it - painted.cluster_colors.begin()) : -1;
+    }
+    report(100, "Completed");
+
+    BOOST_LOG_TRIVIAL(info) << "clustered " << unique_colors.size()
+                            << " source colors into " << painted.cluster_colors.size();
+    return true;
+}
+
 double compute_delta_e(
     const std::array<std::size_t,3>& rgb1,
     const std::array<float,4>& rgba2)
@@ -427,6 +623,13 @@ double compute_delta_e(
             static_cast<std::size_t>(rgba2[1] * 255.0f),
             static_cast<std::size_t>(rgba2[2] * 255.0f)
         });
+}
+
+double compute_delta_e(
+    const std::array<std::size_t,3>& rgb1,
+    const std::array<std::size_t,3>& rgb2)
+{
+    return tex2color::color_utils::calc_rgb_color_difference_by_ciede2000(rgb1, rgb2);
 }
 
 std::vector<FilamentMatch> match_clusters_to_filaments(
@@ -531,14 +734,14 @@ bool apply_painted_mesh_to_volume(
         const double drift     = (new_center - cur_center).norm();
         if (drift > 0.05 * std::max(1.0, diag))
             BOOST_LOG_TRIVIAL(warning)
-                << "apply_painted_mesh_to_volume: painted bbox center drifted by "
+                << "painted bbox center drifted by "
                 << drift << " (bbox diag=" << diag
                 << ", unit_scale=" << unit_scale
                 << ", from_meters=" << volume.source.is_converted_from_meters
                 << ", from_inches=" << volume.source.is_converted_from_inches << ")";
         else if (drift > 1e-3 * std::max(1.0, diag))
             BOOST_LOG_TRIVIAL(info)
-                << "apply_painted_mesh_to_volume: minor bbox drift "
+                << "minor bbox drift "
                 << drift << " (bbox diag=" << diag
                 << ", unit_scale=" << unit_scale << ")";
     }

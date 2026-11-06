@@ -28,7 +28,7 @@ int main(int argc, char** argv)
         write(root, ".charm-library/projects/bee-project.json", project.dump());
         sources = source_projects(root, plate);
         assert(sources[0]["available"].get<bool>());
-        assert(sources[0]["path"] == (root / "Sources/Mamá Bee.3mf").u8string());
+        assert(sources[0]["path"] == child(root, "Sources/Mamá Bee.3mf").u8string());
         const Json overrides = {{"bee-project", (root / "Bee.gcode.3mf").u8string()}};
         assert(!source_projects(root, plate, overrides)[0]["available"].get<bool>());
         write(root, "Moved Bee.3MF", "moved project");
@@ -43,7 +43,7 @@ int main(int argc, char** argv)
         bool source_traversal = false;
         try { source_projects(root, plate); } catch (const std::exception&) { source_traversal = true; }
         assert(source_traversal);
-        project["source"] = (root / "Sources/Mamá Bee.3mf").u8string();
+        project["source"] = child(root, "Sources/Mamá Bee.3mf").u8string();
         fs::remove(root / ".charm-library/projects/bee-project.json");
         write(root, ".charm-library/projects/bee-project.json", project.dump());
         assert(source_projects(root, plate)[0]["available"].get<bool>());
@@ -189,10 +189,11 @@ int main(int argc, char** argv)
         const auto note = leave_feedback(root, plate, "Mamá Bee SB", "The hole needs to be larger.\nPlease keep the wings.");
         std::ifstream feedback(child(root, note));
         const std::string text((std::istreambuf_iterator<char>(feedback)), {});
+        feedback.close();
         assert(text.find("The hole needs to be larger.") != std::string::npos);
         assert(text.find("bee-project") != std::string::npos);
-        assert(fs::exists(root / plate));
-        const auto job = root / plate;
+        assert(fs::exists(child(root, plate)));
+        const auto job = child(root, plate);
         const auto stamp = std::to_string(fs::file_size(job)) + ":" + std::to_string(
             std::chrono::duration_cast<std::chrono::nanoseconds>(fs::last_write_time(job).time_since_epoch()).count());
         bool stale = false;
@@ -203,9 +204,9 @@ int main(int argc, char** argv)
         assert(records.size() == 1);
         assert(records[0]["targets"].size() == 1);
         assert(records[0]["targets"][0]["plate_index"] == 2);
-        assert(!fs::exists(root / plate));
+        assert(!fs::exists(child(root, plate)));
         assert(fs::exists(root / "Bee.gcode.3mf"));
-        assert(fs::exists(root / "Sources/Mamá Bee.3mf"));
+        assert(fs::exists(child(root, "Sources/Mamá Bee.3mf")));
         assert(fs::exists(child(root, records[0]["removed_dir"].get<std::string>() + "/" + plate)));
         // Restoration references observed deletion IDs, independent of file dates.
         write(root, ".charm-library/events/restore.json", Json({{"version", 1}, {"kind", "restore"},
@@ -224,5 +225,10 @@ int main(int argc, char** argv)
             fs::rename(root, fs::u8path(argv[1]));
         } else fs::remove_all(root);
         std::cout << "Sliced library source links, deletion, feedback and shared records passed.\n";
+    } catch (const std::exception& error) {
+        std::cerr << "Library storage check failed: " << error.what() << '\n';
+        std::error_code cleanup_error;
+        fs::remove_all(root, cleanup_error);
+        return 1;
     } catch (...) { fs::remove_all(root); throw; }
 }

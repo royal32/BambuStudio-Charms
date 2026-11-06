@@ -1,6 +1,7 @@
 #include "slic3r/GUI/PlateVectorGeometry.hpp"
 #include "slic3r/GUI/StudioAssistantModel.hpp"
 #include "libslic3r/Utils.hpp"
+#include "assistant_test_paths.hpp"
 #include <boost/nowide/cstdio.hpp>
 #include <miniz/miniz.h>
 #include <cassert>
@@ -44,8 +45,8 @@ void print_unchanged(const Members& before,const Members& after) {
     for(const auto& member:before) if(member.first!="[Content_Types].xml" && member.first.rfind("Metadata/charm_library/",0)!=0) assert(after.at(member.first)==member.second);
 }
 int main(int argc,char** argv) {
-    set_resources_dir(PROJECT_RESOURCES);set_temporary_dir(PROJECT_TEST_TMP);set_data_dir(PROJECT_TEST_TMP);
-    test_fs::create_directories(PROJECT_TEST_TMP);const test_fs::path root=test_fs::u8path(PROJECT_TEST_TMP);
+    configure_assistant_test_paths();
+    const test_fs::path root=test_fs::u8path(assistant_test_tmp());
     Model model;auto* object=model.add_object("Charm","",make_cube(20,20,2));object->add_instance();
     object->add_instance(Vec3d(30,0,0),Vec3d(2,1,1),Vec3d::Zero(),Vec3d::Ones());
     auto* colored=object->add_volume(make_cube(10,20,2));colored->config.set("extruder",2);

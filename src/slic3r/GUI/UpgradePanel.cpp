@@ -15,12 +15,62 @@
 #include "DeviceCore/DevManager.h"
 
 #include "DeviceTab/wgtDeviceNozzleRackUpdate.h"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r {
 namespace GUI {
 
 static const wxColour TEXT_NORMAL_CLR = wxColour(0, 174, 66);
 static const wxColour TEXT_FAILED_CLR = wxColour(255, 111, 0);
+
+namespace {
+constexpr int COPY_ICON_PX    = 16;
+constexpr int COPY_FRAME_MS   = 20;
+constexpr int COPY_FADE_STEPS = 6;
+constexpr int COPY_HOLD_MS    = 900;
+
+wxBitmap copy_bitmap_at_scale(const wxImage &image, double scale)
+{
+#ifdef __APPLE__
+    return wxBitmap(image, -1, scale);
+#else
+    (void) scale;
+    return wxBitmap(image);
+#endif
+}
+
+wxBitmap blend_copy_bitmaps(const wxImage &from, const wxImage &to, double t, double scale)
+{
+    if (!from.IsOk() || !to.IsOk() || from.GetSize() != to.GetSize())
+        return copy_bitmap_at_scale(t < 0.5 ? from : to, scale);
+    if (t <= 0.0) return copy_bitmap_at_scale(from, scale);
+    if (t >= 1.0) return copy_bitmap_at_scale(to, scale);
+
+    wxImage output(from.GetSize());
+    output.InitAlpha();
+    const unsigned char *from_data  = from.GetData();
+    const unsigned char *to_data    = to.GetData();
+    const unsigned char *from_alpha = from.HasAlpha() ? from.GetAlpha() : nullptr;
+    const unsigned char *to_alpha   = to.HasAlpha() ? to.GetAlpha() : nullptr;
+    unsigned char       *out_data   = output.GetData();
+    unsigned char       *out_alpha  = output.GetAlpha();
+
+    const int pixels = from.GetWidth() * from.GetHeight();
+    for (int i = 0; i < pixels; ++i) {
+        const double from_weight = (from_alpha ? from_alpha[i] : 255) * (1.0 - t);
+        const double to_weight   = (to_alpha ? to_alpha[i] : 255) * t;
+        const double weight      = from_weight + to_weight;
+        out_alpha[i]             = static_cast<unsigned char>(weight + 0.5);
+        for (int channel = 0; channel < 3; ++channel) {
+            out_data[i * 3 + channel] = weight > 0.0
+                ? static_cast<unsigned char>((from_data[i * 3 + channel] * from_weight
+                                              + to_data[i * 3 + channel] * to_weight) / weight + 0.5)
+                : 0;
+        }
+    }
+    return copy_bitmap_at_scale(output, scale);
+}
+} // namespace
 
 static const std::unordered_map<wxString, wxString> ACCESSORY_DISPLAY_STR = {
     {"N3F", "AMS 2 PRO"},
@@ -124,6 +174,10 @@ MachineInfoPanel::MachineInfoPanel(wxWindow* parent, wxWindowID id, const wxPoin
     m_ota_content_sizer2->Add(m_staticText_ver_val, 0, wxALL|wxEXPAND, FromDIP(5));
     m_ota_content_sizer2->Add(m_staticText_beta_version, 0, wxALL | wxEXPAND, FromDIP(5));
 
+    enable_static_text_copy_menu(m_staticText_model_id_val);
+    enable_static_text_copy_menu(m_staticText_sn_val);
+    enable_static_text_copy_menu(m_staticText_ver_val);
+
     m_ota_info_sizer->Add(m_ota_ver_sizer, 0, wxEXPAND, 0);
     m_ota_info_sizer->Add(m_ota_content_sizer2, 0,  wxEXPAND, 0);
 
@@ -134,6 +188,9 @@ MachineInfoPanel::MachineInfoPanel(wxWindow* parent, wxWindowID id, const wxPoin
     m_ota_sizer->Add(m_ota_content_sizer, 1, wxEXPAND, 0);
 
     m_main_left_sizer->Add(m_ota_sizer, 0, wxEXPAND, 0);
+
+    createHotendAmsWidgets(m_main_left_sizer);
+    show_hotend_ams(false);
 
     m_staticline = new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL);
     m_staticline->SetBackgroundColour(wxColour(206,206,206));
@@ -225,6 +282,7 @@ MachineInfoPanel::MachineInfoPanel(wxWindow* parent, wxWindowID id, const wxPoin
     createRotaryWidgets(m_main_left_sizer);
     createFilaTrackSwitchWidgets(m_main_left_sizer);
     createExhaustFan(m_main_left_sizer);
+    createAirPurifierWidgets(m_main_left_sizer);
 
     // nozzle rack widgets
     createNozzleRackWidgets(m_main_left_sizer);
@@ -371,11 +429,140 @@ wxPanel *MachineInfoPanel::create_caption_panel(wxWindow *parent)
     m_caption_text->Wrap(-1);
     m_caption_sizer->Add(m_caption_text, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
 
+    m_copy_info = new wxStaticBitmap(caption_panel, wxID_ANY, create_scaled_bitmap("tooltip_copy", this, COPY_ICON_PX));
+    m_copy_info->SetBackgroundColour(caption_panel->GetBackgroundColour());
+    m_copy_info->SetCursor(wxCursor(wxCURSOR_HAND));
+    m_copy_info->SetToolTip(_L("Copy Device Info"));
+    m_copy_info->Bind(wxEVT_ENTER_WINDOW, [this](wxMouseEvent&) {
+        m_copy_hovered = true;
+        if (!m_copy_feedback_timer->IsRunning())
+            set_copy_bitmap("tooltip_copy_hover");
+    });
+    m_copy_info->Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent&) {
+        m_copy_hovered = false;
+        if (!m_copy_feedback_timer->IsRunning())
+            set_copy_bitmap("tooltip_copy");
+    });
+    m_copy_info->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&) {
+        if (copy_text_to_clipboard(get_device_info_text()))
+            start_copy_feedback();
+    });
+    m_caption_sizer->Add(m_copy_info, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(17));
+
+    m_copy_feedback_timer = new wxTimer(this);
+    Bind(wxEVT_TIMER, &MachineInfoPanel::on_copy_feedback_timer, this, m_copy_feedback_timer->GetId());
+
     caption_panel->SetSizer(m_caption_sizer);
     caption_panel->Layout();
     m_caption_sizer->Fit(caption_panel);
 
     return caption_panel;
+}
+
+void MachineInfoPanel::set_copy_bitmap(const std::string &name)
+{
+    if (m_copy_info)
+        m_copy_info->SetBitmap(create_scaled_bitmap(name, this, COPY_ICON_PX));
+}
+
+void MachineInfoPanel::start_copy_feedback()
+{
+    const wxBitmap from = create_scaled_bitmap("tooltip_copy_hover", this, COPY_ICON_PX);
+    const wxBitmap to   = create_scaled_bitmap("tooltip_copy_checked", this, COPY_ICON_PX);
+    m_copy_scale = from.IsOk() ? from.GetScaleFactor() : 1.0;
+    m_copy_from  = from.ConvertToImage();
+    m_copy_to    = to.ConvertToImage();
+    m_copy_step  = 0;
+    m_copy_feedback_timer->Stop();
+    m_copy_feedback_timer->StartOnce(COPY_FRAME_MS);
+}
+
+void MachineInfoPanel::on_copy_feedback_timer(wxTimerEvent &)
+{
+    ++m_copy_step;
+    if (m_copy_step >= 2 * COPY_FADE_STEPS) {
+        set_copy_bitmap(m_copy_hovered ? "tooltip_copy_hover" : "tooltip_copy");
+        return;
+    }
+
+    const bool fading_in = m_copy_step <= COPY_FADE_STEPS;
+    const double t = fading_in
+        ? static_cast<double>(m_copy_step) / COPY_FADE_STEPS
+        : static_cast<double>(2 * COPY_FADE_STEPS - m_copy_step) / COPY_FADE_STEPS;
+    m_copy_info->SetBitmap(blend_copy_bitmaps(m_copy_from, m_copy_to, t, m_copy_scale));
+    m_copy_feedback_timer->StartOnce(m_copy_step == COPY_FADE_STEPS ? COPY_HOLD_MS : COPY_FRAME_MS);
+}
+
+wxString MachineInfoPanel::get_device_info_text() const
+{
+    wxString text;
+    bool     has_body = false;
+    const auto append_block = [&text, &has_body](const wxString& block) {
+        if (!text.IsEmpty())
+            text += has_body ? "\n\n" : "\n";
+        text += block;
+        has_body = true;
+    };
+
+    if (!m_caption_text->GetLabel().IsEmpty()) {
+        text += m_caption_text->GetLabel();
+        text += "\n";
+    }
+
+    append_block(wxString::Format("%s %s\n%s %s\n%s %s",
+                                  _L("Model:"), m_staticText_model_id_val->GetLabel(),
+                                  _L("Serial:"), m_staticText_sn_val->GetLabel(),
+                                  _L("Version:"), m_staticText_ver_val->GetLabel()));
+
+    // Only the cards the user can actually see: a hidden card still holds the
+    // values of whatever module was attached last.
+    if (m_ext_panel && m_ext_panel->IsShown())
+        append_block(m_ext_panel->get_info_text());
+
+    for (auto i = 0; i < m_amspanel_list.GetCount(); i++) {
+        if (m_amspanel_list[i]->IsShown())
+            append_block(m_amspanel_list[i]->get_info_text());
+    }
+    for (auto* panel : m_extra_ams_panel_list) {
+        if (panel && panel->IsShown())
+            append_block(panel->get_info_text());
+    }
+
+    const uiDeviceUpdateVersion* modules[] = {
+        m_air_pump_version, m_rotary_version, m_cutting_version, m_laser_version,
+        m_extinguish_version, m_amshub_version, m_filatrack_version, m_exhaustfan_version,
+    };
+    for (const auto* module : modules) {
+        if (module && module->IsShown())
+            append_block(module->GetInfoText());
+    }
+
+    return text;
+}
+
+void MachineInfoPanel::createHotendAmsWidgets(wxBoxSizer* main_left_sizer)
+{
+    m_hotend_ams_line_above = new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL);
+    m_hotend_ams_line_above->SetBackgroundColour(wxColour(206, 206, 206));
+
+    m_hotend_ams_img = new wxStaticBitmap(this, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxSize(FromDIP(200), FromDIP(200)));
+    m_hotend_ams_img->SetBitmap(m_img_hotend_ams.bmp());
+
+    auto        panel_hotend_ams    = new wxPanel(this);
+    wxBoxSizer* content_sizer_v = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer* content_sizer_h = new wxBoxSizer(wxHORIZONTAL);
+
+    m_hotend_ams_version = new uiDeviceUpdateVersion(panel_hotend_ams, wxID_ANY);
+    content_sizer_h->Add(m_hotend_ams_version, 0, wxALIGN_CENTER, 0);
+    content_sizer_v->Add(content_sizer_h, 1, wxLEFT, 0);
+    panel_hotend_ams->SetSizer(content_sizer_v);
+
+    m_hotend_ams_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_hotend_ams_sizer->Add(m_hotend_ams_img, 0, wxALIGN_TOP | wxALL, FromDIP(5));
+    m_hotend_ams_sizer->Add(panel_hotend_ams, 1, wxEXPAND, 0);
+
+    main_left_sizer->Add(m_hotend_ams_line_above, 0, wxEXPAND | wxLEFT, FromDIP(40));
+    main_left_sizer->Add(m_hotend_ams_sizer, 0, wxEXPAND, 0);
 }
 
 void MachineInfoPanel::createAirPumpWidgets(wxBoxSizer* main_left_sizer)
@@ -575,6 +762,9 @@ void MachineInfoPanel::createAmshubWidgets(wxBoxSizer *main_left_sizer)
 void MachineInfoPanel::msw_rescale()
 {
     rescale_bitmaps();
+    if (m_copy_feedback_timer) m_copy_feedback_timer->Stop();
+    m_copy_from = m_copy_to = wxImage();
+    set_copy_bitmap("tooltip_copy");
     m_button_upgrade_firmware->SetSize(wxSize(FromDIP(-1), FromDIP(24)));
     m_button_upgrade_firmware->SetMinSize(wxSize(FromDIP(-1), FromDIP(24)));
     m_button_upgrade_firmware->SetMaxSize(wxSize(FromDIP(-1), FromDIP(24)));
@@ -592,6 +782,7 @@ void MachineInfoPanel::init_bitmaps()
     try {
         m_img_printer     = ScalableBitmap(this, "printer_thumbnail_png", 160);
         m_img_monitor_ams = ScalableBitmap(this, "monitor_upgrade_ams_png", 150);
+        m_img_hotend_ams  = ScalableBitmap(this, "monitor_upgrade_ams_png", 150);
         m_img_ext         = ScalableBitmap(this, "monitor_upgrade_ext", 160);
         m_img_air_pump    = ScalableBitmap(this, "air_pump", 160);
         m_img_extra_ams   = ScalableBitmap(this, "extra_icon_png", 160);
@@ -600,6 +791,7 @@ void MachineInfoPanel::init_bitmaps()
         m_img_extinguish  = ScalableBitmap(this, "extinguish", 160);
         m_img_rotary      = ScalableBitmap(this, "rotary", 160);
         m_img_filatrack   = ScalableBitmap(this, "filament_track_switch", 160);
+        m_img_air_purifier = ScalableBitmap(this, "air_purifier", 160);
         m_img_nozzle_rack = ScalableBitmap(this, "nozzle_rack", 160);
         m_img_exhaustfan  = ScalableBitmap(this, "exhaustfan", 160);
         m_img_amshub      = ScalableBitmap(this, "amshub_N7", 160);
@@ -610,10 +802,10 @@ void MachineInfoPanel::init_bitmaps()
     }
     catch (const std::exception &e)
     {
-        BOOST_LOG_TRIVIAL(error) << "init_bitmaps failed to load resources: " << e.what();
+        BOOST_LOG_TRIVIAL(error) << "failed to load resources: " << e.what();
     } catch (...)
     {
-        BOOST_LOG_TRIVIAL(error) << "init_bitmaps failed to load resources: unknown error";
+        BOOST_LOG_TRIVIAL(error) << "failed to load resources: unknown error";
     }
 }
 
@@ -635,6 +827,12 @@ MachineInfoPanel::~MachineInfoPanel()
 {
     // Disconnect Events
     m_button_upgrade_firmware->Disconnect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MachineInfoPanel::on_upgrade_firmware), NULL, this);
+    if (m_copy_feedback_timer) {
+        m_copy_feedback_timer->Stop();
+        Unbind(wxEVT_TIMER, &MachineInfoPanel::on_copy_feedback_timer, this, m_copy_feedback_timer->GetId());
+        delete m_copy_feedback_timer;
+        m_copy_feedback_timer = nullptr;
+    }
 
     if (confirm_dlg != nullptr)
         delete confirm_dlg;
@@ -657,11 +855,11 @@ void MachineInfoPanel::update_printer_imgs(MachineObject* obj)
     }
     catch (const std::exception &e)
     {
-        BOOST_LOG_TRIVIAL(error) << "update_printer_imgs error : " << e.what();
+        BOOST_LOG_TRIVIAL(error) << "error : " << e.what();
     }
     catch (...)
     {
-        BOOST_LOG_TRIVIAL(error) << "update_printer_imgs failed: unknown error";
+        BOOST_LOG_TRIVIAL(error) << "failed: unknown error";
     }
 }
 
@@ -740,6 +938,9 @@ void MachineInfoPanel::update(MachineObject* obj)
         // update version
         update_version_text(obj);
 
+        update_rack_imgs(obj);
+        update_hotend_ams(obj);
+
         // update ams and extension
         update_ams_ext(obj);
 
@@ -751,6 +952,7 @@ void MachineInfoPanel::update(MachineObject* obj)
         update_laszer(obj);
         update_extinguish(obj);
         update_filatrack(obj);
+        update_air_purifier(obj);
         update_nozzle_rack(obj);
         update_exhaustfan(obj);
 
@@ -961,6 +1163,20 @@ void MachineInfoPanel::update_ams_ext(MachineObject *obj)
             if (iter->second.name == extra_ams_it->first) {
                 ver_list.erase(iter);
                 break;
+            }
+        }
+    }
+
+    // The hotend integrated AMS has its own panel above too, and get_ams_version() reports it on
+    // purpose because the other callers look up its sn by ams id. Only drop it once that panel is
+    // actually shown, and drop every entry because one module can be mapped to several ams ids.
+    if (obj->hotend_ams_version_info.isValid()) {
+        const std::string& hotend_ams_name = obj->hotend_ams_version_info.name;
+        for (auto iter = ver_list.begin(); iter != ver_list.end();) {
+            if (iter->second.name == hotend_ams_name) {
+                iter = ver_list.erase(iter);
+            } else {
+                ++iter;
             }
         }
     }
@@ -1185,6 +1401,46 @@ void MachineInfoPanel::update_ams_ext(MachineObject *obj)
     this->Fit();
 }
 
+// The hotend rack and the rack AMS differ per printer model, so their images come from
+// "hotend_rack_image" / "hotend_ams_image" in resources/printers/<model>.json. Models without
+// those keys keep the legacy shared images. Reading the config is file IO, so it is only
+// redone when the bound printer model changes.
+void MachineInfoPanel::update_rack_imgs(MachineObject* obj)
+{
+    if (!obj || m_rack_imgs_printer_type == obj->printer_type) { return; }
+    m_rack_imgs_printer_type = obj->printer_type;
+
+    std::string rack_img = DevPrinterConfigUtil::get_hotend_rack_img(obj->printer_type);
+    if (rack_img.empty()) { rack_img = "nozzle_rack"; }
+
+    std::string rack_ams_img = DevPrinterConfigUtil::get_hotend_ams_img(obj->printer_type);
+    if (rack_ams_img.empty()) { rack_ams_img = "monitor_upgrade_ams_png"; }
+
+    try {
+        m_img_nozzle_rack = ScalableBitmap(this, rack_img, 160);
+        m_nozzle_rack_img->SetBitmap(m_img_nozzle_rack.bmp());
+
+        m_img_hotend_ams = ScalableBitmap(this, rack_ams_img, 150);
+        m_hotend_ams_img->SetBitmap(m_img_hotend_ams.bmp());
+    }
+    catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "error : " << e.what();
+    }
+    catch (...) {
+        BOOST_LOG_TRIVIAL(error) << "failed: unknown error";
+    }
+}
+
+void MachineInfoPanel::update_hotend_ams(MachineObject* obj)
+{
+    if (obj && obj->hotend_ams_version_info.isValid()) {
+        m_hotend_ams_version->UpdateInfo(obj->hotend_ams_version_info);
+        show_hotend_ams(true);
+    } else {
+        show_hotend_ams(false);
+    }
+}
+
 void MachineInfoPanel::update_air_pump(MachineObject* obj)
 {
     if (obj && obj->air_pump_version_info.isValid())
@@ -1400,6 +1656,15 @@ void MachineInfoPanel::show_extra_ams(bool show, bool force_update) {
     m_last_extra_ams_show = show;
 }
 
+void MachineInfoPanel::show_hotend_ams(bool show)
+{
+    if (m_hotend_ams_version->IsShown() != show) {
+        m_hotend_ams_img->Show(show);
+        m_hotend_ams_line_above->Show(show);
+        m_hotend_ams_version->Show(show);
+    }
+}
+
 void MachineInfoPanel::show_air_pump(bool show)
 {
     if (m_air_pump_version->IsShown() != show)
@@ -1500,6 +1765,55 @@ void MachineInfoPanel::show_filatrack(bool show)
         m_filatrack_img->Show(show);
         m_filatrack_line_above->Show(show);
         m_filatrack_version->Show(show);
+    }
+}
+
+void MachineInfoPanel::createAirPurifierWidgets(wxBoxSizer* main_left_sizer)
+{
+    m_air_purifier_line_above = new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL);
+    m_air_purifier_line_above->SetBackgroundColour(wxColour(206, 206, 206));
+    main_left_sizer->Add(m_air_purifier_line_above, 0, wxEXPAND | wxLEFT, FromDIP(40));
+
+    m_air_purifier_img = new wxStaticBitmap(this, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxSize(FromDIP(200), FromDIP(200)));
+    m_air_purifier_img->SetBitmap(m_img_air_purifier.bmp());
+
+    auto        panel_air_purifier = new wxPanel(this);
+    wxBoxSizer *content_sizer_h    = new wxBoxSizer(wxHORIZONTAL);
+    wxBoxSizer *content_sizer_v    = new wxBoxSizer(wxVERTICAL);
+
+    m_air_purifier_version = new uiDeviceUpdateVersion(panel_air_purifier, wxID_ANY);
+
+    content_sizer_h->Add(m_air_purifier_version, 0, wxALIGN_CENTER, 0);
+    content_sizer_v->Add(content_sizer_h, 1, wxLEFT, 0);
+
+    panel_air_purifier->SetSizer(content_sizer_v);
+
+    m_air_purifier_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_air_purifier_sizer->Add(m_air_purifier_img, 0, wxALIGN_TOP | wxALL, FromDIP(5));
+    m_air_purifier_sizer->Add(panel_air_purifier, 1, wxEXPAND, 0);
+
+    main_left_sizer->Add(m_air_purifier_sizer, 0, wxEXPAND, 0);
+}
+
+void MachineInfoPanel::update_air_purifier(MachineObject* obj)
+{
+    if (obj && obj->air_purifier_version_info.isValid()) {
+        DevFirmwareVersionInfo info = obj->air_purifier_version_info;
+        // Older firmware may report the "aps" module without a product name
+        if (info.product_name.empty()) { info.product_name = L("Air Purifier"); }
+        m_air_purifier_version->UpdateInfo(info);
+        show_air_purifier(true);
+    } else {
+        show_air_purifier(false);
+    }
+}
+
+void MachineInfoPanel::show_air_purifier(bool show)
+{
+    if (m_air_purifier_version->IsShown() != show) {
+        m_air_purifier_img->Show(show);
+        m_air_purifier_line_above->Show(show);
+        m_air_purifier_version->Show(show);
     }
 }
 
@@ -1623,6 +1937,10 @@ void MachineInfoPanel::on_show_release_note(wxMouseEvent &event)
 UpgradePanel::UpgradePanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, const wxSize &size, long style)
     :wxPanel(parent, id, pos, size, style)
 {
+#ifdef __WINDOWS__
+    SetDoubleBuffered(true);
+#endif //__WINDOWS__
+
     this->SetBackgroundColour(wxColour(238, 238, 238));
 
     auto m_main_sizer = new wxBoxSizer(wxVERTICAL);
@@ -1865,6 +2183,10 @@ bool UpgradePanel::Show(bool show)
      ams_sizer->Add(content_info, 0,  wxEXPAND, FromDIP(5));
      ams_sizer->Add(0, 0, 1, wxEXPAND, 0);
 
+     enable_static_text_copy_menu(m_staticText_ams);
+     enable_static_text_copy_menu(m_staticText_ams_sn_val);
+     enable_static_text_copy_menu(m_staticText_ams_ver_val);
+
      SetSizer(ams_sizer);
      Layout();
  }
@@ -1872,6 +2194,14 @@ bool UpgradePanel::Show(bool show)
  AmsPanel::~AmsPanel()
  {
 
+ }
+
+ wxString AmsPanel::get_info_text() const
+ {
+     return wxString::Format("%s %s\n%s %s\n%s %s",
+                             _L("Model:"), m_staticText_ams->GetLabel(),
+                             _L("Serial:"), m_staticText_ams_sn_val->GetLabel(),
+                             _L("Version:"), m_staticText_ams_ver_val->GetLabel());
  }
 
  void AmsPanel::msw_rescale() {
@@ -1942,6 +2272,10 @@ bool UpgradePanel::Show(bool show)
      ext_sizer->Add(m_staticText_ext_ver_val, 0, wxALL | wxEXPAND, FromDIP(5));
      ext_sizer->Add(0, 0, 1, wxEXPAND, 0);
 
+     enable_static_text_copy_menu(m_staticText_ext_val);
+     enable_static_text_copy_menu(m_staticText_ext_sn_val);
+     enable_static_text_copy_menu(m_staticText_ext_ver_val);
+
      top_sizer->Add(ext_sizer);
      SetSizer(top_sizer);
      Layout();
@@ -1950,6 +2284,14 @@ bool UpgradePanel::Show(bool show)
  ExtensionPanel::~ExtensionPanel()
  {
 
+ }
+
+ wxString ExtensionPanel::get_info_text() const
+ {
+     return wxString::Format("%s %s\n%s %s\n%s %s",
+                             _L("Model:"), m_staticText_ext_val->GetLabel(),
+                             _L("Serial:"), m_staticText_ext_sn_val->GetLabel(),
+                             _L("Version:"), m_staticText_ext_ver_val->GetLabel());
  }
 
  void ExtensionPanel::msw_rescale()

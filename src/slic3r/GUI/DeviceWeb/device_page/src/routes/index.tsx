@@ -12,6 +12,8 @@ function RouteComponent() {
       <div className="flex flex-col gap-2">
         <a className="text-[#00ae42] underline" href="#/filament_manager">Filament Manager</a>
         <a className="text-[#00ae42] underline" href="#/device_page/ams_filament_hotend">Device Page / AMS Filament Hotend</a>
+        <a className="text-[#00ae42] underline" href="#/device_page/ams_control_web">Device Page / AMS Control Web</a>
+        <a className="text-[#00ae42] underline" href="#/device_page/connected_slots">Device Page / Connected Slots</a>
       </div>
     </div>
   )

@@ -8,7 +8,6 @@
 #include <stack>
 
 #include <boost/container/small_vector.hpp>
-#include <boost/log/trivial.hpp>
 #include <boost/static_assert.hpp>
 
 #include "../ClipperUtils.hpp"
@@ -19,6 +18,7 @@
 #include "../VariableWidth.hpp"
 
 #include "FillRectilinear.hpp"
+#include "FillConformal.hpp"
 
 // #define SLIC3R_DEBUG
 // #define INFILL_DEBUG_OUTPUT
@@ -37,6 +37,7 @@
 
 // We want our version of assert.
 #include "../libslic3r.h"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r {
 
@@ -3073,16 +3074,22 @@ bool FillRectilinear::fill_surface_by_multilines(const Surface *surface, FillPar
 
 Polylines FillRectilinear::fill_surface(const Surface *surface, const FillParams &params)
 {
+    if (params.conformal) {
+        Polylines conformal_out;
+        if (FillConformal::fill_surface(*this, surface, params, conformal_out))
+            return conformal_out;
+    }
+
     Polylines polylines_out;
     if (params.full_infill() || params.multiline == 1 || params.pattern == ipCrossZag || params.pattern == ipZigZag || params.pattern == ipLockedZag)
     {
         if (!fill_surface_by_lines(surface, params, 0.f, 0.f, polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillRectilinear::fill_surface() fill_surface_by_lines() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "fill_surface_by_lines() failed to fill a region.";
     }
     else
     {
         if (!fill_surface_by_multilines(surface, params, {{0.f, 0.f}}, polylines_out))
-            BOOST_LOG_TRIVIAL(error) << "FillRectilinear::fill_surface() fill_surface_by_multilines() failed to fill a region.";
+            BOOST_LOG_TRIVIAL(error) << "fill_surface_by_multilines() failed to fill a region.";
     }
     return polylines_out;
 }
@@ -3093,7 +3100,7 @@ Polylines FillMonotonic::fill_surface(const Surface *surface, const FillParams &
     params2.monotonic = true;
     Polylines polylines_out;
     if (! fill_surface_by_lines(surface, params2, 0.f, 0.f, polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillMonotonous::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
     return polylines_out;
 }
 
@@ -3115,7 +3122,7 @@ Polylines FillGrid::fill_surface(const Surface *surface, const FillParams &param
             surface, params,
             { { 0.f, 0.f }, { float(M_PI / 2.), 0.f } },
             polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillGrid::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
 
     if (this->layer_id % 2 == 1)
         for (int i = 0; i < polylines_out.size(); i++)
@@ -3130,7 +3137,7 @@ Polylines FillTriangles::fill_surface(const Surface *surface, const FillParams &
             surface, params,
             { { 0.f, 0.f }, { float(M_PI / 3.), 0.f }, { float(2. * M_PI / 3.), 0. } },
             polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillTriangles::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
     return polylines_out;
 }
 
@@ -3141,7 +3148,7 @@ Polylines FillStars::fill_surface(const Surface *surface, const FillParams &para
             surface, params,
             { { 0.f, 0.f }, { float(M_PI / 3.), 0.f }, { float(2. * M_PI / 3.), float((3./2.) * this->spacing * params.multiline / params.density) } },
             polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillStars::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
     return polylines_out;
 }
 
@@ -3153,7 +3160,7 @@ Polylines FillCubic::fill_surface(const Surface *surface, const FillParams &para
             surface, params,
             { { 0.f, float(dx) }, { float(M_PI / 3.), - float(dx) }, { float(M_PI * 2. / 3.), float(dx) } },
             polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "FillCubic::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
     return polylines_out;
 }
 
@@ -3165,7 +3172,7 @@ Polylines Fill2DLattice::fill_surface(const Surface *surface, const FillParams &
     coordf_t  dx1             = tan(Geometry::deg2rad(lattice_angle_1)) * z; // tan(angel_1)*z get the x direction delta
     coordf_t  dx2             = tan(Geometry::deg2rad(params.lattice_angle_2)) * z;
     if (!this->fill_surface_by_multilines(surface, params, {{float(M_PI / 2.), float(dx1)}, {float(M_PI / 2.), float(dx2)}}, polylines_out))
-        BOOST_LOG_TRIVIAL(error) << "Fill2DLattice::fill_surface() failed to fill a region.";
+        BOOST_LOG_TRIVIAL(error) << "failed to fill a region.";
 
     if (this->layer_id % 2 == 1)
         for (int i = 0; i < polylines_out.size(); i++) std::reverse(polylines_out[i].begin(), polylines_out[i].end());
@@ -3816,6 +3823,44 @@ void FillMonotonicLineWGapFill::fill_surface_by_lines(const Surface* surface, co
 		polylines_from_paths(path, poly_with_offset, segs, polylines_out);
     }
 
+    // Keep the same line geometry / spacing / wall overlap as monotonic line.
+    // Sweep columns strictly from left to right. Within one column, visit all
+    // disconnected segments from one side to the other, then reverse the
+    // direction for the next column.
+    if (this->global_monotonic_sweep() && polylines_out.size() > n_polylines_out_initial) {
+        const auto first = polylines_out.begin() + n_polylines_out_initial;
+        const auto scan_x = [](const Polyline &line) {
+            return std::min(line.first_point().x(), line.last_point().x());
+        };
+        const auto scan_y = [](const Polyline &line) {
+            return std::min(line.first_point().y(), line.last_point().y());
+        };
+        std::sort(first, polylines_out.end(), [&scan_x, &scan_y](const Polyline &a, const Polyline &b) {
+            const coord_t ax = scan_x(a);
+            const coord_t bx = scan_x(b);
+            if (ax != bx)
+                return ax < bx;
+            return scan_y(a) < scan_y(b);
+        });
+
+        size_t column_idx = 0;
+        for (auto column_begin = first; column_begin != polylines_out.end(); ++column_idx) {
+            const coord_t column_x = scan_x(*column_begin);
+            auto column_end = column_begin + 1;
+            while (column_end != polylines_out.end() && scan_x(*column_end) == column_x)
+                ++column_end;
+
+            const bool upward = (column_idx & 1) == 0;
+            if (!upward)
+                std::reverse(column_begin, column_end);
+            for (auto it = column_begin; it != column_end; ++it)
+                if ((it->first_point().y() < it->last_point().y()) != upward)
+                    it->reverse();
+
+            column_begin = column_end;
+        }
+    }
+
     // paths must be rotated back
     for (Polylines::iterator it = polylines_out.begin() + n_polylines_out_initial; it != polylines_out.end(); ++ it) {
         // No need to translate, the absolute position is irrelevant.
@@ -3854,6 +3899,7 @@ Polylines FillLockedZag::generate_skeleton_pattern(FillParams params, Surface su
 
     if (this->skeleton_pattern!= ipCrossZag)
         params.horiz_move = 0;
+    params.conformal = false;
     //union exps
     auto it_depth = this->lock_param.locked_depths_params.begin();
     while (it_depth != this->lock_param.locked_depths_params.end()) {

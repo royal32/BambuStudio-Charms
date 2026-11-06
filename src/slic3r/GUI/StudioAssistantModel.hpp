@@ -95,7 +95,9 @@ inline std::map<int,int> source_filament_mapping(const ModelObject& source,const
     std::set<int> used{source.config.has("extruder")?std::max(1,source.config.extruder()):1};
     auto collect=[&](const ModelConfig& config) { for (const auto& key:keys) if (config.has(key) && config.opt_int(key)>0) used.insert(config.opt_int(key)); };
     collect(source.config);
-    for (const auto* volume:source.volumes) { collect(volume->config); for (int value:volume->get_extruders()) if (value>0) used.insert(value); }
+    const auto global_features=GlobalFeatureFilaments::from_config(source_config,
+        source_colors?source_colors->values.size():MAX_FILAMENT_COUNT);
+    for (const auto* volume:source.volumes) { collect(volume->config); for (int value:volume->get_extruders(global_features)) if (value>0) used.insert(value); }
     auto fold=[](std::string value) { std::transform(value.begin(),value.end(),value.begin(),[](unsigned char c){return char(std::tolower(c));}); return value; };
     std::map<int,int> mapping;
     for (int value:used) {
@@ -115,8 +117,16 @@ inline std::map<int,int> source_filament_mapping(const ModelObject& source,const
     return mapping;
 }
 
-inline void apply_source_filament_mapping(ModelObject& source,const std::map<int,int>& mapping)
+inline void apply_source_filament_mapping(ModelObject& source,const std::map<int,int>& mapping,
+    const DynamicPrintConfig* source_config=nullptr)
 {
+    // Preserve source-global feature colors as object overrides before the
+    // imported object starts inheriting the destination project's settings.
+    if(source_config)for(const auto* key:{"wall_filament","solid_infill_filament","sparse_infill_filament"}) {
+        const auto* value=source_config->option(key);
+        if(value && value->getInt()>0 && mapping.count(value->getInt()) &&
+            (!source.config.has(key) || source.config.opt_int(key)==0))source.config.set(key,value->getInt());
+    }
     const std::vector<std::string> keys={"extruder","wall_filament","solid_infill_filament","sparse_infill_filament","support_filament","support_interface_filament"};
     auto remap=[&](ModelConfig& config) { for (const auto& key:keys) if (config.has(key) && config.opt_int(key)>0) config.set(key,mapping.at(config.opt_int(key))); };
     remap(source.config);

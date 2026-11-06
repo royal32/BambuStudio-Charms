@@ -2,6 +2,10 @@
 <html>
 <head>
 <meta charset="utf-8">
+<!-- Scripts may only come from the bundled resources; no remote code, see home.html.
+     'unsafe-eval' is required: the host pushes every menu update through
+     evaluateJavaScript(), which WebKit before macOS 26 checks against this policy. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' file:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob: https: http:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
 <meta http-equiv="Cache-Control" content="max-age=7200" />
 <meta name="viewport" content="width=device-width,initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0,user-scalable=no">
 <title>homepage</title>
@@ -34,30 +38,33 @@
 			<img id="UserAvatarIcon" src="img/left_home_account.svg" onerror="this.onerror=null;this.src='img/left_home_account.svg';" />
 		</div>
 		<div id="UserName" class="TextS1 auto-hide"></div>
-		<div class="PullBtn auto-hide">
-				<div id="DropdownWrapper" class="DropdownBG">
-					<div class="dropdown-header DropdownHeaderBG">
-						<div class="avatar" id="DropdownAvatar"></div>
-						<div class="user-details">
-							<div class="UserName TextS1" id="DropdownUserName"></div>
-							<div class="UserEmail TextS2" id="DropdownUserEmail"></div>
-						</div>
-					</div>
-					<div id="AccountList" class="AccountList" style="display: none;"></div>
-					<div class="DropdownFooter" id="AddAccountFooter" style="display: none;" onClick="OnAddAccount(event)">
-						<div class="AddAccountIcon">+</div>
-						<div class="LogoutBtn TextS2">Add account</div>
-					</div>
-					<div class="DropdownFooter" id="SignInFooter" style="display: none;" onClick="OnLoginFromMenu(event)">
-						<div class="SignInIcon"></div>
-						<div class="LogoutBtn TextS2">Sign in</div>
-					</div>
-					<div class="DropdownFooter" id="LogoutFooter">
-						<div class="LogoutIcon"></div>
-						<div class="LogoutBtn TextS2 trans" tid="t50" onClick="OnLogOut()">log out</div>
-					</div>
-					<!-- <textarea id="consoleinfo"></textarea> -->
+		<div class="PullBtn auto-hide"></div>
+		<!-- Keep the dropdown OUT of .PullBtn: in the collapsed left bar .PullBtn gets
+		     display:none from left_mini.css, which would take this panel down with it
+		     and leave the avatar click doing nothing. It is positioned against
+		     #LoginArea either way, so moving it out does not change its placement. -->
+		<div id="DropdownWrapper" class="DropdownBG">
+			<div class="dropdown-header DropdownHeaderBG">
+				<div class="avatar" id="DropdownAvatar"></div>
+				<div class="user-details">
+					<div class="UserName TextS1" id="DropdownUserName"></div>
+					<div class="UserEmail TextS2" id="DropdownUserEmail"></div>
 				</div>
+			</div>
+			<div id="AccountList" class="AccountList" style="display: none;"></div>
+			<div class="DropdownFooter" id="AddAccountFooter" style="display: none;" onClick="OnAddAccount(event)">
+				<div class="AddAccountIcon">+</div>
+				<div class="LogoutBtn TextS2">Add account</div>
+			</div>
+			<div class="DropdownFooter" id="SignInFooter" style="display: none;" onClick="OnLoginFromMenu(event)">
+				<div class="SignInIcon"></div>
+				<div class="LogoutBtn TextS2">Sign in</div>
+			</div>
+			<div class="DropdownFooter" id="LogoutFooter">
+				<div class="LogoutIcon"></div>
+				<div class="LogoutBtn TextS2 trans" tid="t50" onClick="OnLogOut()">log out</div>
+			</div>
+			<!-- <textarea id="consoleinfo"></textarea> -->
 		</div>
 		<!-- <div id="LogoutBtn" class="Btn trans" tid="t50" onClick="OnLogOut()">log out</div> -->
 	</div>	

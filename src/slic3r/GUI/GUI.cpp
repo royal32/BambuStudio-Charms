@@ -592,6 +592,16 @@ bool desktop_reveal_file(const std::string& path)
 #endif
 }
 
+void desktop_open_log_folder()
+{
+    const auto log_folder = (boost::filesystem::path(data_dir()) / "log").make_preferred();
+
+    if (!boost::filesystem::exists(log_folder))
+        boost::filesystem::create_directories(log_folder);
+
+    desktop_open_any_folder(log_folder.string());
+}
+
 void desktop_open_any_folder( const std::string& path )
 {
     // Execute command to open a file explorer, platform dependent.

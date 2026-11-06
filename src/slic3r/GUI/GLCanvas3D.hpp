@@ -875,6 +875,10 @@ public:
     unsigned int get_volumes_count() const;
     const GLVolumeCollection& get_volumes() const { return m_volumes; }
     void reset_volumes(bool set_notice = true);
+    // Keep the GLVolumes usable across a Model::delete_object(obj_idx) that the scene has not been
+    // reloaded for yet. Call it right before the deletion; see the definition for what it does and
+    // when it is needed.
+    void reindex_volumes_for_object_removal(int obj_idx);
     ModelInstanceEPrintVolumeState check_volumes_outside_state(ObjectFilamentResults* object_results = nullptr) const;
     bool is_all_plates_selected() { return m_sel_plate_toolbar.m_all_plates_stats_item && m_sel_plate_toolbar.m_all_plates_stats_item->selected; }
     bool is_volumes_selected_and_sinking() const;
@@ -899,6 +903,11 @@ public:
     void set_model(Model* model);
 
     void active_view();
+    // Recompute primary/isolated bounds from the volumes currently posed on this canvas,
+    // then close or replace the isolated-volume notification to match.
+    void _rebuild_assembly_bvh_from_canvas();
+    // Close the isolated-volume popup when the list is empty, otherwise replace it with the current names.
+    void refresh_isolated_volumes_notification();
     bool is_assembly_guide_node_selected() const;
     AssemblyStepsUtils *get_assembly_steps() { return m_assembly_steps.get(); }
     const AssemblyStepsUtils *get_assembly_steps() const { return m_assembly_steps.get(); }
@@ -945,6 +954,11 @@ public:
     void                                set_use_color_clip_plane(bool use) { m_volumes.set_use_color_clip_plane(use); }
     void                                set_color_clip_plane(const Vec3d &cp_normal, double offset) { m_volumes.set_color_clip_plane(cp_normal, offset); }
     void                                set_color_clip_plane_colors(const std::array<ColorRGBA, 2> &colors) { m_volumes.set_color_clip_plane_colors(colors); }
+    void                                set_use_dovetail_clip(bool use) { m_volumes.set_use_dovetail_clip(use); }
+    void                                set_dovetail_clip(const Transform3d &world_to_groove, const Vec4f &params, const Vec2f &tolerance)
+    {
+        m_volumes.set_dovetail_clip(world_to_groove, params, tolerance);
+    }
 
     // Volume color override methods (for mesh boolean gizmo)
     void set_use_volume_color_override(bool use) { m_volumes.set_use_volume_color_override(use); }
@@ -980,6 +994,7 @@ public:
     bool is_reload_delayed() const;
 
     void enable_layers_editing(bool enable);
+    void release_layers_editing_toolbar_item();
     void enable_legend_texture(bool enable);
     void enable_picking(bool enable);
     void enable_moving(bool enable);
@@ -1058,6 +1073,7 @@ public:
         // Identify volumes by index / name only: GLVolume* would dangle after reload/reset.
         int                obj_idx      = -1;
         int                instance_idx = -1;
+        int                volume_idx   = -1;
         std::string        name;
         BoundingBoxf3      world_box_assembly;
         AssemblePoseTarget target;
@@ -1068,8 +1084,12 @@ public:
     static void                            clear_isolated_volumes_cache();
     static int                             s_assemble_candidate_volumes_size;
     static bool                            s_isolated_notification_shown;
-    static bool                            s_intersects_notification_shown;
     static int                             s_assemble_ratio;
+    // Same ratio as the assemble canvas, from world AABBs. No canvas, OpenGL, or notifications.
+    // 0 when there are fewer than two parts or the expanded boxes do not intersect.
+    static int compute_assemble_ratio(const std::vector<GLVolume *> &             volumes,
+                                      const std::vector<BoundingBoxf3> &          boxes,
+                                      const std::vector<AssemblePoseTarget> &     targets);
     static int                             s_assemble_volume_ratio;
     static bool                            s_far_from_origin_notification_shown;
     static BoundingBoxf3                   s_bvh_primary_bounds;

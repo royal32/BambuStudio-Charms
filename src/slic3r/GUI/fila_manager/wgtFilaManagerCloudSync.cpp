@@ -10,10 +10,10 @@
 #include "../DeviceCore/DevManager.h"
 
 #include <wx/app.h>
-#include <boost/log/trivial.hpp>
 #include <chrono>
 #include <cmath>
 #include <set>
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r { namespace GUI {
 
@@ -1083,6 +1083,12 @@ void wgtFilaManagerCloudSync::sync_slot_mappings_to_cloud(
             << "[FilaCloudSync] sync_slot_mappings_to_cloud: unplug spool="
             << snap.spool_id << " amsSn=" << snap.ams_sn
             << " slotId=" << snap.slot_id;
+    }
+
+    if (params.mappings.empty()) {
+        BOOST_LOG_TRIVIAL(info)
+            << "[FilaCloudSync] sync_slot_mappings_to_cloud: no valid mappings, skip send";
+        return;
     }
 
     m_client->sync_slot_mappings(std::move(params),

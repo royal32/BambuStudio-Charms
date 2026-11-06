@@ -3,15 +3,49 @@
 #include "Utils.hpp"
 
 #include <boost/container/small_vector.hpp>
-#include <boost/log/trivial.hpp>
 #include <algorithm>
+#include <mutex>
 #include <queue>
+#include "libslic3r/Log.hpp"
 
 #ifndef NDEBUG
 //    #define EXPENSIVE_DEBUG_CHECKS
 #endif // NDEBUG
 
 namespace Slic3r {
+
+namespace {
+// Paint bit-stream is 4 bits per nibble. Malicious / truncated 3MF must not OOB.
+bool read_paint_nibble(const std::vector<bool> &bits, int &ibit, int &nibble)
+{
+    if (ibit < 0 || ibit > int(bits.size()) - 4) {
+        static std::once_flag once;
+        std::call_once(once, [ibit, size = bits.size()]() {
+            BOOST_LOG_TRIVIAL(warning) << "TriangleSelector paint stream truncated or out of range: ibit=" << ibit
+                                       << " bits=" << size;
+        });
+        return false;
+    }
+    nibble = 0;
+    for (int i = 0; i < 4; ++i)
+        nibble |= int(bits[size_t(ibit++)]) << i;
+    return true;
+}
+
+EnforcerBlockerType clamp_paint_state(int state_i, EnforcerBlockerType max_ebt)
+{
+    const int max_i = int(max_ebt);
+    if (state_i < 0 || state_i > max_i) {
+        static std::once_flag once;
+        std::call_once(once, [state_i, max_i]() {
+            BOOST_LOG_TRIVIAL(warning) << "TriangleSelector paint state out of range: state=" << state_i
+                                       << " max=" << max_i;
+        });
+        return EnforcerBlockerType::NONE;
+    }
+    return EnforcerBlockerType(state_i);
+}
+} // namespace
 
 // Check if the line is whole inside the sphere, or it is partially inside (intersecting) the sphere.
 // Inspired by Christer Ericson's Real-Time Collision Detection, pp. 177-179.
@@ -1746,27 +1780,32 @@ indexed_triangle_set TriangleSelector::get_facets(EnforcerBlockerType state) con
 // BBS
 void TriangleSelector::get_facets(std::vector<indexed_triangle_set>& facets_per_type) const
 {
+    const size_t num_types = size_t(EnforcerBlockerType::ExtruderMax) + 1;
     facets_per_type.clear();
+    facets_per_type.resize(num_types);
 
-    for (int type = (int)EnforcerBlockerType::NONE; type <= (int)EnforcerBlockerType::ExtruderMax; type++) {
-        facets_per_type.emplace_back();
-        indexed_triangle_set& its = facets_per_type.back();
-        std::vector<int> vertex_map(m_vertices.size(), -1);
-
-        for (const Triangle& tr : m_triangles) {
-            if (tr.valid() && !tr.is_split() && tr.get_state() == (EnforcerBlockerType)type) {
-                stl_triangle_vertex_indices indices;
-                for (int i = 0; i < 3; ++i) {
-                    int j = tr.verts_idxs[i];
-                    if (vertex_map[j] == -1) {
-                        vertex_map[j] = int(its.vertices.size());
-                        its.vertices.emplace_back(m_vertices[j].v);
-                    }
-                    indices[i] = vertex_map[j];
-                }
-                its.indices.emplace_back(indices);
+    // Single pass over the triangles; a vertex map is only allocated for states that actually occur.
+    std::vector<std::vector<int>> vertex_maps(num_types);
+    for (const Triangle& tr : m_triangles) {
+        if (!tr.valid() || tr.is_split())
+            continue;
+        const int type = int(tr.get_state());
+        if (type < 0 || type >= int(num_types))
+            continue;
+        std::vector<int>&     vertex_map = vertex_maps[type];
+        indexed_triangle_set& its        = facets_per_type[type];
+        if (vertex_map.empty())
+            vertex_map.assign(m_vertices.size(), -1);
+        stl_triangle_vertex_indices indices;
+        for (int i = 0; i < 3; ++i) {
+            int j = tr.verts_idxs[i];
+            if (vertex_map[j] == -1) {
+                vertex_map[j] = int(its.vertices.size());
+                its.vertices.emplace_back(m_vertices[j].v);
             }
+            indices[i] = vertex_map[j];
         }
+        its.indices.emplace_back(indices);
     }
 }
 
@@ -2083,7 +2122,7 @@ void TriangleSelector::deserialize(const std::pair<std::vector<std::pair<int, in
         reset(); // dump any current state
     for (auto [triangle_id, ibit] : data.first) {
         if (triangle_id >= int(m_triangles.size())) {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "array bound:error:triangle_id >= int(m_triangles.size())";
+            BOOST_LOG_TRIVIAL(info) << "array bound:error:triangle_id >= int(m_triangles.size())";
             return;
         }
     }
@@ -2107,49 +2146,53 @@ void TriangleSelector::deserialize(const std::pair<std::vector<std::pair<int, in
 
     for (auto [triangle_id, ibit] : data.first) {
         assert(triangle_id < int(m_triangles.size()));
-        assert(ibit < int(data.second.size()));
-        auto next_nibble = [&data, &ibit = ibit]() {
+        bool stream_ok = true;
+        // ibit is a structured binding: clang rejects capturing it directly before C++20, so init-capture it.
+        auto next_nibble = [&data, &ibit = ibit, &stream_ok]() {
             int n = 0;
-            for (int i = 0; i < 4; ++ i)
-                n |= data.second[ibit ++] << i;
+            if (!read_paint_nibble(data.second, ibit, n))
+                stream_ok = false;
             return n;
         };
 
         parents.clear();
-        while (true) {
+        while (stream_ok) {
             // Read next triangle info.
             int code = next_nibble();
+            if (!stream_ok)
+                break;
             int num_of_split_sides = code & 0b11;
             int num_of_children = num_of_split_sides == 0 ? 0 : num_of_split_sides + 1;
             bool is_split = num_of_children != 0;
             // Only valid if not is_split. Value of the second nibble was subtracted by 3, so it is added back.
-            auto state = EnforcerBlockerType::NONE;
+            // Decode as int first: EnforcerBlockerType is int8_t, so a huge 0b1111-run wraps negative and skips max_ebt.
+            int state_i = 0;
             if (!is_split) {
                 if ((code & 0b1100) == 0b1100){
                     int next_code = next_nibble();
                     int num       = 0;
-                    while (next_code == 0b1111) {
+                    while (stream_ok && next_code == 0b1111) {
                         num++;
                         next_code = next_nibble();
                     }
-                    state = EnforcerBlockerType(next_code + 15 * num + 3);//old:next_nibble() + 3;
+                    if (!stream_ok)
+                        break;
+                    state_i = next_code + 15 * num + 3;//old:next_nibble() + 3;
                 }
                 else {
-                    state = EnforcerBlockerType(code >> 2);
+                    state_i = code >> 2;
                 }
             }
 
             // BBS
-            if (state == to_delete_filament)
-                state = replace_filament;
-            else if (to_delete_filament != EnforcerBlockerType::NONE && state != EnforcerBlockerType::NONE) {
-                state = state > to_delete_filament ? EnforcerBlockerType((int)state - 1) : state;
+            if (state_i == int(to_delete_filament))
+                state_i = int(replace_filament);
+            else if (to_delete_filament != EnforcerBlockerType::NONE && state_i != 0) {
+                if (state_i > int(to_delete_filament))
+                    --state_i;
             }
 
-            if (state > max_ebt) {
-                assert(false);
-                state = EnforcerBlockerType::NONE;
-            }
+            const auto state = clamp_paint_state(state_i, max_ebt);
 
             // Only valid if is_split.
             int special_side = code >> 2;
@@ -2220,27 +2263,31 @@ bool TriangleSelector::has_facets(const std::pair<std::vector<std::pair<int, int
 
     for (const std::pair<int, int> &triangle_id_and_ibit : data.first) {
         int ibit = triangle_id_and_ibit.second;
-        assert(ibit < int(data.second.size()));
-        auto next_nibble = [&data, &ibit = ibit]() {
+        bool stream_ok = true;
+        auto next_nibble = [&data, &ibit, &stream_ok]() {
             int n = 0;
-            for (int i = 0; i < 4; ++ i)
-                n |= data.second[ibit ++] << i;
+            if (!read_paint_nibble(data.second, ibit, n))
+                stream_ok = false;
             return n;
         };
         // < 0 -> negative of a number of children
         // >= 0 -> state
-        auto num_children_or_state = [&next_nibble]() -> int {
+        auto num_children_or_state = [&next_nibble, &stream_ok]() -> int {
             int code               = next_nibble();
+            if (!stream_ok)
+                return 0;
             int num_of_split_sides = code & 0b11;
             if (num_of_split_sides == 0) {
                 int state = 0;
                 if ((code & 0b1100) == 0b1100) {
                     int next_code = next_nibble();
                     int num       = 0;
-                    while (next_code == 0b1111) {
+                    while (stream_ok && next_code == 0b1111) {
                         num++;
                         next_code = next_nibble();
                     }
+                    if (!stream_ok)
+                        return 0;
                     state = next_code + 15 * num + 3; // old:next_nibble() + 3;
                 } else {
                     state = code >> 2;
@@ -2252,6 +2299,8 @@ bool TriangleSelector::has_facets(const std::pair<std::vector<std::pair<int, int
         };
 
         int state = num_children_or_state();
+        if (!stream_ok)
+            continue;
         if (state < 0) {
             // Root is split.
             parents_children.clear();
@@ -2259,6 +2308,8 @@ bool TriangleSelector::has_facets(const std::pair<std::vector<std::pair<int, int
             do {
                 if (-- parents_children.back() >= 0) {
                     int state = num_children_or_state();
+                    if (!stream_ok)
+                        break;
                     if (state < 0)
                         // Child is split.
                         parents_children.emplace_back(- state);
@@ -2296,6 +2347,16 @@ void TriangleSelector::seed_fill_apply_on_triangles(EnforcerBlockerType new_stat
         }
 }
 
+void TriangleSelector::fill_unpainted(EnforcerBlockerType state)
+{
+    for (Triangle &triangle : m_triangles) {
+        if (triangle.is_split() || !triangle.valid())
+            continue;
+        if (triangle.get_state() == EnforcerBlockerType::NONE)
+            triangle.set_state(state);
+    }
+}
+
 void TriangleSelector::shift_states_above(EnforcerBlockerType threshold, int delta)
 {
     for (Triangle &triangle : m_triangles) {
@@ -2307,6 +2368,16 @@ void TriangleSelector::shift_states_above(EnforcerBlockerType threshold, int del
             if (new_val >= 0)
                 triangle.set_state(EnforcerBlockerType(new_val));
         }
+    }
+}
+
+void TriangleSelector::replace_state(EnforcerBlockerType from, EnforcerBlockerType to)
+{
+    for (Triangle &triangle : m_triangles) {
+        if (triangle.is_split() || !triangle.valid())
+            continue;
+        if (triangle.get_state() == from)
+            triangle.set_state(to);
     }
 }
 

@@ -2,6 +2,9 @@
 #define slic3r_UpgradePanel_hpp_
 
 #include <wx/panel.h>
+#include <wx/image.h>
+#include <wx/statbmp.h>
+#include <wx/timer.h>
 #include <slic3r/GUI/Widgets/Button.hpp>
 #include "Widgets/ProgressBar.hpp"
 #include <slic3r/GUI/DeviceManager.hpp>
@@ -34,6 +37,8 @@ public:
         const wxString& name = wxEmptyString);
     ~ExtensionPanel();
     void msw_rescale();
+
+    wxString get_info_text() const;
 };
 
 class AmsPanel : public wxPanel
@@ -56,6 +61,8 @@ public:
     ~AmsPanel();
 
     void msw_rescale();
+
+    wxString get_info_text() const;
 };
 
 class ExtraAmsPanel : public AmsPanel
@@ -109,6 +116,12 @@ protected:
     bool           m_last_extra_ams_show = true;
     wxBoxSizer*    m_extra_ams_sizer;
 
+    /* hotend integrated ams info */
+    wxBoxSizer*            m_hotend_ams_sizer = nullptr;
+    wxStaticBitmap*        m_hotend_ams_img = nullptr;
+    wxStaticLine*          m_hotend_ams_line_above = nullptr;
+    uiDeviceUpdateVersion* m_hotend_ams_version = nullptr;
+
     /* air_pump info*/
     wxBoxSizer*            m_air_pump_sizer = nullptr;
     wxStaticBitmap*        m_air_pump_img   = nullptr;
@@ -151,6 +164,12 @@ protected:
     wxStaticLine*          m_filatrack_line_above = nullptr;
     uiDeviceUpdateVersion* m_filatrack_version = nullptr;
 
+    /* air purifier */
+    wxBoxSizer*            m_air_purifier_sizer = nullptr;
+    wxStaticBitmap*        m_air_purifier_img = nullptr;
+    wxStaticLine*          m_air_purifier_line_above = nullptr;
+    uiDeviceUpdateVersion* m_air_purifier_version = nullptr;
+
     /* nozzle_rack*/
     wxStaticLine * m_nozzle_rack_line_above{nullptr};
     wxStaticBitmap *m_nozzle_rack_img = nullptr;
@@ -172,6 +191,13 @@ protected:
     wxStaticText *  m_staticText_release_note;
     Button *        m_button_upgrade_firmware;
     Button *        m_nozzle_rack_update_btn;
+    wxStaticBitmap *m_copy_info{nullptr};
+    wxTimer        *m_copy_feedback_timer{nullptr};
+    wxImage         m_copy_from;
+    wxImage         m_copy_to;
+    double          m_copy_scale{1.0};
+    int             m_copy_step{0};
+    bool            m_copy_hovered{false};
 
     wxPanel* create_caption_panel(wxWindow *parent);
     AmsPanelHash             m_amspanel_list;
@@ -187,21 +213,27 @@ protected:
     ScalableBitmap m_img_extinguish;
     ScalableBitmap m_img_rotary;
     ScalableBitmap m_img_filatrack;
+    ScalableBitmap m_img_air_purifier;
     ScalableBitmap upgrade_gray_icon;
     ScalableBitmap upgrade_green_icon;
     ScalableBitmap upgrade_yellow_icon;
     ScalableBitmap m_img_nozzle_rack;
     ScalableBitmap m_img_amshub;
     ScalableBitmap m_img_exhaustfan;
+    ScalableBitmap m_img_hotend_ams;
 
     int last_status = -1;
     std::string last_status_str = "";
 
     std::string m_last_laser_product_name = "";
+    std::string m_rack_imgs_printer_type = "";
 
     SecondaryCheckDialog* confirm_dlg = nullptr;
 
     void upgrade_firmware_internal();
+    void start_copy_feedback();
+    void on_copy_feedback_timer(wxTimerEvent &event);
+    void set_copy_bitmap(const std::string &name);
     void on_show_release_note(wxMouseEvent &event);
     void confirm_upgrade(MachineObject* obj = nullptr);
 
@@ -222,6 +254,10 @@ public:
     void msw_rescale();
     void update(MachineObject *obj);
     void update_version_text(MachineObject *obj);
+
+    // Model / serial / version of every card currently on screen, as one
+    // pasteable block.
+    wxString get_device_info_text() const;
     void update_ams_ext(MachineObject *obj);
     void show_status(int status, std::string upgrade_status_str = "");
     void show_ams(bool show = false, bool force_update = false);
@@ -245,33 +281,40 @@ public:
     }panel_type;
 
 private:
+    void createHotendAmsWidgets(wxBoxSizer* main_left_sizer);
     void createAirPumpWidgets(wxBoxSizer* main_left_sizer);
     void createCuttingWidgets(wxBoxSizer* main_left_sizer);
     void createLaserWidgets(wxBoxSizer* main_left_sizer);
     void createExtinguishWidgets(wxBoxSizer* main_left_sizer);
     void createFilaTrackSwitchWidgets(wxBoxSizer* main_left_sizer);
+    void createAirPurifierWidgets(wxBoxSizer* main_left_sizer);
     void createNozzleRackWidgets(wxBoxSizer* main_left_sizer);
     void createRotaryWidgets(wxBoxSizer *main_left_sizer);
     void createExhaustFan(wxBoxSizer *main_left_sizer);
     void createAmshubWidgets(wxBoxSizer *main_left_sizer);
 
+    void update_rack_imgs(MachineObject* obj);
+    void update_hotend_ams(MachineObject* obj);
     void update_air_pump(MachineObject* obj);
     void update_cut(MachineObject* obj);
     void update_laszer(MachineObject* obj);
     void update_extinguish(MachineObject* obj);
     void update_rotary(MachineObject* obj);
     void update_filatrack(MachineObject* obj);
+    void update_air_purifier(MachineObject* obj);
     void update_amshub(MachineObject *obj);
     void update_nozzle_rack(MachineObject *obj);
     void update_exhaustfan(MachineObject *obj);
     void on_nozzle_rack_update(wxCommandEvent &event);
 
+    void show_hotend_ams(bool show = true);
     void show_air_pump(bool show = true);
     void show_cut(bool show = true);
     void show_laszer(bool show = true);
     void show_rotary(bool show = true);
     void show_extinguish(bool show = true);
     void show_filatrack(bool show = true);
+    void show_air_purifier(bool show = true);
     void show_amshub(bool show = true);
     void show_nozzle_rack(bool show = true);
     void show_exhaustfan(bool show = true);

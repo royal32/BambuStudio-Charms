@@ -15,7 +15,6 @@
 #include <wx/debug.h>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include "libslic3r/Print.hpp"
@@ -23,6 +22,7 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Thread.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -48,12 +48,17 @@
 #include "Widgets/ProgressDialog.hpp"
 #include "BindDialog.hpp"
 #include "../Utils/MacDarkMode.hpp"
+#include "../Utils/MacUtils.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
+#include <mutex>
 #include <string_view>
+#include <thread>
 
 #include "GUI_App.hpp"
-#include "slic3r/GUI/PerfTrace.hpp"
+#include "libslic3r/PerfTrace.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
@@ -79,6 +84,8 @@
 #include <dwmapi.h>
 #endif // _WIN32
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
+#include "libslic3r/Log.hpp"
+#include "libslic3r/Utils.hpp"
 
 
 namespace Slic3r {
@@ -228,6 +235,8 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
 #ifdef __WXOSX__
     set_miniaturizable(GetHandle());
+    // set_miniaturizable() 把标题栏设成透明，会踩到 macOS 27.2 的 AppKit bug，必须紧跟着装上双击缩放的hook
+    install_titlebar_zoom_workaround(GetHandle());
 #endif
 
 #ifdef _WIN32
@@ -488,11 +497,11 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     // declare events
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": mainframe received close_widow event";
+        BOOST_LOG_TRIVIAL(info) << "mainframe received close_widow event";
         if (event.CanVeto() && m_plater->get_view3D_canvas3D()->get_gizmos_manager().is_in_editing_mode(true)) {
             // prevents to open the save dirty project dialog
             event.Veto();
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "cancelled by gizmo in editing";
+            BOOST_LOG_TRIVIAL(info) << "cancelled by gizmo in editing";
             return;
         }
 
@@ -501,6 +510,14 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         //    event.Veto();
         //    return;
         //}
+        // Runs before close_with_confirm() so that a save triggered from here marks
+        // the plater dirty in time for the "save project" prompt to pick it up.
+        if (event.CanVeto() && !confirm_project_page_can_leave([this] { Close(); })) {
+            event.Veto();
+            BOOST_LOG_TRIVIAL(info) << "cancelled or deferred by the project page";
+            return;
+        }
+
         auto check = [](bool yes_or_no) {
             if (yes_or_no)
                 return true;
@@ -511,7 +528,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         int result;
         if (((result = m_plater->close_with_confirm(check, event.CanVeto())) == wxID_CANCEL) && event.CanVeto()) {
             event.Veto();
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "cancelled by close_with_confirm selection";
+            BOOST_LOG_TRIVIAL(info) << "cancelled by close_with_confirm selection";
             return;
         }
         if (event.CanVeto() && !wxGetApp().check_print_host_queue()) {
@@ -618,7 +635,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
                 agent->track_event("device_ctrl", j.dump());
             }
         }
-        catch (...) {}
+        catch (...) {
+            BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+        }
 
         MarkdownTip::ExitTip();
 
@@ -628,7 +647,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         wxGetApp().remove_mall_system_dialog();
         event.Skip();
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": mainframe finished process close_widow event";
+        BOOST_LOG_TRIVIAL(info) << "mainframe finished process close_widow event";
     });
 
     //FIXME it seems this method is not called on application start-up, at least not on Windows. Why?
@@ -712,6 +731,10 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             if (wxGetApp().check_slice_version_policy() && m_slice_enable) {
                 wxGetApp().plater()->update(true, true);
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+                if (m_tabpanel && m_tabpanel->GetSelection() != (int) tpPreview) {
+                    m_tabpanel->ChangeSelection(tpPreview);
+                    m_last_selected_tab = tpPreview;
+                }
             }
             return;
         }
@@ -774,6 +797,27 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             else
                 evt.Skip();
             return;
+        }
+
+        // The single-letter scene shortcuts (gizmos, arrange, auto-orient, labels) are dispatched from
+        // GLCanvas3D::on_char and GLGizmosManager::on_char, which both listen to wxEVT_CHAR. A CJK input
+        // method in native mode claims plain character keys, so the WM_CHAR those events are built from
+        // never arrives and none of the shortcuts fire. wxEVT_CHAR_HOOK still carries the raw key, so
+        // rebuild the wxEVT_CHAR from it and hand it to the focused canvas. Consuming the hook event also
+        // keeps TranslateMessage from running, hence no duplicate when no input method is in the way -- but
+        // it suppresses wxEVT_KEY_DOWN as well, so the preview stays out of this: its one-layer mode reads
+        // a plain L from Preview::update_layers_slider_from_canvas, which listens to wxEVT_KEY_DOWN.
+        if (key_code >= 'A' && key_code <= 'Z' && !evt.CmdDown() && m_plater != nullptr &&
+            !m_plater->is_preview_shown() && !wxGetApp().imgui()->want_text_input()) {
+            GLCanvas3D *canvas = m_plater->get_current_canvas3D();
+            auto *target = canvas != nullptr ? (wxWindow *) canvas->get_wxglcanvas() : nullptr;
+            if (target != nullptr && target == wxWindow::FindFocus()) {
+                wxKeyEvent e(evt);
+                e.SetEventType(wxEVT_CHAR);
+                e.SetEventObject(target);
+                wxPostEvent(target, e);
+                return;
+            }
         }
 
         // Pass 3D view preset shortcuts directly to the current canvas. (Only 0-7 currently used but reserve 8 & 9 anyway.)
@@ -1109,7 +1153,7 @@ void MainFrame::update_layout()
 // Called when closing the application and when switching the application language.
 void MainFrame::shutdown()
 {
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
+    BOOST_LOG_TRIVIAL(info) << "enter";
 
     // The rich parameter tooltip is a wxPopupTransientWindow parented to this frame. Both teardown
     // paths funnel through here (app close, and the language-switch GUI rebuild via recreate_GUI),
@@ -1118,8 +1162,17 @@ void MainFrame::shutdown()
     // language after a switch.
     ParamTooltip::Shutdown();
 
-    // BBS: backup
-    Slic3r::set_backup_callback(nullptr);
+#ifdef __APPLE__
+    if (m_sync_dialog_pending_activate) {
+        wxGetApp().Unbind(wxEVT_ACTIVATE_APP, &MainFrame::on_activate_app_show_sync_dialog, this);
+        m_sync_dialog_pending_activate = false;
+    }
+#endif // __APPLE__
+
+    // BBS: backup -- quiesce the worker before this frame is destroyed. Stops the periodic
+    // timer, drops the UI callback and any queued Backup UI posts so the backup thread cannot
+    // invoke a callback (wxPostEvent / export_3mf) against this MainFrame after it goes away.
+    Slic3r::stop_backup();
 #ifdef _WIN32
 	if (m_hDeviceNotify) {
 		::UnregisterDeviceNotification(HDEVNOTIFY(m_hDeviceNotify));
@@ -1186,7 +1239,7 @@ void MainFrame::shutdown()
     // BBS: why clear ?
     //wxGetApp().plater_ = nullptr;
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown exit";
+    BOOST_LOG_TRIVIAL(info) << "exit";
 }
 
 void MainFrame::update_filament_tab_ui()
@@ -1350,18 +1403,9 @@ void MainFrame::init_tabpanel()
             new_sel != old_sel &&
             m_project != nullptr &&
             m_tabpanel->GetPage((size_t)old_sel) == m_project &&
-            m_project->is_editing_page()) {
-            MessageDialog dlg(this,
-                              _L("The current page has unsaved changes. You can continue editing or choose to save/discard before leaving."),
-                              _L("Save"),
-                              wxYES_NO | wxCANCEL |wxCENTRE);
-            int ret = dlg.ShowModal();
-            if (ret == wxID_YES) {
-                m_project->save_project();
-            } else {
-                e.Veto();
-                return;
-            }
+            !confirm_project_page_can_leave([this, new_sel] { m_tabpanel->SetSelection(new_sel); })) {
+            e.Veto();
+            return;
         }
         if (wxGetApp().preset_bundle &&
             wxGetApp().preset_bundle->printers.get_edited_preset().is_bbl_vendor_preset(wxGetApp().preset_bundle) &&
@@ -1443,6 +1487,7 @@ void MainFrame::init_tabpanel()
             NetworkAgent* agent = GUI::wxGetApp().getAgent();
             if (agent)
                 agent->track_update_property("select_device_page", std::to_string(++select_device_page_count));
+            m_monitor->on_activate();
         }
         else if (panel == m_web_device) {
 #if defined(__WXOSX__)
@@ -1729,6 +1774,59 @@ bool MainFrame::is_active_and_shown_tab(wxPanel* panel)
     if (m_tabpanel->GetCurrentPage() != panel)
         return false;
     return true;
+}
+
+bool MainFrame::confirm_project_page_can_leave(std::function<void()> retry)
+{
+    if (m_project == nullptr || !m_project->is_editing_page())
+        return true;
+
+    const bool dirty_known = m_project_leave_checked;
+    m_project_leave_checked = false;
+    bool page_dirty = m_project_leave_dirty;
+
+    if (!dirty_known) {
+        // Whether anything actually changed is only known inside the page, and the
+        // answer arrives as a separate message, so hold the action back and replay
+        // it from the callback.
+        const long long now = wxGetUTCTimeMillis().GetValue();
+        if (m_project_leave_query_ms == 0 || now - m_project_leave_query_ms < 1500) {
+            m_project_leave_query_ms = now;
+            m_project->query_unsaved_changes([this, retry](bool dirty) {
+                m_project_leave_checked  = true;
+                m_project_leave_dirty    = dirty;
+                m_project_leave_query_ms = 0;
+                CallAfter(retry);
+            });
+            return false;
+        }
+        // The page never answered. Prompt rather than risk discarding edits.
+        m_project_leave_query_ms = 0;
+        page_dirty = true;
+    }
+
+    if (!page_dirty)
+        return true;
+
+    MessageDialog dlg(this,
+                      _L("The current page has unsaved changes. You can continue editing or choose to save/discard before leaving."),
+                      _L("Save"),
+                      wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxCENTRE);
+    dlg.SetButtonLabel(wxID_YES, _L("Save"));
+    dlg.SetButtonLabel(wxID_NO, _L("Discard"));
+    dlg.SetButtonLabel(wxID_CANCEL, _L("Stay on this page"));
+    const int ret = dlg.ShowModal();
+    if (ret == wxID_YES) {
+        m_project->save_project([this, retry] {
+            m_project_leave_checked  = true;
+            m_project_leave_dirty    = false;
+            CallAfter(retry);
+        });
+        return false;
+    }
+
+    // wxID_NO drops the edits and lets the action through; cancel stays on the page.
+    return ret == wxID_NO;
 }
 
 bool MainFrame::can_start_new_project() const
@@ -2190,7 +2288,8 @@ wxBoxSizer* MainFrame::create_side_tools()
             //this->m_plater->select_view_3D("Preview");
             if (m_print_select == ePrintAll || m_print_select == ePrintPlate || m_print_select == ePrintMultiMachine)
             {
-                m_plater->apply_background_progress();
+                if (!m_plater->only_gcode_mode())
+                    m_plater->apply_background_progress();
                 // check valid of print
                 m_print_enable = get_enable_print_status();
                 m_print_btn->Enable(m_print_enable);
@@ -2274,10 +2373,13 @@ wxBoxSizer* MainFrame::create_side_tools()
         CallAfter([this] {
             wxMenu menu;
             std::map<int, std::pair<int, wxString>> choices;
-            auto choice = [&](const wxString& label, int action, const wxString& button_label = wxString()) {
+            auto labeled_choice = [&](const wxString& label, int action, const wxString& button_label) {
                 auto* item = menu.AppendCheckItem(wxID_ANY, label);
                 item->Check(m_print_select == action);
                 choices.emplace(item->GetId(), std::make_pair(action, button_label.empty() ? label : button_label));
+            };
+            auto choice = [&](const wxString& label, int action) {
+                labeled_choice(label, action, label);
             };
             const bool third_party = wxGetApp().preset_bundle &&
                 !wxGetApp().preset_bundle->printers.get_edited_preset().is_bbl_vendor_preset(wxGetApp().preset_bundle);
@@ -2292,7 +2394,7 @@ wxBoxSizer* MainFrame::create_side_tools()
                 choice(_L("Export plate sliced file"), eExportSlicedFile);
                 choice(_L("Export all sliced file"), eExportAllSlicedFile);
                 if (check_bbl_farm_client_installed())
-                    choice(_L("Send to Bambu Farm Manager Client"), eSendMultiApp, _L("Send to BFMC"));
+                    labeled_choice(_L("Send to Bambu Farm Manager Client"), eSendMultiApp, _L("Send to BFMC"));
 #ifdef __APPLE__
                 choice(_L("Print in Connect"), ePrintMultiMachine);
 #else
@@ -2339,11 +2441,11 @@ bool MainFrame::get_enable_slice_status()
 
     bool on_slicing = m_plater->is_background_process_slicing();
     if (on_slicing) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": on slicing, return false directly!");
+        BOOST_LOG_TRIVIAL(info) << boost::format("on slicing, return false directly!");
         return false;
     }
     else if  (m_plater->only_gcode_mode() || m_plater->using_exported_file()) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": in gcode/exported 3mf mode, return false directly!");
+        BOOST_LOG_TRIVIAL(info) << boost::format("in gcode/exported 3mf mode, return false directly!");
         return false;
     }
 
@@ -2373,12 +2475,18 @@ bool MainFrame::get_enable_slice_status()
         {
             enable = false;
         }
+        // Not applied to eSliceAll: that run walks the plates in order and stops once it reaches a
+        // plate it cannot slice, so the plates before the offending one still get sliced.
+        else if (m_plater->sidebar().has_incompatible_filament(current_plate))
+        {
+            enable = false;
+        }
     }
 
     if (enable && m_plater->sidebar().has_broken_mixed_filament())
         enable = false;
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": m_slice_select %1%, enable= %2% ")%m_slice_select %enable;
+    BOOST_LOG_TRIVIAL(info) << boost::format("m_slice_select %1%, enable= %2% ")%m_slice_select %enable;
     return enable;
 }
 
@@ -2391,6 +2499,8 @@ bool MainFrame::get_enable_print_status()
     bool is_all_plates = wxGetApp().plater()->get_preview_canvas3D()->is_all_plates_selected();
     if (m_print_select == ePrintAll)
     {
+        if (m_plater->only_gcode_mode())
+            return true;
         if (!part_plate_list.is_all_slice_results_ready_for_print())
         {
             enable = false;
@@ -2398,6 +2508,8 @@ bool MainFrame::get_enable_print_status()
     }
     else if (m_print_select == ePrintPlate)
     {
+        if (m_plater->only_gcode_mode())
+            return true;
         if (!current_plate->is_slice_result_ready_for_print())
         {
             enable = false;
@@ -2480,7 +2592,7 @@ bool MainFrame::get_enable_print_status()
         enable = enable && !is_all_plates;
     }
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": m_print_select %1%, enable= %2% ")%m_print_select %enable;
+    BOOST_LOG_TRIVIAL(info) << boost::format("m_print_select %1%, enable= %2% ")%m_print_select %enable;
 
     return enable;
 }
@@ -2546,7 +2658,7 @@ void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_sl
 
     bool old_slice_status = m_slice_btn->IsEnabled();
 
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" m_slice_select %1%: can_slice= %2%, can_print %3%, enable_slice %4%, enable_print %5% ")%m_slice_select % can_slice %can_print %enable_slice %enable_print;
+    BOOST_LOG_TRIVIAL(info) << boost::format("m_slice_select %1%: can_slice= %2%, can_print %3%, enable_slice %4%, enable_print %5% ")%m_slice_select % can_slice %can_print %enable_slice %enable_print;
     m_print_btn->Enable(enable_print);
     m_slice_btn->Enable(enable_slice);
     m_slice_enable = enable_slice;
@@ -2728,6 +2840,9 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, _L("Show Configuration Folder"), _L("Show Configuration Folder"),
         [](wxCommandEvent&) { Slic3r::GUI::desktop_open_datadir_folder(); });
 
+    append_menu_item(helpMenu, wxID_ANY, _L("Show Log Folder"), _L("Show Log Folder"),
+        [](wxCommandEvent&) { Slic3r::GUI::desktop_open_log_folder(); });
+
     append_menu_item(helpMenu, wxID_ANY, _L("Show Tip of the Day"), _L("Show Tip of the Day"), [](wxCommandEvent&) {
         wxGetApp().plater()->get_dailytips()->open();
         wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
@@ -2892,7 +3007,7 @@ void MainFrame::init_menubar_as_editor()
         {
             m_recent_projects.AddFileToHistory(from_u8(project));
         }
-        m_recent_projects.LoadThumbnails();
+        m_recent_projects.LoadThumbnailsAsync();
 
         Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& evt) { evt.Enable(can_open_project() && (m_recent_projects.GetCount() > 0)); }, recent_projects_submenu->GetId());
 
@@ -3290,12 +3405,31 @@ void MainFrame::init_menubar_as_editor()
             [this]() { return (m_tabpanel->GetSelection() == TabPosition::tp3DEditor || m_tabpanel->GetSelection() == TabPosition::tpPreview) && m_plater->is_sidebar_enabled(); },
             this);
         viewMenu->AppendSeparator();
-        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Labels by Layer") + "\t" + ctrl + "E", _L("Show Labels of printing by layer in 3D scene"),
-            [this](wxCommandEvent&) { m_plater->show_view3D_layer_labels(!m_plater->are_view3D_layer_labels_shown()); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,
-            [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->are_view3D_layer_labels_shown(); }, this);
-        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Labels by Object") + "\t" + ctrl + "Shift+" + "E", _L("Show Labels of printing by object in 3D scene"),
-            [this](wxCommandEvent&) { m_plater->show_view3D_object_labels(!m_plater->are_view3D_object_labels_shown()); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,
-            [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->are_view3D_object_labels_shown(); }, this);
+        auto curr_plate_is_by_object = [this]() {
+            PartPlate *plate = m_plater->get_partplate_list().get_curr_plate();
+            return plate && plate->get_real_print_seq() == PrintSequence::ByObject;
+        };
+        wxMenuItem *labels_item = append_menu_check_item(viewMenu, wxID_ANY, _L("Show Labels by Layer") + "\t" + ctrl + "E", _L("Show Labels of printing by layer in 3D scene"),
+            [this, curr_plate_is_by_object](wxCommandEvent &) {
+                if (curr_plate_is_by_object())
+                    m_plater->show_view3D_object_labels(!m_plater->are_view3D_object_labels_shown());
+                else
+                    m_plater->show_view3D_layer_labels(!m_plater->are_view3D_layer_labels_shown());
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown(); },
+            [this, curr_plate_is_by_object]() {
+                return curr_plate_is_by_object() ? m_plater->are_view3D_object_labels_shown() : m_plater->are_view3D_layer_labels_shown();
+            },
+            this);
+        this->Bind(wxEVT_UPDATE_UI, [this, labels_item, curr_plate_is_by_object](wxUpdateUIEvent &evt) {
+            if (curr_plate_is_by_object())
+                labels_item->SetItemLabel(_L("Show Labels by Object") + "\t" + "Shift+" + "E");
+            else
+                labels_item->SetItemLabel(_L("Show Labels by Layer") + "\t" + ctrl + "E");
+            evt.Enable(m_plater->is_view3D_shown());
+            evt.Check(curr_plate_is_by_object() ? m_plater->are_view3D_object_labels_shown() : m_plater->are_view3D_layer_labels_shown());
+        }, labels_item->GetId());
 
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Overhang") + "\t" + ctrl + "L", _L("Show object overhang highlight in 3D scene"),
             [this](wxCommandEvent &) {
@@ -3348,9 +3482,13 @@ void MainFrame::init_menubar_as_editor()
     wxMenu* parent_menu = m_menubar->OSXGetAppleMenu();
     //auto preference_item = new wxMenuItem(parent_menu, BambuStudioMenuPreferences + bambu_studio_id_base, _L("Preferences") + "\tCtrl+,", "");
 
+        // The apple menu is built by wxWidgets (wxMenuBar::CreateAppleMenu), 
+        // so each msgid here must match wx's own literal string. wx looks up 
+        // "Hide %s" and formats the app name into it at runtime, so the rendered 
+        // "Hide BambuStudio" would never be looked up.
         std::string app_items[] = {
             L("Services"),
-            L("Hide BambuStudio"),
+            L("Hide %s"),
             L("Hide Others"),
             L("Show All"),
             L("Quit BambuStudio")
@@ -3591,7 +3729,9 @@ void MainFrame::init_menubar_as_editor()
                     js["cali_type"] = "third_cali_tutorial";
                     NetworkAgent *agent   = GUI::wxGetApp().getAgent();
                     if (agent) agent->track_event("third_cali", js.dump());
-                } catch (...) {}
+                } catch (...) {
+                    BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+                }
                 wxLaunchDefaultBrowser("https://wiki.bambulab.com/en/bambu-studio/Calibration", wxBROWSER_NEW_WINDOW);
             }, "", nullptr,
             [this]() {return m_plater->is_view3D_shown();; }, this);
@@ -3721,7 +3861,9 @@ void MainFrame::init_menubar_as_editor()
                 js["cali_type"] = "third_cali_tutorial";
                 NetworkAgent *agent = GUI::wxGetApp().getAgent();
                 if (agent) agent->track_event("third_cali", js.dump());
-            } catch (...) {}
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(warning) << current_exception_message();
+            }
             wxLaunchDefaultBrowser("https://wiki.bambulab.com/en/bambu-studio/Calibration", wxBROWSER_NEW_WINDOW);
         }, "", nullptr,
         [this]() {
@@ -3971,11 +4113,11 @@ void MainFrame::load_config_file()
     if (!cfiles.empty()) {
         wxGetApp().app_config->update_config_dir(get_dir_name(cfiles.back()));
         wxGetApp().load_current_presets();
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " presets has been import,and size is" << cfiles.size();
+        BOOST_LOG_TRIVIAL(info) << "presets has been import,and size is" << cfiles.size();
         NetworkAgent* agent = wxGetApp().getAgent();
         if (agent) {
 #if !BBL_RELEASE_TO_PUBLIC
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " user is: " << agent->get_user_id();
+            BOOST_LOG_TRIVIAL(info) << "user is: " << agent->get_user_id();
 #endif
         }
     }
@@ -4129,10 +4271,10 @@ void MainFrame::select_tab(wxPanel* panel)
 //BBS
 void MainFrame::jump_to_monitor(std::string dev_id)
 {
-    m_tabpanel->SetSelection(tpMonitor);
     if (!dev_id.empty()) {
         ((MonitorPanel*)m_monitor)->select_machine(dev_id);
     }
+    m_tabpanel->SetSelection(tpMonitor);
 }
 
 void MainFrame::jump_to_multipage()
@@ -4297,6 +4439,14 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
 {
+    // Never record a path that would break out of its attribute when the home page renders the
+    // recent-file list. Plater::load_project() rejects these too; this keeps any other caller safe.
+    // The whole path is checked, not just the file name: the home page renders the full path.
+    if (Plater::has_html_unsafe_path_characters(filename)) {
+        BOOST_LOG_TRIVIAL(warning) << "skipped project with unsafe characters in its path";
+        return;
+    }
+
     if (wxFileExists(filename))
     {
         m_recent_projects.AddFileToHistory(filename);
@@ -4326,10 +4476,15 @@ void MainFrame::FileHistory::AddFileToHistory(const wxString &file)
     if (this->m_fileMaxFiles == 0)
         return;
     wxFileHistory::AddFileToHistory(file);
-    if (m_load_called)
-        m_thumbnails.push_front(bbs_3mf_get_thumbnail(into_u8(file).c_str()));
-    else
+    if (m_load_called) {
+        // The async scan has already run, so this entry has to be read here on the main thread.
+        std::string thumbnail = bbs_3mf_get_thumbnail(into_u8(file).c_str());
+        if (thumbnail.empty())
+            BOOST_LOG_TRIVIAL(warning) << "no thumbnail in recent project " << PathSanitizer::sanitize(into_u8(file));
+        m_thumbnails.push_front(std::move(thumbnail));
+    } else {
         m_thumbnails.push_front("");
+    }
 }
 
 void MainFrame::FileHistory::RemoveFileFromHistory(size_t i)
@@ -4345,17 +4500,107 @@ size_t MainFrame::FileHistory::FindFileInHistory(const wxString & file)
     return m_fileHistory.Index(file);
 }
 
-void MainFrame::FileHistory::LoadThumbnails()
+void MainFrame::FileHistory::LoadThumbnailsAsync()
 {
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, GetCount()), [this](tbb::blocked_range<size_t> range) {
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-            auto thumbnail = bbs_3mf_get_thumbnail(into_u8(GetHistoryFile(i)).c_str());
-            if (!thumbnail.empty()) {
-                m_thumbnails[i] = thumbnail;
-            }
-        }
-    });
+    // Snapshot on the main thread. GetCount() / GetHistoryFile() read wxFileHistory's own array,
+    // which AddFileToHistory / RemoveFileFromHistory may reshape at any time, so a worker holding
+    // indices into it would read out of bounds.
+    std::vector<wxString> files;
+    files.reserve(GetCount());
+    for (size_t i = 0; i < GetCount(); ++i)
+        files.push_back(GetHistoryFile(i));
+
+    // Set this up front: entries added while the scan is still running then take the synchronous
+    // path in AddFileToHistory, instead of getting an empty thumbnail that nothing ever fills in.
     m_load_called = true;
+
+    if (files.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "no recent project to load thumbnails for";
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << KV(log_key::file_count, files.size()) << "load recent project thumbnails start";
+
+    auto state = m_state;
+    std::thread([this, state, files = std::move(files)]() mutable {
+        set_current_thread_name("recent_thumb");
+
+        // Nothing may escape into a detached thread: an exception reaching this frame would be an
+        // immediate std::terminate with no context. bbs_3mf_get_thumbnail() swallows its own
+        // parse and allocation failures, but the conversions and allocations around it do not.
+        try {
+            // Touches nothing but its own stack, so there is no race against the main thread
+            // reading m_thumbnails through GetThumbnailUrl() while this runs.
+            auto                     start = std::chrono::steady_clock::now();
+            std::vector<std::string> data(files.size());
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, files.size()), [&files, &data, &state](const tbb::blocked_range<size_t> &range) {
+                for (size_t i = range.begin(); i < range.end(); ++i) {
+                    // A single file can block for a long time when it lives in iCloud Drive and
+                    // its contents have been evicted, so stop fetching the rest once the frame
+                    // is on its way out.
+                    if (state->cancelled) return;
+                    std::string path = into_u8(files[i]);
+                    data[i]          = bbs_3mf_get_thumbnail(path.c_str());
+                    // bbs_3mf_get_thumbnail() logs why the parse failed, but not which file it was
+                    // reading: it runs on several worker threads at once, so the two cannot be
+                    // matched up by thread id afterwards. Name the file here instead.
+                    if (data[i].empty())
+                        BOOST_LOG_TRIVIAL(warning) << "no thumbnail in recent project " << PathSanitizer::sanitize(path);
+                }
+            });
+
+            auto   ms     = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            size_t loaded = std::count_if(data.begin(), data.end(), [](const std::string &one) { return !one.empty(); });
+            if (state->cancelled)
+                BOOST_LOG_TRIVIAL(info) << KV(log_key::file_count, files.size()) << KV(log_key::thumbnail_count, loaded)
+                                        << "load recent project thumbnails cancelled after " << ms << " ms";
+            else
+                BOOST_LOG_TRIVIAL(info) << KV(log_key::file_count, files.size()) << KV(log_key::thumbnail_count, loaded)
+                                        << "load recent project thumbnails finished in " << ms << " ms";
+
+            // wxGetApp() dereferences wxApp::GetInstance(), which wxEntryCleanup() clears on the
+            // way out, so the check and the post have to be atomic with respect to cancel(). The
+            // lock is held only for the CallAfter, which just queues an event. ~FileHistory runs
+            // from DeleteAllTLWs(), before the instance is cleared, so cancelled covers that on
+            // its own; the second test only guards a teardown that skips the frame destructor.
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (state->cancelled || wxTheApp == nullptr) return;
+            wxGetApp().CallAfter([this, state, files = std::move(files), data = std::move(data)]() {
+                // Main thread, same thread that cancels, so a plain check is enough here.
+                if (state->cancelled) return;
+                ApplyThumbnails(files, data);
+                if (wxGetApp().mainframe && wxGetApp().mainframe->m_webview) wxGetApp().mainframe->m_webview->SendRecentList(-1);
+            });
+        } catch (const std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "LoadThumbnailsAsync failed: " << ex.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "LoadThumbnailsAsync failed";
+        }
+    }).detach();
+}
+
+void MainFrame::FileHistory::ApplyThumbnails(const std::vector<wxString> &files, const std::vector<std::string> &data)
+{
+    // Main thread. The history may have been added to or trimmed while the scan ran, which shifts
+    // every index, so look each file up again by path. FindFileInHistory returns (size_t)wxNOT_FOUND
+    // when the entry is gone, which the size check below rejects along with any stale index.
+    size_t applied = 0;
+    size_t dropped = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (data[i].empty())
+            continue;
+        size_t idx = FindFileInHistory(files[i]);
+        if (idx < m_thumbnails.size()) {
+            m_thumbnails[idx] = data[i];
+            ++applied;
+        } else {
+            ++dropped;
+        }
+    }
+    BOOST_LOG_TRIVIAL(info) << KV(log_key::thumbnail_count, applied) << "applied recent project thumbnails";
+    if (dropped > 0)
+        BOOST_LOG_TRIVIAL(warning) << KV(log_key::thumbnail_count, dropped)
+                                   << "dropped recent project thumbnails, the entries were removed while scanning";
 }
 
 inline void MainFrame::FileHistory::SetMaxFiles(int max)
@@ -4368,10 +4613,19 @@ inline void MainFrame::FileHistory::SetMaxFiles(int max)
 
 void MainFrame::get_recent_projects(boost::property_tree::wptree &tree, int images)
 {
+    size_t sent       = 0;
+    size_t with_image = 0;
+    size_t missing    = 0;
     for (size_t i = 0; i < m_recent_projects.GetCount(); ++i) {
         boost::property_tree::wptree item;
         std::wstring proj = m_recent_projects.GetHistoryFile(i).ToStdWstring();
-        item.put(L"project_name", proj.substr(proj.find_last_of(L"/\\") + 1));
+        std::wstring project_name = proj.substr(proj.find_last_of(L"/\\") + 1);
+        // Entries persisted by an older build may still carry a path that breaks out of the
+        // attribute it is rendered into, so filter on the way out as well as on the way in.
+        // Both fields below reach the page, so the full path has to be clean, not just the name.
+        if (Plater::has_html_unsafe_path_characters(wxString(proj)))
+            continue;
+        item.put(L"project_name", project_name);
         item.put(L"path", proj);
         boost::system::error_code ec;
         std::time_t t = boost::filesystem::last_write_time(proj, ec);
@@ -4379,7 +4633,7 @@ void MainFrame::get_recent_projects(boost::property_tree::wptree &tree, int imag
             std::tm* local_tm = std::localtime(&t);
             if (local_tm != nullptr)
             {
-                bool use_12h_format = wxGetApp().app_config->get("use_12h_time_format") == "true";
+                bool use_12h_format = wxGetApp().app_config->get_bool("use_12h_time_format");
 
                 // Format date and time: YYYY-MM-DD HH:MM[:SS][AM/PM]
                 std::wstringstream time_stream;
@@ -4397,13 +4651,24 @@ void MainFrame::get_recent_projects(boost::property_tree::wptree &tree, int imag
             }
             if (i <= images) {
                 auto thumbnail = m_recent_projects.GetThumbnailUrl(i);
-                if (!thumbnail.empty()) item.put(L"image", thumbnail);
+                if (!thumbnail.empty()) {
+                    item.put(L"image", thumbnail);
+                    ++with_image;
+                }
             }
         } else {
             item.put(L"time", _L("File is missing"));
+            ++missing;
         }
         tree.push_back({L"", item});
+        ++sent;
     }
+
+    // The home page renders whatever this builds, so this line says what it had to work with.
+    // images is the index up to which thumbnails are attached: -1 wraps around to SIZE_MAX in the
+    // comparison above, which is how callers ask for every one of them.
+    BOOST_LOG_TRIVIAL(info) << KV(log_key::file_count, sent) << KV(log_key::thumbnail_count, with_image)
+                            << "send recent project list, images up to " << images << ", missing files " << missing;
 }
 
 void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
@@ -4461,7 +4726,7 @@ void MainFrame::remove_recent_project(size_t file_id, wxString const &filename)
 
 void MainFrame::load_url(wxString url)
 {
-    BOOST_LOG_TRIVIAL(trace) << "load_url";
+    BOOST_LOG_TRIVIAL(trace);
     auto evt = new wxCommandEvent(EVT_LOAD_URL, this->GetId());
     evt->SetString(url);
     wxQueueEvent(this, evt);
@@ -4469,7 +4734,7 @@ void MainFrame::load_url(wxString url)
 
 void MainFrame::load_printer_url(wxString url)
 {
-    BOOST_LOG_TRIVIAL(trace) << "load_printer_url";
+    BOOST_LOG_TRIVIAL(trace);
     auto evt = new wxCommandEvent(EVT_LOAD_PRINTER_URL, this->GetId());
     evt->SetString(url);
     wxQueueEvent(this, evt);
@@ -4543,6 +4808,20 @@ void MainFrame::show_sync_dialog()
     wxQueueEvent(this, evt);
 }
 
+#ifdef __APPLE__
+void MainFrame::on_activate_app_show_sync_dialog(wxActivateEvent& evt)
+{
+    evt.Skip();
+    if (!evt.GetActive())
+        return;
+    if (!m_sync_dialog_pending_activate)
+        return;
+    m_sync_dialog_pending_activate = false;
+    wxGetApp().Unbind(wxEVT_ACTIVATE_APP, &MainFrame::on_activate_app_show_sync_dialog, this);
+    show_sync_dialog();
+}
+#endif // __APPLE__
+
 bool MainFrame::check_bbl_farm_client_installed()
 {
 #ifdef WIN32
@@ -4551,11 +4830,11 @@ bool MainFrame::check_bbl_farm_client_installed()
     LONG result_backup = RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("HKEY_CLASSES_ROOT\\bambu-farm-client\\shell\\open\\command"), 0, KEY_READ, &hKey);
 
     if (result == ERROR_SUCCESS || result_backup == ERROR_SUCCESS) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "Bambu Farm Manager Client found.";
+        BOOST_LOG_TRIVIAL(info) << "Bambu Farm Manager Client found.";
         RegCloseKey(hKey);
         return true;
     } else {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "Bambu Farm Manager Client Not found.";
+        BOOST_LOG_TRIVIAL(info) << "Bambu Farm Manager Client Not found.";
         return false;
     }
 
@@ -4582,6 +4861,23 @@ void MainFrame::update_side_preset_ui()
 
 void MainFrame::on_select_default_preset(SimpleEvent& evt)
 {
+#ifdef __APPLE__
+    if (!wxGetApp().IsActive()) {
+        if (!m_sync_dialog_pending_activate) {
+            m_sync_dialog_pending_activate = true;
+            wxGetApp().Bind(wxEVT_ACTIVATE_APP, &MainFrame::on_activate_app_show_sync_dialog, this);
+        }
+        return;
+    }
+#endif // __APPLE__
+
+    // When the user has been logged out (e.g. a minor account not linked to a guardian was force
+    // logged out right after login), don't prompt to sync cloud presets.
+    if (!wxGetApp().is_user_login()) {
+        BOOST_LOG_TRIVIAL(info) << "on_select_default_preset: skip cloud-sync prompt, user not logged in";
+        return;
+    }
+
     MessageDialog dialog(this,
                     _L("Do you want to synchronize your personal data from Bambu Cloud? \n"
                         "It contains the following information:\n"
@@ -4600,13 +4896,13 @@ void MainFrame::on_select_default_preset(SimpleEvent& evt)
         case wxID_YES: {
             wxGetApp().app_config->set_bool("sync_user_preset", true);
             wxGetApp().start_sync_user_preset(true);
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: true";
+            BOOST_LOG_TRIVIAL(info) << "sync_user_preset: true";
             break;
         }
         case wxID_NO:
             wxGetApp().app_config->set_bool("sync_user_preset", false);
             wxGetApp().stop_sync_user_preset();
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: false";
+            BOOST_LOG_TRIVIAL(info) << "sync_user_preset: false";
             break;
         default:
             break;

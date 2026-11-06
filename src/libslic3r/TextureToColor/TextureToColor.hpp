@@ -3,13 +3,15 @@
 #include "Callbacks.hpp"
 #include "TriMesh.hpp"
 #include "opencv2/core.hpp"
+#include <array>
+#include <chrono>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace Slic3r { namespace tex2color {
 
 enum class MeshRepairDecision {
-    Ask,
     ImportWithoutRepair,
     RepairAndImport
 };
@@ -19,6 +21,51 @@ using MeshRepairCallback = std::function<bool(const indexed_triangle_set& mesh,
                                               std::function<void(const char* message, unsigned progress)> progress_callback,
                                               std::function<bool()> cancel_callback,
                                               std::string* error_message)>;
+
+enum class MeshRepairAttempt {
+    NotAttempted,  // never tried, or the last attempt was cancelled
+    Succeeded,
+    Failed         // tried and failed (including timeout); do not retry Win10 repair
+};
+
+// Session cache for one mesh. Callers must use a given pointer serially and
+// must not share it across unrelated meshes.
+struct MeshRepairCache {
+    MeshRepairAttempt win10_attempt = MeshRepairAttempt::NotAttempted;
+    bool has_prepared_mesh = false;
+    TriMesh mesh;  // oversampled + repaired geometry
+    std::vector<std::array<std::size_t, 3>> face_colors;  // pre-cluster face colors
+
+    std::size_t key_input_face_count = 0;
+    std::size_t key_oversampling_iters = 0;
+    std::size_t key_oversampling_min_face_count = 0;
+    std::size_t key_oversampling_max_face_count = 0;
+
+    bool matches_input(std::size_t face_count,
+                       std::size_t oversampling_iters,
+                       std::size_t oversampling_min_face_count,
+                       std::size_t oversampling_max_face_count) const
+    {
+        return has_prepared_mesh &&
+               key_input_face_count == face_count &&
+               key_oversampling_iters == oversampling_iters &&
+               key_oversampling_min_face_count == oversampling_min_face_count &&
+               key_oversampling_max_face_count == oversampling_max_face_count;
+    }
+
+    // Drops prepared geometry. win10_attempt is kept so a Failed Win10
+    // attempt is not retried for the rest of the session.
+    void invalidate_prepared_mesh()
+    {
+        has_prepared_mesh = false;
+        mesh = {};
+        face_colors.clear();
+        key_input_face_count = 0;
+        key_oversampling_iters = 0;
+        key_oversampling_min_face_count = 0;
+        key_oversampling_max_face_count = 0;
+    }
+};
 
 struct TextureToColorSettings {
     std::size_t target_colors_num = 4;  // 目标颜色数量, 为0时, 自适应计算; 否则计算指定数目的颜色聚类
@@ -35,10 +82,18 @@ struct TextureToColorSettings {
 
     MeshRepairDecision mesh_repair_decision = MeshRepairDecision::ImportWithoutRepair;
 
-    // Set by TextureToColor when Ask is selected and mesh repair needs user confirmation.
-    bool* mesh_repair_decision_required = nullptr;
-
     MeshRepairCallback mesh_repair_callback;
+
+    // Max wait for Windows 3D repair. Timed-out repair is cancelled and the
+    // input mesh is kept; CGAL RepairMesh may still run afterwards. Zero
+    // disables the timeout (homepage / other callers). Texture import sets
+    // this explicitly.
+    std::chrono::seconds mesh_repair_timeout{0};
+
+    // Optional session cache. When set, a successful repair is stored so later
+    // recomputes can skip Win10 / CGAL repair. Failed Win10 attempts are also
+    // recorded so they are not retried. User cancel does not count as failure.
+    MeshRepairCache* mesh_repair_cache = nullptr;
 };
 
 /**
@@ -98,6 +153,34 @@ bool ClusterAndSmooth(const TriMesh& mesh,
                       AlgoProgressCallback progress_callback = nullptr,
                       AlgoCancelCallback cancel_callback = nullptr,
                       const std::vector<std::array<float, 4>>& vertex_colors = {});
+
+/**
+ * @brief Split a mesh along per-vertex cluster boundaries, one level, in place.
+ *
+ * An edge is split at its midpoint exactly when its two endpoints belong to different
+ * clusters, so adjacent faces always agree and no T-junctions appear. Each resulting
+ * face is assigned the center color of its cluster.
+ *
+ * @param[in,out]  mesh                 Mesh to split in place.
+ * @param[in]      vertex_cluster_ids   Cluster id per vertex; must match mesh.vertices in size.
+ * @param[in]      cluster_centers      Cluster center colors.
+ * @param[out]     out_face_colors      Per-face color of the split mesh.
+ * @return true on success, false on failure.
+ */
+bool adaptive_split_by_vertex_clusters(
+    TriMesh& mesh,
+    const std::vector<std::size_t>& vertex_cluster_ids,
+    const std::vector<std::array<std::size_t, 3>>& cluster_centers,
+    std::vector<std::array<std::size_t, 3>>& out_face_colors);
+
+// Cluster RGB [0..255] colors (adaptive when target_colors_num is 0, otherwise k-means) and
+// return each input color's nearest center index in out_cluster_ids.
+bool quantize_colors(
+    const std::vector<std::array<std::size_t, 3>>& colors,
+    const TextureToColorSettings& settings,
+    AlgoCancelCallback cancel_callback,
+    std::vector<std::array<std::size_t, 3>>& out_centers,
+    std::vector<std::size_t>& out_cluster_ids);
 
 }  // namespace tex2color
 }  // namespace Slic3r

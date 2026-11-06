@@ -1,5 +1,7 @@
 // Include GLGizmoBase.hpp before I18N.hpp as it includes some libigl code, which overrides our localization "L" macro.
 #include "GLGizmoText.hpp"
+#include <algorithm>
+#include <cmath>
 #include "libslic3r/ClipperUtils.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
@@ -29,7 +31,6 @@
 #include <wx/utils.h>
 
 #include <numeric>
-#include <boost/log/trivial.hpp>
 
 #include <GL/glew.h>
 
@@ -41,6 +42,7 @@
 #include "libslic3r/SVG.hpp"
 
 #include "../ParamsPanel.hpp"
+#include "libslic3r/Log.hpp"
 using namespace Slic3r;
 using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::Emboss;
@@ -113,6 +115,9 @@ enum class IconType : unsigned {
     save,
     add,
     erase,
+    align_horizontal_left,
+    align_horizontal_center,
+    align_horizontal_right,
     /*
     italic,
     unitalic,
@@ -124,9 +129,6 @@ enum class IconType : unsigned {
     lock_bold,
     unlock,
     unlock_bold,
-    align_horizontal_left,
-    align_horizontal_center,
-    align_horizontal_right,
     align_vertical_top,
     align_vertical_center,
     align_vertical_bottom,*/
@@ -205,6 +207,9 @@ IconManager::VIcons init_text_icons(IconManager &mng, const CurGuiCfg &cfg)//ini
         "text_save.svg",         // save
         "add_copies.svg",
         "delete2.svg",
+        "align_horizontal_left.svg",
+        "align_horizontal_center.svg",
+        "align_horizontal_right.svg",
         //"text_refresh.svg",      // refresh
         //"text_open.svg",         // changhe_file
         //"text_bake.svg",         // bake
@@ -370,7 +375,8 @@ void GLGizmoText::calculate_scale()
         return true;
     };
 
-    bool exist_change = calc(Vec3d::UnitY(), m_scale_height);
+    bool exist_change = calc(Vec3d::UnitX(), m_scale_width);
+    exist_change |= calc(Vec3d::UnitY(), m_scale_height);
     exist_change |= calc(Vec3d::UnitZ(), m_scale_depth);
 
     // Change of scale has to change font imgui font size
@@ -635,7 +641,7 @@ bool GLGizmoText::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_posit
         m_mouse_position = mouse_position;
     }
     else if (action == SLAGizmoEventType::LeftDown) {
-        if (is_only_text_case()) {
+        if (is_only_text_case() && get_hover_id() != m_move_cube_id) {
             return false;
         }
         if (!selection.is_empty() && get_hover_id() != -1) {
@@ -1327,6 +1333,75 @@ void GLGizmoText::draw_rotation(int caption_size, int slider_width, int drag_lef
     }*/
 }
 
+// Line gap is edited in mm, font property stores it in font points
+static int line_gap_mm_to_font_points(float line_gap_mm, const FontProp &fp, const FontFile &ff)
+{
+    if (fp.size_in_mm <= 0.f)
+        return 0;
+    const FontFile::Info &info = Slic3r::Emboss::get_font_info(ff, fp);
+    return static_cast<int>(std::lround(line_gap_mm * info.unit_per_em / fp.size_in_mm));
+}
+
+static float line_gap_font_points_to_mm(const FontProp &fp, const FontFile &ff)
+{
+    if (!fp.line_gap.has_value())
+        return 0.f;
+    const FontFile::Info &info = Slic3r::Emboss::get_font_info(ff, fp);
+    return static_cast<float>(*fp.line_gap) * fp.size_in_mm / static_cast<float>(info.unit_per_em);
+}
+
+// Distance between base lines of the active font and size, without the user line gap
+static float font_line_height_mm(const FontProp &fp, const FontFile &ff)
+{
+    const FontFile::Info &info = Slic3r::Emboss::get_font_info(ff, fp);
+    if (info.unit_per_em <= 0)
+        return 0.f;
+    return static_cast<float>(info.ascent - info.descent + info.linegap) * fp.size_in_mm / static_cast<float>(info.unit_per_em);
+}
+
+// Line gap range in mm for the active style. The lower bound keeps the resulting line height
+// positive, a bigger negative gap would stack the text lines in reverse order.
+// Returns false when there is no active font to measure.
+static bool get_style_line_gap_range(StyleManager &style_manager, float &min_gap, float &max_gap)
+{
+    if (!style_manager.is_active_font())
+        return false;
+    const FontFileWithCache &ff = style_manager.get_font_file_with_cache();
+    if (!ff.has_value())
+        return false;
+    const float line_height = font_line_height_mm(style_manager.get_font_prop(), *ff.font_file);
+    if (line_height <= 0.f)
+        return false;
+    min_gap = -0.9f * line_height;
+    max_gap = std::max(10.f, 2.f * line_height);
+    return true;
+}
+
+static void set_style_line_gap(StyleManager &style_manager, float line_gap_mm)
+{
+    if (!style_manager.is_active_font())
+        return;
+    const FontFileWithCache &ff = style_manager.get_font_file_with_cache();
+    if (!ff.has_value())
+        return;
+    FontProp &fp       = style_manager.get_font_prop();
+    int       line_gap = line_gap_mm_to_font_points(line_gap_mm, fp, *ff.font_file);
+    if (line_gap == 0)
+        fp.line_gap.reset();
+    else
+        fp.line_gap = line_gap;
+}
+
+static float get_style_line_gap_mm(StyleManager &style_manager)
+{
+    if (!style_manager.is_active_font())
+        return 0.f;
+    const FontFileWithCache &ff = style_manager.get_font_file_with_cache();
+    if (!ff.has_value())
+        return 0.f;
+    return line_gap_font_points_to_mm(style_manager.get_font_prop(), *ff.font_file);
+}
+
 std::unique_ptr<Emboss::DataBase> GLGizmoText::create_emboss_data_base(
     const std::string &text, Emboss::StyleManager &style_manager, const Selection &selection, ModelVolumeType type, std::shared_ptr<std::atomic<bool>> &cancel)
 {
@@ -1362,6 +1437,7 @@ std::unique_ptr<Emboss::DataBase> GLGizmoText::create_emboss_data_base(
     DataBase base(volume_name, cancel);
     style.projection.depth = m_thickness; // BBS add
     style.projection.embeded_depth = m_embeded_depth; // BBS add
+    set_style_line_gap(style_manager, m_line_gap); // BBS add: line gap is edited in mm
     base.is_outside   = is_outside;
    // base.text_lines   = text_lines.get_lines();
     base.from_surface = style.distance;
@@ -1426,12 +1502,12 @@ static Vec3d flip_normal_toward(const Vec3d &n, const Vec3d &from_hit)
 void GLGizmoText::generate_text_tran_in_world(const Vec3d &text_normal_in_world, const Vec3d &text_position_in_world,float rotate_degree, Geometry::Transformation &cur_tran)
 {
     Vec3d  temp_normal        = text_normal_in_world.normalized();
-    Vec3d  cut_plane_in_world = Slic3r::Emboss::suggest_up(text_normal_in_world, UP_LIMIT);
+    Vec3d  cut_plane_in_world = Slic3r::Emboss::suggest_up(temp_normal, UP_LIMIT);
 
-    Vec3d z_dir       = text_normal_in_world;
+    Vec3d z_dir       = temp_normal;
     Vec3d y_dir       = cut_plane_in_world;
     Vec3d x_dir_world = y_dir.cross(z_dir);
-    if (m_surface_type == TextInfo::TextType::SURFACE_HORIZONAL && text_normal_in_world != Vec3d::UnitZ()) {
+    if (m_surface_type == TextInfo::TextType::SURFACE_HORIZONAL && temp_normal != Vec3d::UnitZ()) {
         y_dir                       = Vec3d::UnitZ();
         x_dir_world                 = y_dir.cross(z_dir);
         z_dir                       = x_dir_world.cross(y_dir);
@@ -1524,7 +1600,7 @@ bool GLGizmoText::on_shortcut_key() {
             queue_job(worker, std::move(job));
         }
     } else {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "check error";
+        BOOST_LOG_TRIVIAL(info) << "check error";
     }
     return true;
 }
@@ -1688,6 +1764,12 @@ void GLGizmoText::load_init_text(bool first_open_text)
                     m_style_manager.get_font_prop().size_in_mm = m_font_size;
                     if (!m_font_name.empty())
                         select_facename(wxString::FromUTF8(m_font_name.c_str()), false);
+                    // Volume FontProp is the persisted line gap; keep it after any preset / face load.
+                    m_style_manager.get_font_prop().line_gap = text_info.text_configuration.style.prop.line_gap;
+                    m_line_gap = get_style_line_gap_mm(m_style_manager);
+                    m_style_manager.get_font_prop().align = text_info.text_configuration.style.prop.align;
+                    // Show the scaled gap, line gap, thickness and depth immediately, before the text is dragged.
+                    m_text_scale_absorbed = absorb_text_scale_into_parameters();
                 }
                 if (m_is_serializing) { // undo redo
                     m_style_manager.get_style().angle = calc_angle(selection);
@@ -1702,7 +1784,7 @@ void GLGizmoText::load_init_text(bool first_open_text)
                     try {
                         old_text_height = get_text_height(text_info.m_text); // old text
                     } catch (const std::exception &) {
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " error:get_text_height";
+                        BOOST_LOG_TRIVIAL(info) << "error:get_text_height";
                     }
                     if (is_only_text_case()) {
                         m_really_use_surface_calc = false;
@@ -1790,6 +1872,8 @@ void GLGizmoText::load_init_text(bool first_open_text)
                 if (!m_font_name.empty()) {//font version 1.10 and before
                     m_need_update_text = false;
                 }
+                if (m_text_scale_absorbed)
+                    m_need_update_text = true;
                 return;
             }
         }
@@ -1810,7 +1894,9 @@ void  GLGizmoText::data_changed(bool is_serializing) {
     }
 
     if (wxGetApp().plater()->is_show_text_cs()) {
+        // per line slices / CS marks belong to the previous volume
         m_lines_mark.reset();
+        m_debug_line_idx = 0;
     }
 }
 
@@ -1920,15 +2006,47 @@ void GLGizmoText::on_render()
                 auto text_volume_tran_world = mi->get_transformation().get_matrix() * tran.get_matrix();
                 render_cross_mark(text_volume_tran_world, Vec3f::Zero(),true);
             }
-            render_lines(GenerateTextJob::debug_cut_points_in_world);
+            // Base line slice and CS of every text line
+            const auto &debug_lines = GenerateTextJob::debug_lines;
+            if (m_debug_lines_version != GenerateTextJob::debug_lines_version) {
+                m_debug_lines_version = GenerateTextJob::debug_lines_version;
+                m_lines_mark.reset();
+                m_text_normal_lines_mark.reset();
+            }
+            std::vector<std::vector<Vec3d>> cut_polylines;
+            cut_polylines.reserve(debug_lines.size() + 1);
+            for (const auto &debug_line : debug_lines) {
+                if (debug_line.cut_points_in_world.empty()) // line without glyphs, it is not placed
+                    continue;
+                cut_polylines.emplace_back(debug_line.cut_points_in_world);
+                render_cross_mark(debug_line.tran_in_world, Vec3f::Zero(), true);
+            }
+            // Curve of the text handle, empty unless a line fell back on it
+            if (!GenerateTextJob::debug_anchor_cut_in_world.empty())
+                cut_polylines.emplace_back(GenerateTextJob::debug_anchor_cut_in_world);
+            render_lines(cut_polylines);
+            render_lines(m_text_normal_lines_mark, GenerateTextJob::debug_glyph_normal_lines,
+                         {0.0f, 0.35f, 1.0f, 1.0f});
         }
     }
     if (m_last_text_mv) {
+        // A drag only lives in the GLVolumes, the model instance is written on mouse up. Follow the
+        // live value so the handle tracks the object during the drag, no matter whether the canvas
+        // or the cube grabber drives it.
         if (is_only_text_case()) {//drag in parent
-            if ((m_text_position_in_world - mi->get_transformation().get_offset()).norm() > 0.01) {
-                m_text_position_in_world = mi->get_transformation().get_offset();
-                m_need_update_tran       = true;
-                update_text_tran_in_model_object(false);
+            const GLVolume *gl_volume = get_selected_gl_volume(m_parent);
+            if (gl_volume) {
+                // The handle sits at the origin of the text volume. Only the instance is read live,
+                // a rotation in progress moves the GLVolume before m_text_tran_in_object catches up
+                // and this branch has no business reacting to that.
+                const Vec3d text_pos_in_world = (gl_volume->get_instance_transformation() * m_text_tran_in_object).get_offset();
+                if ((m_text_position_in_world - text_pos_in_world).norm() > 0.01) {
+                    m_text_position_in_world = text_pos_in_world;
+                    m_need_update_tran       = true;
+                    update_text_tran_in_model_object(false);
+                    // The helper above sourced it from the not yet updated model instance.
+                    m_model_object_in_world_tran = gl_volume->get_instance_transformation();
+                }
             }
         }
         if (m_draging_cube) {
@@ -1937,17 +2055,24 @@ void GLGizmoText::on_render()
             m_rotate_gizmo.render();
         }
     }
-    if (!is_only_text_case()) {
-        update_text_pos_normal();
+    {
+        // The cube marks the text handle, the point every text line is laid out around. A text
+        // without a host mesh has no surface hit to follow, its own CS is the handle: show the
+        // cube there too, dragging it then moves the whole object in the bed plane.
+        const bool only_text = is_only_text_case();
         Geometry::Transformation tran;//= m_text_tran_in_world;
-        {
+        if (only_text) {
+            tran.set_matrix(m_text_tran_in_world.get_rotation_matrix());
+            tran.set_offset(m_text_tran_in_world.get_offset());
+        } else {
+            update_text_pos_normal();
             double   phi;
             Vec3d    rotation_axis;
             Matrix3d rotation_matrix;
             Geometry::rotation_from_two_vectors(Vec3d::UnitZ(), m_text_normal_in_world.cast<double>(), rotation_axis, phi, &rotation_matrix);
             tran.set_matrix((Transform3d) rotation_matrix);
+            tran.set_offset(m_text_position_in_world);
         }
-        tran.set_offset(m_text_position_in_world);
         bool                     hover = (m_hover_id == m_move_cube_id);
         std::array<float, 4>     render_color;
         if (hover) {
@@ -1974,12 +2099,17 @@ void GLGizmoText::on_render_for_picking()
     if (!m_draging_cube) {
         m_rotate_gizmo.render_for_picking();
     }
-    if (!is_only_text_case()) {
+    {
         const auto &shader = wxGetApp().get_shader("flat");
         if (shader == nullptr) return;
         wxGetApp().bind_shader(shader);
         int          obejct_idx, volume_idx;
         ModelVolume *model_volume = m_parent.get_selection().get_selected_single_volume(obejct_idx, volume_idx);
+        if (model_volume == nullptr && is_only_text_case()) {
+            // A text without host mesh may be selected as a whole instance, there is no single
+            // volume to query then, but the text volume is the only one anyway.
+            model_volume = m_last_text_mv;
+        }
         if (model_volume && !model_volume->get_text_info().m_text.empty()) {
             const Selection &selection = m_parent.get_selection();
             auto             mo        = selection.get_model()->objects[m_object_idx];
@@ -2002,6 +2132,14 @@ void GLGizmoText::on_start_dragging()
 
     if (m_hover_id == m_move_cube_id) {
         m_draging_cube = true;
+        if (is_only_text_case()) {
+            // No host surface to project on: the cube moves the whole object instead, so the
+            // selection needs instance mode and the same cache a GLVolume drag on the plate uses.
+            Selection &selection = m_parent.get_selection();
+            selection.set_mode(Selection::Instance);
+            selection.start_dragging();
+            m_cube_drag_start_pos = m_move_grabber.center;
+        }
     } else {
         m_rotate_gizmo.start_dragging();
     }
@@ -2009,9 +2147,20 @@ void GLGizmoText::on_start_dragging()
 
 void GLGizmoText::on_stop_dragging()
 {
+    const bool moved_whole_object = m_draging_cube && is_only_text_case();
     m_draging_cube = false;
     m_need_update_tran = true;//dragging
     if (m_hover_id == m_move_cube_id) {
+        if (moved_whole_object) {
+            // Only the instance offset changed, the text mesh itself is untouched: write the new
+            // position into the model and refresh the cached matrices, but do not rebuild the text.
+            m_parent.get_selection().stop_dragging();
+            wxGetApp().plater()->take_snapshot("Move Text", UndoRedo::SnapshotType::GizmoAction);
+            m_parent.do_move("");
+            update_trafo_matrices();
+            update_text_tran_in_model_object(false);
+            return;
+        }
         m_parent.do_move("");//replace by wxGetApp() .plater()->take_snapshot("Modify Text"); in EmbossJob.cpp
         update_trafo_matrices();
         m_need_update_text = true;
@@ -2034,10 +2183,65 @@ void GLGizmoText::on_stop_dragging()
     }
 }
 
+// Projects the mouse onto the horizontal plane passing through start_position_3D. Mirrors the rule
+// GLCanvas3D::on_mouse applies when a GLVolume is dragged over the plate.
+Vec3d GLGizmoText::mouse_to_drag_plane(const Linef3 &mouse_ray, const Vec3d &start_position_3D) const
+{
+    const Camera &camera                  = m_parent.get_active_camera();
+    auto          camera_up_down_rad_limit = abs(asin(camera.get_dir_forward()(2) / 1.0f));
+    if (camera_up_down_rad_limit < PI / 20.0f) {
+        // side view -> move selected volumes orthogonally to camera view direction
+        Vec3d dir = mouse_ray.unit_vector();
+        // finds the intersection of the mouse ray with the plane parallel to the camera viewport and passing throught the starting position
+        // use ray-plane intersection see i.e. https://en.wikipedia.org/wiki/Line%E2%80%93plane_intersection algebric form
+        // in our case plane normal and ray direction are the same (orthogonal view)
+        // when moving to perspective camera the negative z unit axis of the camera needs to be transformed in world space and used as plane normal
+        Vec3d inters = mouse_ray.a + (start_position_3D - mouse_ray.a).dot(dir) / dir.squaredNorm() * dir;
+        // vector from the starting position to the found intersection
+        Vec3d inters_vec = inters - start_position_3D;
+
+        Vec3d camera_right = camera.get_dir_right();
+        Vec3d camera_up    = camera.get_dir_up();
+
+        // finds projection of the vector along the camera axes
+        double projection_x = inters_vec.dot(camera_right);
+        double projection_z = inters_vec.dot(camera_up);
+
+        // apply offset
+        Vec3d cur_pos = start_position_3D + projection_x * camera_right + projection_z * camera_up;
+        cur_pos[2]    = start_position_3D(2);
+        return cur_pos;
+    }
+    // Generic view
+    // Get new position at the same Z of the initial click point.
+    return mouse_ray.intersect_plane(start_position_3D(2));
+}
+
+// A text without host mesh cannot follow a surface hit, so its cube drags the whole object inside
+// the horizontal plane the cube was grabbed at, the same way a GLVolume is dragged over the plate.
+void GLGizmoText::drag_only_text_in_bed_plane(const UpdateData &data)
+{
+    const Vec3d cur_pos = mouse_to_drag_plane(data.mouse_ray, m_cube_drag_start_pos);
+
+    TransformationType trafo_type;
+    trafo_type.set_relative();
+    m_parent.get_selection().translate(cur_pos - m_cube_drag_start_pos, trafo_type);
+
+    // The model instance is only written on stop_dragging, so move the handle here to keep the
+    // cube under the cursor while dragging.
+    m_text_position_in_world = cur_pos;
+    m_text_tran_in_world.set_offset(cur_pos);
+    m_parent.set_as_dirty();
+}
+
 void GLGizmoText::on_update(const UpdateData &data)
 {
     if (m_hover_id == 0) {
         m_rotate_gizmo.update(data);
+        return;
+    }
+    if (m_draging_cube && is_only_text_case()) {
+        drag_only_text_in_bed_plane(data);
         return;
     }
     if (!m_c) { return; }
@@ -2204,8 +2408,57 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0, 5.0) * currt_scale);
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 4.0f * currt_scale);
     GizmoImguiBegin("Text", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    float space_size    = m_imgui->get_style_scaling() * 8;
+    float font_cap      = m_imgui->calc_text_size(_L("Font")).x;
+    float size_cap      = m_imgui->calc_text_size(_L("Size")).x;
+    float thickness_cap = m_imgui->calc_text_size(_L("Thickness")).x;
+    float input_cap     = m_imgui->calc_text_size(_L("Input text")).x;
+    float caption_size  = std::max(std::max(font_cap, size_cap), input_cap) + space_size + ImGui::GetStyle().WindowPadding.x;
 #if BBL_RELEASE_TO_PUBLIC == 0
     if (wxGetApp().plater()->is_show_text_cs()) {
+        // Per text line slice data, one line at a time
+        const auto &debug_lines = GenerateTextJob::debug_lines;
+        if (debug_lines.empty()) {
+            m_imgui->text("text lines: <no surface slice>");
+        } else {
+            if (m_debug_line_idx >= debug_lines.size())
+                m_debug_line_idx = 0;
+            if (debug_lines.size() > 1) { // a single line has nothing to pick
+                std::vector<std::string> line_names;
+                line_names.reserve(debug_lines.size());
+                for (size_t i = 0; i < debug_lines.size(); ++i)
+                    line_names.emplace_back("line " + std::to_string(i));
+                // Same caption column and control width as the other inputs of the panel
+                const float item_width = m_gui_cfg->input_width;
+                ImGui::AlignTextToFramePadding();
+                ImGuiWrapper::push_combo_style(m_parent.get_scale());
+                render_combo("text line", line_names, m_debug_line_idx, caption_size, item_width);
+                ImGuiWrapper::pop_combo_style();
+            }
+
+            if (!GenerateTextJob::debug_anchor_cut_in_world.empty())
+                m_imgui->text("handle cut drawn: no base line crosses the object");
+
+            const auto &debug_line = debug_lines[m_debug_line_idx];
+            if (debug_line.cut_points_in_world.empty()) {
+                m_imgui->text("line has no glyph, it is not placed");
+            } else {
+                m_imgui->text("line base y:" + formatFloat(debug_line.line_y) + " cut y:" + formatFloat(debug_line.placed_y) +
+                              (debug_line.hit ? " (own cut)" : " (borrowed cut)"));
+                m_imgui->text("line glyphs:[" + std::to_string(debug_line.glyph_first) + "," + std::to_string(debug_line.glyph_last) +
+                              ") cut points:" + std::to_string(debug_line.cut_points_in_world.size()));
+                m_imgui->text("line align shift:" + formatFloat(static_cast<float>(debug_line.align_shift)));
+                const Vec3d line_pos   = debug_line.tran_in_world.translation();
+                const Vec3d line_x_dir = debug_line.tran_in_world.linear().col(0);
+                const Vec3d line_y_dir = debug_line.tran_in_world.linear().col(1);
+                const Vec3d line_z_dir = debug_line.tran_in_world.linear().col(2);
+                m_imgui->text("line key point in world:" + formatFloat(line_pos[0]) + " y:" + formatFloat(line_pos[1]) + " z:" + formatFloat(line_pos[2]));
+                m_imgui->text("line x_dir:" + formatFloat(line_x_dir[0]) + " y:" + formatFloat(line_x_dir[1]) + " z:" + formatFloat(line_x_dir[2]));
+                m_imgui->text("line y_dir:" + formatFloat(line_y_dir[0]) + " y:" + formatFloat(line_y_dir[1]) + " z:" + formatFloat(line_y_dir[2]));
+                m_imgui->text("line z_dir:" + formatFloat(line_z_dir[0]) + " y:" + formatFloat(line_z_dir[1]) + " z:" + formatFloat(line_z_dir[2]));
+            }
+        }
+
         std::string world_hit = "world hit x:" + formatFloat(m_text_position_in_world[0]) + " y:" + formatFloat(m_text_position_in_world[1]) +" z:" + formatFloat(m_text_position_in_world[2]);
         std::string hit     = "local hit x:" + formatFloat(m_rr.hit[0]) + " y:" + formatFloat(m_rr.hit[1]) + " z:" + formatFloat(m_rr.hit[2]);
         std::string normal  = "normal x:" + formatFloat(m_rr.normal[0]) + " y:" + formatFloat(m_rr.normal[1]) + " z:" + formatFloat(m_rr.normal[2]);
@@ -2260,13 +2513,6 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
         }
     }
 #endif
-    float space_size    = m_imgui->get_style_scaling() * 8;
-    float font_cap      = m_imgui->calc_text_size(_L("Font")).x;
-    float size_cap      = m_imgui->calc_text_size(_L("Size")).x;
-    float thickness_cap = m_imgui->calc_text_size(_L("Thickness")).x;
-    float input_cap     = m_imgui->calc_text_size(_L("Input text")).x;
-    float caption_size  = std::max(std::max(font_cap, size_cap), input_cap) + space_size + ImGui::GetStyle().WindowPadding.x;
-
     float input_text_size = m_imgui->scaled(10.0f);
     float button_size     = ImGui::GetFrameHeight();
 
@@ -2397,7 +2643,8 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
     m_imgui->text(_L("Text Gap"));
     ImGui::SameLine(caption_size);
     ImGui::PushItemWidth(slider_width);
-    if (m_imgui->bbl_slider_float_style("##text_gap", &m_text_gap, -10.f, 100.f, "%.2f", 1.0f, true))
+    m_imgui->bbl_slider_float_style("##text_gap", &m_text_gap, -10.f, 100.f, "%.2f", 1.0f, true);
+    if (m_imgui->get_last_slider_status().deactivated_after_edit)
         m_need_update_text = true;
 
     ImGui::SameLine(drag_left_width);
@@ -2416,6 +2663,33 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
         if (need_deal) {
             m_need_update_text = true;
         }
+    }
+
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Line Gap"));
+    ImGui::SameLine(caption_size);
+    ImGui::PushItemWidth(slider_width);
+    // Slider and input share one range, it follows the font so the gap can not cancel the line height.
+    float      line_gap_min = -10.f, line_gap_max = 10.f;
+    const bool has_line_gap_range = get_style_line_gap_range(m_style_manager, line_gap_min, line_gap_max);
+    bool       line_gap_changed   = false;
+    // The stored value is never rewritten from the range: the size field applies every keystroke,
+    // so a transient size would clamp the gap away for good. The range only bounds what the slider
+    // and the input let the user pick, a value from an older file is left alone.
+    m_imgui->bbl_slider_float_style("##line_gap", &m_line_gap, line_gap_min, line_gap_max, "%.2f", 1.0f, true);
+    if (m_imgui->get_last_slider_status().deactivated_after_edit)
+        line_gap_changed = true;
+
+    ImGui::SameLine(drag_left_width);
+    ImGui::PushItemWidth(1.5 * slider_icon_width);
+    if (ImGui::BBLDragFloat("##line_gap_input", &m_line_gap, 0.05f, line_gap_min, line_gap_max, "%.2f"))
+        line_gap_changed = true;
+    if (line_gap_changed) {
+        if (has_line_gap_range)
+            m_line_gap = std::clamp(m_line_gap, line_gap_min, line_gap_max);
+        set_style_line_gap(m_style_manager, m_line_gap);
+        m_style_manager.clear_imgui_font(); // preview in text input uses the line gap too
+        m_need_update_text = true;
     }
 
     draw_rotation(caption_size, slider_width, drag_left_width, slider_icon_width);
@@ -2635,7 +2909,8 @@ void GLGizmoText::draw_text_input(int caption_width)
     // ranges can't be extend during font is activ(pushed)
     std::string               range_text;
     ImVec2                    input_size(2 * m_gui_cfg->input_width, m_gui_cfg->text_size.y); // 2 * m_gui_cfg->input_width - caption_width
-    const ImGuiInputTextFlags flags = ImGuiInputTextFlags_AllowTabInput;// | ImGuiInputTextFlags_AutoSelectAll
+    // Multiline must be passed explicitly (see ImGui::InputTextMultiline). Enter inserts a line break, Ctrl+Enter (Cmd+Enter on macOS) leaves the field.
+    const ImGuiInputTextFlags flags = ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_Multiline;// | ImGuiInputTextFlags_AutoSelectAll
     if (ImGui::InputTextMultiline("##Text", &m_text, input_size, flags)) {
         if (m_style_manager.get_font_prop().per_glyph) {
             unsigned count_lines = get_count_lines(m_text);
@@ -3019,6 +3294,38 @@ void GLGizmoText::draw_advanced(float caption_size, float slider_width, float sl
             m_need_update_text = true;
         }
     }
+
+    // Horizontal alignment of the text lines, center by default
+    FontProp::HorizontalAlign &h_align = font_prop.align.first;
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Alignment"));
+    ImGui::SameLine(caption_size + ad_space_size);
+    auto draw_align_button = [&](IconType icon_type, FontProp::HorizontalAlign align, const wxString &tooltip) {
+        const IconManager::Icon &icon       = get_icon(m_icons, icon_type, IconState::activable);
+        const IconManager::Icon &icon_hover = get_icon(m_icons, icon_type, IconState::hovered);
+        // An icon is only an image, take the clicks with an invisible button of the same rect. draw()
+        // centers the icon in the row, the button has to follow it to stay under the pixels.
+        const float  line_height = ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2;
+        const ImVec2 cursor      = ImGui::GetCursorPos();
+        ImGui::SetCursorPosY(cursor.y + std::max(0.f, std::floor((line_height - icon.size.y) / 2.f)));
+        ImGui::PushID(static_cast<int>(icon_type));
+        const bool clicked = ImGui::InvisibleButton("##align", icon.size);
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::PopID();
+        ImGui::SetCursorPos(cursor);
+        draw((hovered || h_align == align) ? icon_hover : icon);
+        if (hovered)
+            m_imgui->tooltip(tooltip, m_gui_cfg->max_tooltip_width);
+        if (clicked && h_align != align) {
+            h_align            = align;
+            m_need_update_text = true;
+        }
+    };
+    draw_align_button(IconType::align_horizontal_left, FontProp::HorizontalAlign::left, _L("Align left"));
+    ImGui::SameLine();
+    draw_align_button(IconType::align_horizontal_center, FontProp::HorizontalAlign::center, _L("Align center horizontally"));
+    ImGui::SameLine();
+    draw_align_button(IconType::align_horizontal_right, FontProp::HorizontalAlign::right, _L("Align right"));
 }
 
 void GLGizmoText::init_font_name_texture()
@@ -3094,6 +3401,7 @@ void GLGizmoText::reset_text_info()
     m_embeded_depth = m_style_manager.get_style().projection.embeded_depth;
     m_rotate_angle    = get_angle_from_current_style();
     m_text_gap        = m_style_manager.get_style().prop.char_gap.value_or(0);
+    m_line_gap        = get_style_line_gap_mm(m_style_manager);
     m_surface_type    = TextInfo::TextType::SURFACE;
     m_rr              = RaycastResult();
     m_last_text_mv = nullptr;
@@ -3181,6 +3489,51 @@ void GLGizmoText::update_text_normal_in_world()
     }
 }
 
+bool GLGizmoText::absorb_text_scale_into_parameters()
+{
+    Geometry::Transformation world(m_model_object_in_world_tran.get_matrix() * m_text_tran_in_object.get_matrix());
+    const Vec3d scale = world.get_scaling_factor();
+    const float scale_y = static_cast<float>(scale.y());
+    const float scale_z = static_cast<float>(scale.z());
+    if (is_approx(scale_y, 1.f) && is_approx(scale_z, 1.f))
+        return false;
+
+    m_style_manager.get_font_prop().size_in_mm *= scale_y;
+    m_font_size = m_style_manager.get_font_prop().size_in_mm;
+    m_text_gap *= scale_y;
+    m_line_gap *= scale_y;
+    m_thickness *= scale_z;
+    m_embeded_depth *= scale_z;
+    m_style_manager.get_style().projection.depth = m_thickness;
+    m_style_manager.get_style().projection.embeded_depth = m_embeded_depth;
+    m_style_manager.get_font_prop().char_gap = static_cast<int>(m_text_gap);
+    set_style_line_gap(m_style_manager, m_line_gap);
+    m_style_manager.clear_imgui_font();
+    // The size field displays size_in_mm multiplied by the world scale. The value now includes that scale.
+    m_scale_width.reset();
+    m_scale_height.reset();
+    m_scale_depth.reset();
+    return true;
+}
+
+void GLGizmoText::normalize_absorbed_text_scale()
+{
+    const Vec3d scale = m_text_tran_in_world.get_scaling_factor();
+    const Vec3d mirror = m_text_tran_in_world.get_mirror();
+    Vec3d residual = Vec3d::Ones();
+    if (std::abs(scale.y()) > 1e-8)
+        residual.x() = scale.x() / scale.y();
+    m_text_tran_in_world.set_scaling_factor(residual);
+    m_text_tran_in_world.set_mirror(mirror);
+    m_text_tran_in_object.set_matrix(m_model_object_in_world_tran.get_matrix().inverse() * m_text_tran_in_world.get_matrix());
+    m_cut_plane_dir_in_world = m_text_tran_in_world.get_matrix().linear().col(1);
+    m_text_normal_in_world = m_text_tran_in_world.get_matrix().linear().col(2).cast<float>();
+    m_scale_width = is_approx(residual.x(), 1.) ? std::optional<float>{} : std::optional<float>{static_cast<float>(residual.x())};
+    m_scale_height.reset();
+    m_scale_depth.reset();
+    m_text_scale_absorbed = false;
+}
+
 bool GLGizmoText::update_text_tran_in_model_object(bool rewrite_text_tran)
 {
     if (m_object_idx < 0 && !is_only_text_case()) {
@@ -3199,6 +3552,9 @@ bool GLGizmoText::update_text_tran_in_model_object(bool rewrite_text_tran)
     m_show_text_normal_error = false;
     if (!rewrite_text_tran) {
         if (!m_need_update_tran) {
+            // Entering the gizmo absorbs the scale before a drag. Normalize it when the mesh is rebuilt.
+            if (m_text_scale_absorbed)
+                normalize_absorbed_text_scale();
             return true;
         }
         m_need_update_tran = false;
@@ -3210,9 +3566,35 @@ bool GLGizmoText::update_text_tran_in_model_object(bool rewrite_text_tran)
     const ModelInstance *mi      = mo->instances[selection.get_instance_idx()];
     m_model_object_in_world_tran = mi->get_transformation();
 
+    Vec3d scale_after_baking = Vec3d::Ones();
+    Vec3d mirror_in_world    = Vec3d::Ones();
+    if (rewrite_text_tran && m_last_text_mv != nullptr) {
+        Geometry::Transformation current_text_tran_in_world(
+            m_model_object_in_world_tran.get_matrix() * m_text_tran_in_object.get_matrix());
+        const Vec3d scale_in_world = current_text_tran_in_world.get_scaling_factor();
+        mirror_in_world            = current_text_tran_in_world.get_mirror();
+
+        if (!m_text_scale_absorbed)
+            absorb_text_scale_into_parameters();
+        m_text_scale_absorbed = false;
+
+        // Font size represents the Y scale and scales glyphs in both planar axes.
+        // Keep only the X/Y ratio for a non-uniform planar scale.
+        scale_after_baking.x() = scale_in_world.x() / scale_in_world.y();
+        m_scale_width = is_approx(scale_after_baking.x(), 1.) ?
+                            std::optional<float>{} :
+                            std::optional<float>{static_cast<float>(scale_after_baking.x())};
+        m_scale_height.reset();
+        m_scale_depth.reset();
+    }
+
     generate_text_tran_in_world(m_text_normal_in_world.cast<double>(), m_text_position_in_world, m_rotate_angle, m_text_tran_in_world);
     if (m_fix_text_tran.has_value()) {
         m_text_tran_in_world = m_text_tran_in_world * (m_fix_text_tran.value());
+    }
+    if (rewrite_text_tran && m_last_text_mv != nullptr) {
+        m_text_tran_in_world.set_scaling_factor(scale_after_baking);
+        m_text_tran_in_world.set_mirror(mirror_in_world);
     }
     m_cut_plane_dir_in_world = m_text_tran_in_world.get_matrix().linear().col(1);
     m_text_normal_in_world   = m_text_tran_in_world.get_matrix().linear().col(2).cast<float>();
@@ -3350,7 +3732,7 @@ bool GLGizmoText::generate_text_volume()
         return false;
     m_show_calc_meshtod = 0;
     if (m_object_idx < 0) {//m_object_idx < 0 && !is_only_text_case()
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "error:m_object_idx < 0";
+        BOOST_LOG_TRIVIAL(info) << "error:m_object_idx < 0";
         return false;
     }
     if (auto text_mv = get_text_is_dragging()) { // moving or dragging;
@@ -3365,7 +3747,7 @@ bool GLGizmoText::generate_text_volume()
     }
     bool rewrite_text_tran = m_need_update_tran ? true : m_last_text_mv == nullptr;
     if (!update_text_tran_in_model_object(rewrite_text_tran)) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " fail:update_text_tran_in_model_object";
+        BOOST_LOG_TRIVIAL(info) << "fail:update_text_tran_in_model_object";
         return false;
     }
 
@@ -3446,6 +3828,9 @@ TextInfo GLGizmoText::get_text_info()
     text_info.m_text_gap      = m_text_gap;
     text_info.m_surface_type  = m_surface_type;
     text_info.text_configuration = m_ui_text_configuration;
+    set_style_line_gap(m_style_manager, m_line_gap);
+    text_info.text_configuration.style.prop.line_gap = m_style_manager.get_font_prop().line_gap;
+    text_info.text_configuration.style.prop.align    = m_style_manager.get_font_prop().align;
     text_info.m_font_version     = CUR_FONT_VERSION;
     return text_info;
 }
@@ -3483,6 +3868,9 @@ void GLGizmoText::load_from_text_info(const TextInfo &text_info)
     }
     m_custom_boldness          = text_info.text_configuration.style.prop.boldness.value_or(0.f);
     m_custom_skew              = text_info.text_configuration.style.prop.skew.value_or(0.f);
+    m_style_manager.get_font_prop().line_gap = text_info.text_configuration.style.prop.line_gap;
+    m_line_gap = get_style_line_gap_mm(m_style_manager);
+    m_style_manager.get_font_prop().align = text_info.text_configuration.style.prop.align;
     if (is_text_changed) {
         process(true,std::nullopt,false);
     }

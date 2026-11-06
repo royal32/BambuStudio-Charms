@@ -4,13 +4,12 @@
 #include <stack>
 #include <vector>
 
-#include <boost/log/trivial.hpp>
-
 #include "CSGMesh.hpp"
 
 #include "libslic3r/Execution/ExecutionTBB.hpp"
 //#include "libslic3r/Execution/ExecutionSeq.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/Log.hpp"
 
 namespace Slic3r { namespace csg {
     enum class BooleanFailReason { OK, MeshEmpty, NotBoundAVolume, SelfIntersect, NoIntersection};
@@ -34,6 +33,7 @@ MeshBoolean::cgal::CGALMeshPtr get_cgalmesh(const CSGPartT &csgpart)
     try {
         ret = MeshBoolean::cgal::triangle_mesh_to_cgal(m);
     } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << current_exception_message();
         // errors are ignored, simply return null
         ret = nullptr;
     }
@@ -61,6 +61,7 @@ MeshBoolean::mcut::McutMeshPtr get_mcutmesh(const CSGPartT& csgpart)
         ret = MeshBoolean::mcut::triangle_mesh_to_mcut(m);
     }
     catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << current_exception_message();
         // errors are ignored, simply return null
         ret = nullptr;
     }
@@ -293,14 +294,11 @@ std::tuple<BooleanFailReason,std::string> check_csgmesh_booleans(const Range<It>
                 return;
             }*/
 
-            if (MeshBoolean::cgal::does_self_intersect(*m)) {
-                BOOST_LOG_TRIVIAL(info) << "check_csgmesh_booleans fails! mesh " << i << "/" << csgrange.size() << " does_self_intersect is true, cannot do boolean!";
-                fail_reason= BooleanFailReason::SelfIntersect;
-                fail_part_name = csgpart.name;
-                return;
-            }
+            // Skip CGAL self-intersection pre-check: it blocks boolean on inverted-face
+            // meshes, and the current backend has no such detector.
         }
-        catch (...) { return; }
+        catch (...) {
+            BOOST_LOG_TRIVIAL(warning) << current_exception_message(); return; }
 
         cgalmeshes[i] = std::move(m);
     };
@@ -351,7 +349,8 @@ std::tuple<BooleanFailReason, std::string> check_csgmesh_booleans(const Range<It
                     return;
                 }
             }
-            catch (...) { return; }
+            catch (...) {
+                BOOST_LOG_TRIVIAL(warning) << current_exception_message(); return; }
 
             McutMeshes[i] = std::move(m);
         };

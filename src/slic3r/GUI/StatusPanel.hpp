@@ -13,6 +13,7 @@
 #include <wx/image.h>
 #include <wx/sizer.h>
 #include <wx/gbsizer.h>
+#include <wx/weakref.h>
 #include <wx/webrequest.h>
 #include "MediaPlayCtrl.h"
 #include "AMSSetting.hpp"
@@ -21,19 +22,24 @@
 #include "PrintOptionsDialog.hpp"
 #include "SafetyOptionsDialog.hpp"
 #include "AMSMaterialsSetting.hpp"
-#include "AMSRFIDMaterialView.hpp"
+#include "AMSNewFilamentDialogs.hpp"
 #include "ExtrusionCalibration.hpp"
 #include "ReleaseNote.hpp"
 #include "Widgets/SwitchButton.hpp"
 #include "Widgets/AxisCtrlButton.hpp"
 #include "Widgets/TextInput.hpp"
 #include "Widgets/TempInput.hpp"
+#include "Widgets/wgtCircleItem.hpp"
 #include "Widgets/StaticLine.hpp"
 #include "Widgets/ProgressBar.hpp"
+#include "Widgets/RoundedRectangle.hpp"
+#include "Widgets/BreathingDot.hpp"
+#include "DeviceOperationsTooltip.hpp"
 #include "Widgets/ImageSwitchButton.hpp"
 #include "Widgets/AMSControl.hpp"
 #include "Widgets/FilamentLoad.hpp"
 #include "Widgets/FanControl.hpp"
+#include "DeviceTab/AmsControl/AmsControlWebEnable.hpp"
 #include "HMS.hpp"
 #include "PartSkipDialog.hpp"
 #include "DeviceErrorDialog.hpp"
@@ -52,8 +58,17 @@ namespace GUI {
 
 // Previous definitions
 class MessageDialog;
+class wgtDeviceFilamentHotendWebDialog;
+class wgtDeviceFilamentHotendHtmlDialog;
 class wgtDeviceNozzleRack;
+#if BBL_ENABLE_AMS_CONTROL_WEB
+class wgtAmsControlWebPanel;
+#endif
+class wgtDeviceFilamentHotendWebPanel;
+class wgtHotendRackControl;
+class wgtRackExtruder;
 class CameraFullscreenFrame;
+class wgtDeviceFilamentHotendTab;
 
 enum CameraRecordingStatus {
     RECORDING_NONE,
@@ -299,12 +314,12 @@ private:
 
     wxBoxSizer*     m_printing_sizer;
     wxStaticText *  m_staticText_printing;
-    wxStaticText*   m_staticText_subtask_value;
+    wxStaticText*   m_staticText_title;
     wxStaticText*   m_staticText_consumption_of_time;
     wxStaticText*   m_staticText_consumption_of_weight;
     wxStaticText*   m_printing_stage_value;
     ScalableButton* m_question_button;
-    wxStaticText*   m_staticText_profile_value;
+    wxStaticText*   m_staticText_subtitle;
     wxStaticText*   m_staticText_progress_percent;
     wxStaticText*   m_staticText_progress_percent_icon;
     wxStaticText*   m_staticText_progress_left;
@@ -360,7 +375,7 @@ public:
     void update_stopping_state(bool enter);
     void enable_pause_resume_button(bool enable, std::string type);
     void enable_abort_button(bool enable);
-    void update_subtask_name(wxString name);
+    void update_title(const wxString &title);
     void update_stage_value(wxString stage, int val);
     void update_stage_value_with_machine(wxString stage, int val, MachineObject* obj = nullptr);
     void on_stage_clicked(wxMouseEvent& event);
@@ -374,7 +389,7 @@ public:
     void updatePauseNum(bool show, wxString num = wxEmptyString);
     void updatePauseMarkers(const DevPrintPauseList *pauseList, int printRemainingTime = 0);
     void show_priting_use_info(bool show, wxString time = wxEmptyString, wxString weight = wxEmptyString);
-    void show_profile_info(bool show, wxString profile = wxEmptyString);
+    void show_subtitle(bool show, const wxString &subtitle = wxEmptyString);
     void set_thumbnail_img(const wxBitmap& bmp, const std::string& bmp_name);
     void set_brightness_value(int value) { m_brightness_value = value; }
     void set_plate_index(int plate_idx = -1);
@@ -408,6 +423,9 @@ private:
     void paint(wxPaintEvent&);
 };
 
+class CtrlAreaMaskOverlay;
+class CtrlAreaMaskHint;
+
 class StatusBasePanel : public wxScrolledWindow
 {
 protected:
@@ -436,22 +454,23 @@ protected:
     CameraRecordingStatus m_state_recording{CameraRecordingStatus::RECORDING_NONE};
     CameraTimelapseStatus m_state_timelapse{CameraTimelapseStatus::TIMELAPSE_NONE};
 
-    CameraItem *m_setting_button;
-    CameraItem *m_camera_fullscreen_button{ nullptr };
     wxBoxSizer *m_camera_media_sizer{ nullptr };
     CameraFullscreenFrame *m_camera_fullscreen_frame{ nullptr };
     wxPanel *m_camera_placeholder{ nullptr };
 
     wxBitmap m_bitmap_camera;
-    ScalableBitmap m_bitmap_sdcard_state_normal;
-    ScalableBitmap m_bitmap_sdcard_state_abnormal;
-    ScalableBitmap m_bitmap_sdcard_state_no;
-    ScalableBitmap m_bitmap_recording_on;
-    ScalableBitmap m_bitmap_recording_off;
-    ScalableBitmap m_bitmap_timelapse_on;
-    ScalableBitmap m_bitmap_timelapse_off;
-    ScalableBitmap m_bitmap_vcamera_on;
-    ScalableBitmap m_bitmap_vcamera_off;
+
+    ScalableBitmap    m_bitmap_record_on_light;
+    ScalableBitmap    m_bitmap_timelapse_on_light;
+    ScalableBitmap    m_bitmap_golive_on_light;
+    BreathingDot     *m_breathing_dot_light{nullptr};
+    RoundedRectangle  *m_camera_title_pill{nullptr};
+    wxStaticBitmap    *m_bitmap_record_light{nullptr};
+    wxStaticBitmap    *m_bitmap_timelapse_light{nullptr};
+    wxStaticBitmap    *m_bitmap_golive_light{nullptr};
+    StaticLine        *m_camera_title_separator{nullptr};
+    CameraItem        *m_setting_button_light{nullptr};
+    DeviceOperationsTooltip *m_device_operations_tooltip{nullptr};
 
     /* title panel */
     wxPanel *       media_ctrl_panel;
@@ -468,10 +487,6 @@ protected:
     wxStaticText *m_mqtt_source;
 
     wxStaticBitmap *m_bitmap_camera_img;
-    wxStaticBitmap *m_bitmap_recording_img;
-    wxStaticBitmap *m_bitmap_timelapse_img;
-    wxStaticBitmap* m_bitmap_vcamera_img;
-    wxStaticBitmap *m_bitmap_sdcard_img;
     wxStaticBitmap *m_bitmap_static_use_time;
     wxStaticBitmap *m_bitmap_static_use_weight;
 
@@ -481,9 +496,9 @@ protected:
 
     Label *         m_staticText_printing;
     wxStaticBitmap *m_bitmap_thumbnail;
-    wxStaticText *  m_staticText_subtask_value;
+    wxStaticText *  m_staticText_title;
     wxStaticText *  m_printing_stage_value;
-    wxStaticText *  m_staticText_profile_value;
+    wxStaticText *  m_staticText_subtitle;
     ProgressBar*    m_gauge_progress;
     wxStaticText *  m_staticText_progress_percent;
     wxStaticText *  m_staticText_progress_percent_icon;
@@ -510,6 +525,10 @@ protected:
     wxBoxSizer *    m_misc_ctrl_sizer;
     StaticBox*      m_fan_panel;
     StaticLine *    m_line_nozzle;
+    wgtCircleItem*  m_main_extruder_nozzle_idx{ nullptr };
+    wxPanel*        m_nozzle_empty_hint{ nullptr };
+    wxStaticBitmap* m_nozzle_empty_hint_icon{ nullptr };
+    Label*          m_nozzle_empty_hint_label{ nullptr };
     TempInput*      m_tempCtrl_nozzle;
     int             m_temp_nozzle_timeout{ 0 };
     TempInput*      m_tempCtrl_nozzle_deputy;
@@ -537,10 +556,15 @@ protected:
     Button *        m_bpButton_z_down_1;
     Button *        m_bpButton_z_down_10;
     wxStaticText *  m_staticText_z_tip;
+
+    wgtHotendRackControl* m_hotend_rack_control{ nullptr };
     Label *         m_extruder_label;
     Button *        m_bpButton_e_10;
     Button *        m_bpButton_e_down_10;
     ExtruderSwithingStatus *m_extruder_switching_status;
+
+    wxPanel*         m_legacy_extruder_panel{ nullptr };
+    wgtRackExtruder* m_rack_extruder_panel{ nullptr };
 
     wxPanel *       m_temp_temp_line;
     wxPanel *       m_temp_extruder_line;
@@ -549,8 +573,21 @@ protected:
     /* switch*/
     SwitchBoard*    m_ams_rack_switch;
 
+    /* M2Y */
+    wgtDeviceFilamentHotendWebPanel* m_filament_hotend_web_panel{ nullptr };
+    wgtDeviceFilamentHotendWebDialog* m_filament_hotend_web_dlg{ nullptr };
+    Button*         m_filament_hotend_web_dlg_btn{ nullptr };
+    // Beta-only native-HTML variant of the same page, gated by enable_device_web_html.
+    wgtDeviceFilamentHotendHtmlDialog* m_filament_hotend_html_dlg{ nullptr };
+    Button*         m_filament_hotend_html_dlg_btn{ nullptr };
+
     AMSControl*     m_ams_control;
     StaticBox*      m_ams_control_box;
+#if BBL_ENABLE_AMS_CONTROL_WEB
+    SwitchBoard*    m_ams_control_web_switch{ nullptr };
+    wgtAmsControlWebPanel* m_ams_control_web_panel{ nullptr };
+    bool            m_ams_control_web_active{ ams_control_use_web() };
+#endif
     wxStaticBitmap *m_ams_extruder_img;
     wxStaticBitmap* m_bitmap_extruder_img;
 
@@ -575,6 +612,11 @@ protected:
     StepIndicator*  m_calibration_flow;
 
     wxPanel *       m_machine_ctrl_panel;
+    StaticBox*                        m_temp_axis_ctrl_box{nullptr};
+    std::vector<CtrlAreaMaskOverlay*> m_ctrl_area_masks;
+    std::vector<wxWindow*>            m_ctrl_area_mask_excludes;
+    bool                              m_ctrl_area_mask_dark{false};
+    CtrlAreaMaskHint*                 m_ctrl_area_mask_hint{nullptr};
     wxPanel *       m_scale_panel;
     wxStaticBitmap* m_img_filament_loading;
     PrintingTaskPanel *       m_project_task_panel;
@@ -585,7 +627,13 @@ protected:
     Button *m_button_retry {nullptr};
     Button *m_fila_change_abort {nullptr};
     StaticBox* m_filament_load_box;
+    std::string m_devid;
 
+private:
+    friend class StatusPanel;
+    MachineObject *get_current_dev() const;
+
+protected:
     // Virtual event handlers, override them in your derived class
     virtual void on_subtask_partskip(wxCommandEvent &event) { event.Skip(); }
     virtual void on_subtask_pause_resume(wxCommandEvent &event) { event.Skip(); }
@@ -615,16 +663,25 @@ public:
 
     ~StatusBasePanel();
 
-    MachineObject* obj{ nullptr };
     void init_bitmaps();
     wxBoxSizer *create_monitoring_page();
+    std::vector<wxString> collect_device_operations() const;
     wxBoxSizer *create_machine_control_page(wxWindow *parent);
 
     wxBoxSizer *create_temp_axis_group(wxWindow *parent);
+    void        bind_ctrl_area_mask_tracking(wxWindow *machine_ctrl_panel);
+    void        on_ctrl_area_mask_event(wxEvent &event);
+    void        update_ctrl_area_masks();
+    void        ensure_ctrl_area_mask_pool(size_t n);
+    void        show_ctrl_area_mask_hint(CtrlAreaMaskOverlay* from);
+    void        schedule_hide_ctrl_area_mask_hint();
+    bool        is_mouse_over_ctrl_area_mask(const wxPoint &screen_pt) const;
+    void        hide_ctrl_area_overlays();
     wxBoxSizer *create_temp_control(wxWindow *parent);
     wxBoxSizer *create_misc_control(wxWindow *parent);
     wxBoxSizer *create_axis_control(wxWindow *parent);
     wxPanel *create_bed_control(wxWindow *parent);
+    wxPanel *create_hotend_rack_control(wxWindow *parent);
     wxBoxSizer *create_extruder_control(wxWindow *parent);
 
     void reset_temp_misc_control();
@@ -645,10 +702,12 @@ public:
     bool is_camera_fullscreen() const;
     void toggle_camera_fullscreen();
     void close_camera_fullscreen();
-    void on_camera_fullscreen(wxMouseEvent& event);
 
 private:
     void on_ams_rack_switch(wxCommandEvent& event);
+#if BBL_ENABLE_AMS_CONTROL_WEB
+    void on_ams_control_web_switch(wxCommandEvent& event);
+#endif
     void show_camera_fullscreen();
 };
 
@@ -656,6 +715,12 @@ class StatusPanel : public StatusBasePanel
 {
 private:
     friend class MonitorPanel;
+
+    struct TaskDisplayInfo
+    {
+        wxString title;
+        wxString subtitle;
+    };
 
 protected:
     std::shared_ptr<SliceInfoPopup> m_slice_info_popup;
@@ -670,11 +735,10 @@ protected:
     std::string          m_task_lock_setup_handled_dev_id;
     std::string          m_task_lock_verify_handled_dev_id;
     AMSMaterialsSetting *m_filament_setting_dlg{nullptr};
-    AMSRFIDMaterialView *m_rfid_view_dlg{nullptr};
     AMSNewOfficialFilamentDlg *m_new_official_filament_dlg{nullptr};
     SoftMatchPendingResponse   m_soft_match_pending;
 
-    DeviceErrorDialog* m_print_error_dlg = nullptr;
+    wxWeakRef<DeviceErrorDialog> m_print_error_dlg;
     SecondaryCheckDialog* abort_dlg = nullptr;
     SecondaryCheckDialog* con_load_dlg = nullptr;
     MessageDialog *       ctrl_e_hint_dlg             = nullptr;
@@ -690,11 +754,7 @@ protected:
     wxString     m_request_url;
     bool         m_start_loading_thumbnail = false;
     bool         m_load_sdcard_thumbnail = false;
-    int          m_last_sdcard    = -1;
-    int          m_last_recording = -1;
-    int          m_last_timelapse = -1;
     int          m_last_extrusion = -1;
-    int          m_last_vcamera   = -1;
     int          m_model_mall_request_count = 0;
     bool         m_is_load_with_temp = false;
     json         m_rating_result;
@@ -719,6 +779,10 @@ protected:
     int cali_stage;
     PrintingTaskType m_current_print_mode = PrintingTaskType::NOT_CLEAR;
 
+    bool   m_project_task_showing_task{false};
+    bool   m_project_task_need_repaint{false};
+    wxSize m_project_task_last_size;
+
     void init_scaled_buttons();
     void create_tasklist_info();
     void show_task_list_info(bool show = true);
@@ -732,6 +796,7 @@ protected:
     void on_print_error_clean(wxCommandEvent &event);
     void error_info_reset();
     void refreshProjectTaskLayout();
+    void repaint_project_task_if_needed();
     void show_recenter_dialog();
 
     /* axis control */
@@ -769,13 +834,6 @@ protected:
     void show_new_official_filament_dlg(const std::string& dev_id, const std::string& ams_id, const std::string& slot_id);
     void dismiss_filament_hint_ui(const std::string& dev_id, const std::string& ams_id, const std::string& slot_id);
     void on_ext_spool_edit(wxCommandEvent &event);
-    void open_rfid_view(int ams_id, int slot_id,
-                        const std::string& setting_id, int ctype,
-                        const wxString& filament, const wxColour& color,
-                        const std::vector<wxColour>& cols,
-                        const std::string& temp_min, const std::string& temp_max,
-                        const std::string& sn_number, const wxString& k_val,
-                        wxPoint pos);
     void on_filament_extrusion_cali(wxCommandEvent &event);
     void on_ams_refresh_rfid(wxCommandEvent &event);
     void on_ams_selected(wxCommandEvent &event);
@@ -797,6 +855,8 @@ protected:
     void on_camera_leave(wxMouseEvent& event);
 
     void on_show_parts_options(wxCommandEvent& event);
+    void on_show_hotend_filament_web(wxCommandEvent& event);
+    void on_show_hotend_filament_html(wxCommandEvent& event);
     /* print options */
     void on_show_print_options(wxCommandEvent &event);
     /* safety options */
@@ -812,6 +872,9 @@ protected:
     void show_printing_status(bool ctrl_area = true, bool temp_area = true);
     void update_basic_print_data(bool def = false);
     void update_model_info();
+    TaskDisplayInfo resolve_task_display_info(const std::string &task_id, const std::string &subtask_name,
+                                              const BBLModelTask *model_task) const;
+    void update_task_display_info(MachineObject *obj);
     void update_subtask(MachineObject* obj);
     void update_partskip_subtask(MachineObject *obj);
     void update_cloud_subtask(MachineObject *obj);
@@ -819,6 +882,7 @@ protected:
     void update_temp_ctrl(MachineObject *obj);
     void update_misc_ctrl(MachineObject *obj);
     void update_ams(MachineObject* obj);
+    void update_calib_history(MachineObject* obj);
     void update_filament_loading_panel(MachineObject* obj);
 
     void update_extruder_status(MachineObject* obj);
@@ -826,6 +890,17 @@ protected:
     void update_rack(MachineObject* obj);
     void update_cali(MachineObject* obj);
     void update_calib_bitmap();
+
+    /* M2Y*/
+    bool CanShowHotendFilamentPanel(MachineObject* obj) const;
+    bool ShowHotendFilamentPanel(MachineObject* obj);
+    bool CloseHotendFilamentPanel();
+    bool CanShowHotendFilamentDialog(MachineObject* obj) const;
+    void ShowHotendFilamentDialog(MachineObject* obj);
+    void CloseHotendFilamentDialog();
+    bool CanShowHotendFilamentHtmlDialog(MachineObject* obj) const;
+    void ShowHotendFilamentHtmlDialog(MachineObject* obj);
+    void CloseHotendFilamentHtmlDialog();
 
     void update_market_scoring(bool show);
     void reset_printing_values();
@@ -848,6 +923,9 @@ protected:
 public:
     void update_error_message();
     void show_ams_filament_hint(const std::string& ams_id, const std::string& slot_id);
+    void open_new_official_filament_hint(const std::string& ams_id, const std::string& slot_id);
+    void apply_control_area_force_disable();
+    void sync_current_dev(MachineObject *obj);
 
 public:
     StatusPanel(wxWindow *      parent,
@@ -874,7 +952,6 @@ public:
     long           last_tray_is_bbl_bits{ -1 };
     long           last_read_done_bits{ -1 };
     long           last_reading_bits { -1 };
-    long           last_ams_version { -1 };
     std::optional<int> last_cali_version;
 
     enum ThumbnailState task_thumbnail_state {ThumbnailState::PLACE_HOLDER};
@@ -887,6 +964,7 @@ public:
     void set_hold_count(int& count);
 
     void rescale_camera_icons();
+    void update_camera_title_bar_theme();
     void on_sys_color_changed();
     void msw_rescale();
 };
