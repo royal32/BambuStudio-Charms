@@ -1,4 +1,5 @@
 #include "slic3r/GUI/StudioAssistantModel.hpp"
+#include "slic3r/GUI/StudioAssistantProfiles.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Format/STL.hpp"
@@ -11,6 +12,15 @@ using namespace Slic3r::GUI::Assistant;
 template<class F> void rejects(F&& fn) { bool rejected=false; try { fn(); } catch (...) { rejected=true; } assert(rejected); }
 int main(int argc,char** argv)
 {
+    // Profile filtering depends on the native config definitions. Keep it in
+    // this linked-model suite so standalone client tests need no slicer build.
+    const auto profile_config=DynamicPrintConfig::full_print_config();
+    assert(readable_profile_parameter("nozzle_temperature",*profile_config.def()->get("nozzle_temperature")));
+    assert(readable_profile_parameter("filament_type",*profile_config.def()->get("filament_type")));
+    ConfigOptionDef text_parameter;text_parameter.type=coString;
+    assert(!readable_profile_parameter("bed_custom_model",text_parameter));
+    assert(!readable_profile_parameter("printhost_apikey",text_parameter));
+    assert(!readable_profile_parameter("machine_start_gcode",text_parameter));
     set_resources_dir(std::string(PROJECT_RESOURCES));
     boost::filesystem::create_directories(PROJECT_TEST_TMP);
     set_temporary_dir(PROJECT_TEST_TMP); set_data_dir(PROJECT_TEST_TMP);

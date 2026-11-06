@@ -286,4 +286,3 @@ def names(family, category, original_plates, root):
             base = p['name'][:-3] if suffix else p['name']
             p['name'] = base + ' Design ' + str(numbers[p['name'].casefold()]) + suffix
     return plates
-

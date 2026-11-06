@@ -147,7 +147,7 @@ The final app remains staged separately from the working installed apps. The Win
 did not answer an SSH connection attempt, so this follow-up has no fresh Windows
 build or live Windows UI validation.
 
-Review artifacts (code through `ff3b4215b`):
+Review artifacts (code through `a33267c23`):
 
 - ARM: `build/arm64/Assistant-Experience-Ready/BambuStudio.app`.
 - Intel archive: `build/x86_64/BambuStudio-Charms-Intel-macOS12.zip`, SHA-256
@@ -158,7 +158,7 @@ Review artifacts (code through `ff3b4215b`):
 
 ## Appearance follow-up
 
-Code through `d713896d5` fixes Cocoa's separately filled text views inside chat
+Code through `3188f6f51` fixes Cocoa's separately filled text views inside chat
 cards, vertically centers the header controls, and matches the sparkle button
 to its final toolbar container after Notebook reparents it. Native chat checks
 pass on ARM and the actual macOS 12.6 Intel Mac. Visual inspection on the Apple Silicon Mac

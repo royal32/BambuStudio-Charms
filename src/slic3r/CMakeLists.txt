@@ -325,6 +325,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/StudioAssistant.hpp
     GUI/StudioAssistantActions.cpp
     GUI/StudioAssistantWorkbench.cpp
+    GUI/StudioAssistantWorkbenchTools.cpp
     GUI/StudioAssistantActions.hpp
     GUI/StudioAssistantClient.cpp
     GUI/StudioAssistantClient.hpp

@@ -1,5 +1,4 @@
 #include "slic3r/GUI/StudioAssistantClient.hpp"
-#include "slic3r/GUI/StudioAssistantProfiles.hpp"
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 #include <openssl/bn.h>
@@ -215,13 +214,6 @@ int main()
     assert(geometry_names.count("inspect_printers") && !changes_project("inspect_printers"));
     assert(geometry_names.count("inspect_profile_settings") && !changes_project("inspect_profile_settings"));
     assert(geometry_names.count("part_map_view") && !changes_project("part_map_view"));
-    const auto profile_config=Slic3r::DynamicPrintConfig::full_print_config();
-    assert(readable_profile_parameter("nozzle_temperature",*profile_config.def()->get("nozzle_temperature")));
-    assert(readable_profile_parameter("filament_type",*profile_config.def()->get("filament_type")));
-    Slic3r::ConfigOptionDef text_parameter;text_parameter.type=Slic3r::coString;
-    assert(!readable_profile_parameter("bed_custom_model",text_parameter));
-    assert(!readable_profile_parameter("printhost_apikey",text_parameter));
-    assert(!readable_profile_parameter("machine_start_gcode",text_parameter));
     assert(!changes_project("surface_view") && !changes_project("slice_layer_view") && !changes_project("review_print"));
     for (const auto& tool : tools.at(0).at("tools")) assert(tool.at("name") != "send_print");
     auto call=[](const std::string& name,const Json& args,const std::string& call_id="call_1") {

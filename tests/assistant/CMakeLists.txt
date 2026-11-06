@@ -15,7 +15,8 @@ else()
 endif()
 add_executable(studio-assistant-tests ../studio_assistant.test.cpp
     "${ROOT}/src/slic3r/GUI/StudioAssistantClient.cpp"
-    "${ROOT}/src/slic3r/GUI/StudioAssistantTools.cpp")
+    "${ROOT}/src/slic3r/GUI/StudioAssistantTools.cpp"
+    "${ROOT}/src/slic3r/GUI/StudioAssistantWorkbenchTools.cpp")
 target_include_directories(studio-assistant-tests PRIVATE "${ROOT}/src" ${Boost_INCLUDE_DIRS})
 target_link_libraries(studio-assistant-tests PRIVATE OpenSSL::Crypto ${ASSISTANT_CURL})
 target_compile_definitions(studio-assistant-tests PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)

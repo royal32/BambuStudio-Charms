@@ -28,7 +28,7 @@ total and should stay until the updates have had normal use.
 
 ## Older app copies
 
-All paths are relative to `<repository>/`:
+All paths are relative to the repository root:
 
 ```text
 build/arm64/Installed-Backup-20261028

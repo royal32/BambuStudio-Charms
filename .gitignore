@@ -47,3 +47,7 @@ resources/web/device_page/index.html
 /tools/library-console/target/
 **/__pycache__/
 
+# Local Windows review installs and account-bearing test profiles.
+/install-windows/
+/test-profile/
+

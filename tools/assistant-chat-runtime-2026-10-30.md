@@ -1,7 +1,7 @@
 # Assistant chat containment and environment awareness — October 30, 2026
 
-Both `/Applications/BambuStudio.app` copies (the ARM Mac and the Intel
-macOS 12.6 Intel Mac) are updated. Their previous bundles are preserved. Both use
+Both `/Applications/BambuStudio.app` copies (the ARM Mac and the Intel Mac
+running macOS 12.6) are updated. Their previous bundles are preserved. Both use
 the existing Apple Development signing identity and app identifier.
 
 ## Changes
